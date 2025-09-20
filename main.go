@@ -14,7 +14,7 @@ import (
 
 func main() {
 	// 命令行参数
-	var configPath = flag.String("config", "", "配置文件路径")
+	var configPath = flag.String("f", "", "配置文件路径")
 	var help = flag.Bool("help", false, "显示帮助信息")
 	flag.Parse()
 
@@ -23,10 +23,19 @@ func main() {
 		return
 	}
 
+	// 如果没有指定配置文件，尝试默认文件
 	if *configPath == "" {
-		fmt.Println("错误：必须指定配置文件路径")
-		fmt.Println("使用 -help 查看帮助信息")
-		os.Exit(1)
+		*configPath = findDefaultConfig()
+		if *configPath == "" {
+			fmt.Println("错误：未找到默认配置文件")
+			fmt.Println("请使用 -f 指定配置文件路径，或确保存在以下文件之一：")
+			fmt.Println("  - tests/server.toml")
+			fmt.Println("  - tests/client.toml")
+			fmt.Println("  - config.toml")
+			fmt.Println("使用 -help 查看帮助信息")
+			os.Exit(1)
+		}
+		fmt.Printf("使用配置文件: %s\n", *configPath)
 	}
 
 	// 解析配置文件
@@ -61,22 +70,46 @@ func main() {
 	fmt.Println("设备已停止")
 }
 
+// findDefaultConfig 查找默认配置文件
+func findDefaultConfig() string {
+	// 按优先级顺序查找配置文件
+	defaultConfigs := []string{
+		"tests/server.toml",
+		"tests/client.toml",
+		"config.toml",
+	}
+
+	for _, configFile := range defaultConfigs {
+		if _, err := os.Stat(configFile); err == nil {
+			return configFile
+		}
+	}
+
+	return ""
+}
+
 // showHelp 显示帮助信息
 func showHelp() {
 	fmt.Println("WireGuard-like VPN 设备")
 	fmt.Println()
 	fmt.Println("用法:")
-	fmt.Printf("  %s -config <配置文件路径>\n", os.Args[0])
+	fmt.Printf("  %s [-f <配置文件路径>]\n", os.Args[0])
 	fmt.Println()
 	fmt.Println("参数:")
-	fmt.Println("  -config string")
-	fmt.Println("        配置文件路径 (必需)")
+	fmt.Println("  -f string")
+	fmt.Println("        配置文件路径 (可选，会自动查找默认文件)")
 	fmt.Println("  -help")
 	fmt.Println("        显示此帮助信息")
 	fmt.Println()
+	fmt.Println("默认配置文件查找顺序:")
+	fmt.Println("  1. tests/server.toml")
+	fmt.Println("  2. tests/client.toml")
+	fmt.Println("  3. config.toml")
+	fmt.Println()
 	fmt.Println("示例:")
-	fmt.Printf("  %s -config tests/server.toml\n", os.Args[0])
-	fmt.Printf("  %s -config tests/client.toml\n", os.Args[0])
+	fmt.Printf("  %s                    # 使用默认配置文件\n", os.Args[0])
+	fmt.Printf("  %s -f tests/server.toml\n", os.Args[0])
+	fmt.Printf("  %s -f tests/client.toml\n", os.Args[0])
 }
 
 // showStartupInfo 显示启动信息

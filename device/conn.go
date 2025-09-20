@@ -39,12 +39,14 @@ func (d *Device) handleTUNData() {
 func (d *Device) startListener() error {
 	addr := fmt.Sprintf(":%d", d.config.Interface.ListenPort)
 
+	fmt.Printf("启动服务器监听: %s\n", addr)
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
 	}
 
 	d.listener = listener
+	fmt.Printf("服务器监听启动成功: %s\n", addr)
 	return nil
 }
 
@@ -161,26 +163,37 @@ func (d *Device) handleNetworkConnections() {
 func (d *Device) handleTLSConnection(conn net.Conn) {
 	defer conn.Close()
 
+	fmt.Printf("收到新的客户端连接: %s\n", conn.RemoteAddr().String())
+
 	// 创建 TLS 连接
 	tlsConn := tls.Server(conn, d.tlsConfig)
 	defer tlsConn.Close()
 
 	// TLS握手
+	fmt.Printf("开始服务器TLS握手: %s\n", conn.RemoteAddr().String())
 	if err := tlsConn.Handshake(); err != nil {
+		fmt.Printf("服务器TLS握手失败: %v\n", err)
 		return
 	}
+	fmt.Printf("服务器TLS握手成功: %s\n", conn.RemoteAddr().String())
 
 	// 自定义握手协议
+	fmt.Printf("开始服务器自定义握手: %s\n", conn.RemoteAddr().String())
 	clientID, err := d.performCustomHandshake(tlsConn)
 	if err != nil {
+		fmt.Printf("服务器自定义握手失败: %v\n", err)
 		return
 	}
+	fmt.Printf("服务器自定义握手成功: %s\n", conn.RemoteAddr().String())
 
 	// 将客户端ID转换为字符串作为peerKey
 	peerKey := string(clientID)
+	fmt.Printf("客户端ID: %s\n", peerKey[:8])
 
 	// 更新对端连接信息
 	d.updatePeerConnection(peerKey, tlsConn)
+
+	fmt.Printf("客户端连接建立成功: %s\n", peerKey[:8])
 
 	// 开始处理协议消息
 	d.handleProtocolMessages(tlsConn, peerKey)
@@ -311,6 +324,7 @@ func (d *Device) updatePeerDisconnection(peerKey string) {
 
 	// 移除 TLS 连接
 	if conn, exists := d.connections[peerKey]; exists {
+		fmt.Printf("客户端连接断开: %s\n", peerKey[:8])
 		conn.Close()
 		delete(d.connections, peerKey)
 	}

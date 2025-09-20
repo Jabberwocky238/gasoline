@@ -200,9 +200,9 @@ func (d *Device) IsIPInAllowedRange(ip net.IP) bool {
 		return false
 	}
 
-	// 如果是广播或多播包，总是允许
+	// 如果是广播或多播包，暂时不允许，避免循环
 	if IsBroadcastOrMulticast(ip) {
-		return true
+		return false
 	}
 
 	d.indexMutex.RLock()

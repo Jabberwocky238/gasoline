@@ -26,9 +26,8 @@ func (d *Device) HandleOutbound(data []byte) {
 
 	// 检查是否为广播或多播包
 	if IsBroadcastOrMulticast(ipHeader.DestIP) {
-		fmt.Printf("处理广播/多播包: %s\n", ipHeader.DestIP.String())
-		// 广播包需要特殊处理，发送给所有对端
-		d.broadcastToAllPeers(data)
+		fmt.Printf("跳过广播/多播包: %s\n", ipHeader.DestIP.String())
+		// 广播包暂时跳过，避免在没有对端时造成循环
 		return
 	}
 

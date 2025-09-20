@@ -199,8 +199,9 @@ func (d *Device) HandleInbound(msg *ProtocolMessage, tlsConn *tls.Conn) error {
 
 		// 检查是否为广播或多播包
 		if IsBroadcastOrMulticast(ipHeader.DestIP) {
-			fmt.Printf("处理入站广播/多播包: %s\n", ipHeader.DestIP.String())
-			// 广播包需要写入TUN设备，让系统处理
+			fmt.Printf("跳过入站广播/多播包: %s\n", ipHeader.DestIP.String())
+			// 广播包暂时跳过，避免循环
+			return nil
 		}
 
 		// 创建或更新连接元数据

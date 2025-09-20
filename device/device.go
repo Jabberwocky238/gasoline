@@ -19,7 +19,6 @@ import (
 // PeerInfo 对端信息
 type PeerInfo struct {
 	UniqueID   string
-	Ip         net.IP
 	AllowedIPs net.IPNet
 	Endpoint   net.Addr
 }
@@ -67,7 +66,8 @@ func NewDevice(cfg *config.Config, tunName string) (*Device, error) {
 	defer device.indexMutex.Unlock()
 
 	for _, peer := range device.config.Peers {
-		ip, allowedIPs, err := net.ParseCIDR(peer.AllowedIPs)
+		// AllowedIPs是对端允许使用的IP范围，不是对端自己的IP
+		_, allowedIPs, err := net.ParseCIDR(peer.AllowedIPs)
 		if err != nil {
 			return nil, fmt.Errorf("解析允许IPs失败: %v", err)
 		}
@@ -81,7 +81,6 @@ func NewDevice(cfg *config.Config, tunName string) (*Device, error) {
 		}
 		device.indexMap[peer.UniqueID] = &PeerInfo{
 			UniqueID:   peer.UniqueID,
-			Ip:         ip,
 			AllowedIPs: *allowedIPs,
 			Endpoint:   endpoint,
 		}

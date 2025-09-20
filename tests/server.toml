@@ -1,12 +1,12 @@
 [Interface]
-PrivateKey = "kP3gpdm72QExS/uwfVS/+H88IkMTaMD38GNgNpecyxc="
+UniqueID = "kP3gpdm72QExS/uwfVS/+H88IkMTaMD38GNgNpecyxc="
 ListenPort = 51820
 Address = "10.0.0.1/24"
 
 [[Peer]]
-PublicKey = "uLSvhLaefcFG8EB/jAaioIKz9YhpoJ3JinbK+m+O8Ec="
+UniqueID = "uLSvhLaefcFG8EB/jAaioIKz9YhpoJ3JinbK+m+O8Ec="
 AllowedIPs = "10.0.0.2/32"
 
 [[Peer]]
-PublicKey = "lCcCFRczyZ5f4y3PBoLccBdjMGzGjz8rU6RCcHXuTio="
+UniqueID = "lCcCFRczyZ5f4y3PBoLccBdjMGzGjz8rU6RCcHXuTio="
 AllowedIPs = "10.0.0.3/32"

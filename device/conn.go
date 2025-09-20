@@ -99,7 +99,7 @@ func (d *Device) handleTLSConnection(conn net.Conn) {
 	if err != nil {
 		return
 	}
-
+	// Start-Process powershell -Verb runAs
 	// 更新对端连接信息
 	d.updatePeerConnection(peerKey, tlsConn)
 }

@@ -7,7 +7,7 @@ import "wwww/tun"
 func (d *Device) initializeTUN() error {
 	// 这里需要根据实际的 TUN 实现来调用
 	// 假设有一个 CreateTUN 函数
-	tunDevice, err := tun.CreateTUN(d.config.Interface.Address, 0)
+	tunDevice, err := tun.CreateTUN("tun0", 0)
 	if err != nil {
 		return err
 	}

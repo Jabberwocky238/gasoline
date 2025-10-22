@@ -1,8 +1,10 @@
 [Interface]
-UniqueID = "uLSvhLaefcFG8EB/jAaioIKz9YhpoJ3JinbK+m+O8Ec="
-Address = "10.0.0.2/32"
+PrivateKey = "sDy6PGozYyAzXlAZEyWyPtpibexfi08uvPg9pQBknn0="
+Address = "10.0.0.1/32"
 
 [[Peer]]
-UniqueID = "kP3gpdm72QExS/uwfVS/+H88IkMTaMD38GNgNpecyxc="
-AllowedIPs = "10.0.0.1/24"
-Endpoint = "127.0.0.1:51820"
+PublicKey = "S7gePhdPibDJLgDWbRq65wwudzMgpR3vy/RsERaVtys="
+AllowedIPs = "10.0.0.2/24"
+# Endpoint = "127.0.0.1:47789"
+Endpoint = "172.29.70.44:47789"
+# Endpoint = "170.106.143.75:47789"

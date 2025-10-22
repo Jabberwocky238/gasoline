@@ -15,27 +15,27 @@ func TestParseConfigFromString(t *testing.T) {
 			name: "server config with no endpoints",
 			config: `
 [Interface]
-UniqueID = "kP3gpdm72QExS/uwfVS/+H88IkMTaMD38GNgNpecyxc="
+PrivateKey = "kP3gpdm72QExS/uwfVS/+H88IkMTaMD38GNgNpecyxc="
 ListenPort = 51820
 Address = "10.0.0.1/24"
 
 [[Peer]]
-UniqueID = "uLSvhLaefcFG8EB/jAaioIKz9YhpoJ3JinbK+m+O8Ec="
+PublicKey = "uLSvhLaefcFG8EB/jAaioIKz9YhpoJ3JinbK+m+O8Ec="
 AllowedIPs = "10.0.0.2/32"
 
 [[Peer]]
-UniqueID = "lCcCFRczyZ5f4y3PBoLccBdjMGzGjz8rU6RCcHXuTio="
+PublicKey = "lCcCFRczyZ5f4y3PBoLccBdjMGzGjz8rU6RCcHXuTio="
 AllowedIPs = "10.0.0.3/32"
 `,
 			expected: map[string]interface{}{
-				"interface_unique_id":   "kP3gpdm72QExS/uwfVS/+H88IkMTaMD38GNgNpecyxc=",
+				"interface_private_key": "kP3gpdm72QExS/uwfVS/+H88IkMTaMD38GNgNpecyxc=",
 				"interface_listen_port": 51820,
 				"interface_address":     "10.0.0.1/24",
 				"peers_count":           2,
-				"peer1_unique_id":       "uLSvhLaefcFG8EB/jAaioIKz9YhpoJ3JinbK+m+O8Ec=",
+				"peer1_public_key":      "uLSvhLaefcFG8EB/jAaioIKz9YhpoJ3JinbK+m+O8Ec=",
 				"peer1_allowed_ips":     "10.0.0.2/32",
 				"peer1_endpoint":        "",
-				"peer2_unique_id":       "lCcCFRczyZ5f4y3PBoLccBdjMGzGjz8rU6RCcHXuTio=",
+				"peer2_public_key":      "lCcCFRczyZ5f4y3PBoLccBdjMGzGjz8rU6RCcHXuTio=",
 				"peer2_allowed_ips":     "10.0.0.3/32",
 				"peer2_endpoint":        "",
 			},
@@ -44,20 +44,20 @@ AllowedIPs = "10.0.0.3/32"
 			name: "client config with endpoint",
 			config: `
 [Interface]
-UniqueID = "uLSvhLaefcFG8EB/jAaioIKz9YhpoJ3JinbK+m+O8Ec="
+PublicKey = "uLSvhLaefcFG8EB/jAaioIKz9YhpoJ3JinbK+m+O8Ec="
 Address = "10.0.0.2/32"
 
 [[Peer]]
-UniqueID = "kP3gpdm72QExS/uwfVS/+H88IkMTaMD38GNgNpecyxc="
+PublicKey = "kP3gpdm72QExS/uwfVS/+H88IkMTaMD38GNgNpecyxc="
 AllowedIPs = "10.0.0.1/24"
 Endpoint = "127.0.0.1:51820"
 `,
 			expected: map[string]interface{}{
-				"interface_unique_id":   "uLSvhLaefcFG8EB/jAaioIKz9YhpoJ3JinbK+m+O8Ec=",
+				"interface_public_key":  "uLSvhLaefcFG8EB/jAaioIKz9YhpoJ3JinbK+m+O8Ec=",
 				"interface_listen_port": 0,
 				"interface_address":     "10.0.0.2/32",
 				"peers_count":           1,
-				"peer1_unique_id":       "kP3gpdm72QExS/uwfVS/+H88IkMTaMD38GNgNpecyxc=",
+				"peer1_public_key":      "kP3gpdm72QExS/uwfVS/+H88IkMTaMD38GNgNpecyxc=",
 				"peer1_allowed_ips":     "10.0.0.1/24",
 				"peer1_endpoint":        "127.0.0.1:51820",
 			},
@@ -66,36 +66,36 @@ Endpoint = "127.0.0.1:51820"
 			name: "mixed config with some endpoints",
 			config: `
 [Interface]
-UniqueID = "server123"
+PublicKey = "server123"
 ListenPort = 51820
 Address = "10.0.0.1/24"
 
 [[Peer]]
-UniqueID = "client1"
+PublicKey = "client1"
 AllowedIPs = "10.0.0.2/32"
 Endpoint = "192.168.1.100:51820"
 
 [[Peer]]
-UniqueID = "client2"
+PublicKey = "client2"
 AllowedIPs = "10.0.0.3/32"
 
 [[Peer]]
-UniqueID = "server2"
+PublicKey = "server2"
 AllowedIPs = "10.0.0.4/32"
 Endpoint = "192.168.1.200:51820"
 `,
 			expected: map[string]interface{}{
-				"interface_unique_id":   "server123",
+				"interface_public_key":  "server123",
 				"interface_listen_port": 51820,
 				"interface_address":     "10.0.0.1/24",
 				"peers_count":           3,
-				"peer1_unique_id":       "client1",
+				"peer1_public_key":      "client1",
 				"peer1_allowed_ips":     "10.0.0.2/32",
 				"peer1_endpoint":        "192.168.1.100:51820",
-				"peer2_unique_id":       "client2",
+				"peer2_public_key":      "client2",
 				"peer2_allowed_ips":     "10.0.0.3/32",
 				"peer2_endpoint":        "",
-				"peer3_unique_id":       "server2",
+				"peer3_public_key":      "server2",
 				"peer3_allowed_ips":     "10.0.0.4/32",
 				"peer3_endpoint":        "192.168.1.200:51820",
 			},
@@ -110,8 +110,8 @@ Endpoint = "192.168.1.200:51820"
 			}
 
 			// 检查Interface配置
-			if config.Interface.UniqueID != tt.expected["interface_unique_id"] {
-				t.Errorf("Interface.UniqueID = %v, 期望 %v", config.Interface.UniqueID, tt.expected["interface_unique_id"])
+			if config.Interface.PrivateKey != tt.expected["interface_private_key"] {
+				t.Errorf("Interface.PrivateKey = %v, 期望 %v", config.Interface.PrivateKey, tt.expected["interface_private_key"])
 			}
 			if config.Interface.ListenPort != tt.expected["interface_listen_port"] {
 				t.Errorf("Interface.ListenPort = %v, 期望 %v", config.Interface.ListenPort, tt.expected["interface_listen_port"])
@@ -128,12 +128,12 @@ Endpoint = "192.168.1.200:51820"
 			// 检查每个Peer的配置
 			for i, peer := range config.Peers {
 				peerNum := i + 1
-				uniqueIDKey := fmt.Sprintf("peer%d_unique_id", peerNum)
+				publicKeyKey := fmt.Sprintf("peer%d_public_key", peerNum)
 				allowedIPsKey := fmt.Sprintf("peer%d_allowed_ips", peerNum)
 				endpointKey := fmt.Sprintf("peer%d_endpoint", peerNum)
 
-				if peer.UniqueID != tt.expected[uniqueIDKey] {
-					t.Errorf("Peer%d.UniqueID = %v, 期望 %v", peerNum, peer.UniqueID, tt.expected[uniqueIDKey])
+				if peer.PublicKey != tt.expected[publicKeyKey] {
+					t.Errorf("Peer%d.PublicKey = %v, 期望 %v", peerNum, peer.PublicKey, tt.expected[publicKeyKey])
 				}
 				if peer.AllowedIPs != tt.expected[allowedIPsKey] {
 					t.Errorf("Peer%d.AllowedIPs = %v, 期望 %v", peerNum, peer.AllowedIPs, tt.expected[allowedIPsKey])
@@ -157,11 +157,11 @@ func TestEndpointParsing(t *testing.T) {
 	// 测试空endpoint的情况
 	config := `
 [Interface]
-UniqueID = "test"
+PublicKey = "test"
 Address = "10.0.0.1/24"
 
 [[Peer]]
-UniqueID = "peer1"
+PublicKey = "peer1"
 AllowedIPs = "10.0.0.2/32"
 `
 
@@ -197,13 +197,13 @@ func TestRealConfigFiles(t *testing.T) {
 	}
 
 	t.Logf("Server配置:")
-	t.Logf("  Interface.UniqueID = %s", serverConfig.Interface.UniqueID)
+	t.Logf("  Interface.PrivateKey = %s", serverConfig.Interface.PrivateKey)
 	t.Logf("  Interface.ListenPort = %d", serverConfig.Interface.ListenPort)
 	t.Logf("  Peers数量 = %d", len(serverConfig.Peers))
 
 	for i, peer := range serverConfig.Peers {
 		t.Logf("  Peer%d:", i+1)
-		t.Logf("    UniqueID = %s", peer.UniqueID)
+		t.Logf("    PublicKey = %s", peer.PublicKey)
 		t.Logf("    AllowedIPs = %s", peer.AllowedIPs)
 		t.Logf("    Endpoint = '%s' (长度: %d)", peer.Endpoint, len(peer.Endpoint))
 
@@ -220,13 +220,13 @@ func TestRealConfigFiles(t *testing.T) {
 	}
 
 	t.Logf("\nClient配置:")
-	t.Logf("  Interface.UniqueID = %s", clientConfig.Interface.UniqueID)
+	t.Logf("  Interface.PrivateKey = %s", clientConfig.Interface.PrivateKey)
 	t.Logf("  Interface.ListenPort = %d", clientConfig.Interface.ListenPort)
 	t.Logf("  Peers数量 = %d", len(clientConfig.Peers))
 
 	for i, peer := range clientConfig.Peers {
 		t.Logf("  Peer%d:", i+1)
-		t.Logf("    UniqueID = %s", peer.UniqueID)
+		t.Logf("    PublicKey = %s", peer.PublicKey)
 		t.Logf("    AllowedIPs = %s", peer.AllowedIPs)
 		t.Logf("    Endpoint = '%s' (长度: %d)", peer.Endpoint, len(peer.Endpoint))
 

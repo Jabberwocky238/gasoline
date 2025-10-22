@@ -1,268 +1,214 @@
 package device
 
 import (
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"fmt"
-	"math/big"
 	"net"
+	"net/netip"
 	"sync"
 	"time"
-
 	"wwww/config"
-	"wwww/tun"
+
+	singTun "github.com/jabberwocky238/sing-tun"
+	"github.com/sirupsen/logrus"
 )
 
-// PeerInfo 对端信息
-type PeerInfo struct {
-	UniqueID   string
-	AllowedIPs net.IPNet
-	Endpoint   net.Addr
+type genericQueue struct {
+	queue chan []byte
+	wg    sync.WaitGroup
 }
 
-// Device 设备结构体
+func newGenericQueue() *genericQueue {
+	q := &genericQueue{
+		queue: make(chan []byte, 1024),
+		wg:    sync.WaitGroup{},
+	}
+	q.wg.Add(1)
+	go func() {
+		q.wg.Wait()
+		close(q.queue)
+	}()
+	return q
+}
+
 type Device struct {
-	// 配置信息
-	config *config.Config
+	cfg *config.Config
+	tun singTun.Tun
 
-	// TUN 接口
-	tun tun.Device
+	peers map[PublicKey]*Peer
 
-	// 对端映射表 (公钥 -> PeerInfo)
-	indexMap   map[string]*PeerInfo
-	indexMutex sync.RWMutex
-
-	// 对端 TLS 连接映射表 (公钥 -> TLS连接)
-	connections map[string]*tls.Conn
-	connMutex   sync.RWMutex
-
-	// 网络监听
-	listener  net.Listener
-	tlsConfig *tls.Config
-
-	// 控制通道
-	stopChan chan struct{}
-	wg       sync.WaitGroup
-
-	// 连接管理器
-	connectionManager *ConnectionManager
-}
-
-// NewDevice 创建新的设备实例
-func NewDevice(cfg *config.Config, tunName string) (*Device, error) {
-	device := &Device{
-		config:            cfg,
-		indexMap:          make(map[string]*PeerInfo),
-		connections:       make(map[string]*tls.Conn),
-		stopChan:          make(chan struct{}),
-		connectionManager: NewConnectionManager(),
+	key struct {
+		privateKey PrivateKey
+		publicKey  PublicKey
 	}
 
-	// 初始化对端映射表
-	device.indexMutex.Lock()
-	defer device.indexMutex.Unlock()
+	allowedips AllowedIPs
 
-	for _, peer := range device.config.Peers {
-		// AllowedIPs是对端允许使用的IP范围，不是对端自己的IP
-		_, allowedIPs, err := net.ParseCIDR(peer.AllowedIPs)
+	endpoint struct {
+		local net.IP
+	}
+
+	queue struct {
+		inbound  *genericQueue
+		outbound *genericQueue
+	}
+
+	log *logrus.Logger
+}
+
+func NewDevice(cfg *config.Config, tun singTun.Tun) *Device {
+	device := new(Device)
+	device.log = logrus.New()
+	device.log.SetLevel(logrus.DebugLevel)
+	device.log.SetFormatter(&logrus.TextFormatter{
+		FullTimestamp: true,
+	})
+
+	device.cfg = cfg
+	device.tun = tun
+
+	var privateKey PrivateKey
+	if err := privateKey.FromBase64(device.cfg.Interface.PrivateKey); err != nil {
+		device.log.Errorf("Failed to parse private key: %v", err)
+		return nil
+	}
+	device.key.privateKey = privateKey
+	device.key.publicKey = privateKey.PublicKey()
+
+	prefix, err := netip.ParsePrefix(device.cfg.Interface.Address)
+	if err != nil {
+		device.log.Errorf("Failed to parse interface address: %v", err)
+		return nil
+	}
+	localIp := prefix.Addr().AsSlice()
+	device.endpoint.local = localIp
+	device.log.Debugf("Device local IP %s", net.IP(localIp).String())
+
+	device.peers = make(map[PublicKey]*Peer)
+	for _, peerConfig := range device.cfg.Peers {
+		peer, err := device.NewPeer(&peerConfig)
 		if err != nil {
-			return nil, fmt.Errorf("解析允许IPs失败: %v", err)
+			device.log.Errorf("Failed to create peer: %v", err)
+			continue
 		}
-		var endpoint net.Addr
-		if peer.Endpoint != "" {
-			var err error
-			endpoint, err = net.ResolveTCPAddr("tcp", peer.Endpoint)
+		device.peers[peer.key.publicKey] = peer
+		device.allowedips.Insert(peer.allowedIPs, peer)
+	}
+
+	return device
+}
+
+func (device *Device) Start() error {
+	device.log.Debugf("Starting device")
+	err := device.tun.Start()
+	if err != nil {
+		device.log.Errorf("Failed to start tun: %v", err)
+		return err
+	}
+	device.queue.inbound = newGenericQueue()
+	device.queue.outbound = newGenericQueue()
+
+	for _, peer := range device.peers {
+		err := peer.Start()
+		if err != nil {
+			device.log.Errorf("Failed to start peer %s: %v", peer.endpoint.local.String(), err)
+			continue
+		}
+	}
+
+	if device.cfg.Interface.ListenPort > 0 {
+		go device.RoutineListenPort()
+	}
+
+	go device.RoutineReadFromTUN()
+	go device.RoutineWriteToTUN()
+	go device.RoutineBoardcast()
+
+	return nil
+}
+
+func (device *Device) Close() {
+	device.log.Debugf("Closing device")
+	device.queue.inbound.wg.Done()
+	device.queue.outbound.wg.Done()
+}
+
+func (device *Device) RoutineListenPort() error {
+	defer func() {
+		device.log.Debugf("Routine: listen port - stopped")
+	}()
+	device.log.Debugf("Routine: listen port - started")
+
+	listener, err := net.ListenTCP("tcp4", &net.TCPAddr{
+		IP:   net.ParseIP("0.0.0.0"),
+		Port: device.cfg.Interface.ListenPort,
+	})
+	if err != nil {
+		device.log.Errorf("Failed to listen on port %d: %v", device.cfg.Interface.ListenPort, err)
+		return err
+	}
+
+	defer listener.Close()
+
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			device.log.Errorf("Failed to accept connection: %v", err)
+			continue
+		}
+		device.log.Debugf("Accepted connection from %s", conn.RemoteAddr().String())
+		go func() {
+			var buf = make([]byte, net.IPv4len)
+			n, err := conn.Read(buf)
 			if err != nil {
-				return nil, fmt.Errorf("解析端点失败: %v", err)
+				device.log.Errorf("Failed to read from connection: %v", err)
+				return
 			}
-		}
-		device.indexMap[peer.UniqueID] = &PeerInfo{
-			UniqueID:   peer.UniqueID,
-			AllowedIPs: *allowedIPs,
-			Endpoint:   endpoint,
-		}
-	}
-
-	// 生成自签名证书
-	cert, err := generateSelfSignedCert()
-	if err != nil {
-		return nil, fmt.Errorf("生成自签名证书失败: %v", err)
-	}
-
-	device.tlsConfig = &tls.Config{
-		Certificates:       []tls.Certificate{cert},
-		ClientAuth:         tls.NoClientCert, // 不需要客户端证书
-		MinVersion:         tls.VersionTLS12,
-		InsecureSkipVerify: true, // 跳过证书验证，用于测试
-	}
-
-	// 初始化 TUN 设备
-	if err := device.initializeTUN(tunName); err != nil {
-		return nil, fmt.Errorf("初始化 TUN 设备失败: %v", err)
-	}
-
-	return device, nil
-}
-
-// Start 启动设备
-func (d *Device) Start() error {
-	// 检查是否为服务器模式（有ListenPort）
-	if d.config.Interface.ListenPort > 0 {
-		// 启动网络监听
-		if err := d.startListener(); err != nil {
-			return fmt.Errorf("启动监听失败: %v", err)
-		}
-
-		// 启动处理协程
-		d.wg.Add(2)
-		go d.handleNetworkConnections()
-		go d.handleTUNData()
-	} else {
-		// 客户端模式，启动TUN数据处理和主动连接
-		d.wg.Add(1)
-		go d.handleTUNData()
-
-	}
-	// 主动连接到有endpoint的peers
-	go d.connectToPeers()
-
-	return nil
-}
-
-// connectToPeers 连接到所有有endpoint的peers
-func (d *Device) connectToPeers() {
-	d.indexMutex.RLock()
-	peers := make([]*PeerInfo, 0)
-	for _, peer := range d.indexMap {
-		// 只连接有endpoint的peers，且不是自己
-		if peer.Endpoint != nil && peer.UniqueID != d.config.Interface.UniqueID {
-			peers = append(peers, peer)
-		}
-	}
-	d.indexMutex.RUnlock()
-
-	if len(peers) == 0 {
-		return
-	}
-
-	// 连接到每个peer
-	for _, peer := range peers {
-		go func(p *PeerInfo) {
-			for {
-				select {
-				case <-d.stopChan:
-					return
-				default:
-					if err := d.connectToPeer(p); err != nil {
-						time.Sleep(5 * time.Second)
-						continue
-					}
-					// 连接成功，退出重试循环
-					return
-				}
+			if n == 0 {
+				return
 			}
-		}(peer)
-	}
-}
-
-// Stop 停止设备
-func (d *Device) Stop() error {
-	close(d.stopChan)
-
-	// 关闭所有 peer 连接
-	d.connMutex.Lock()
-	for peerKey, conn := range d.connections {
-		conn.Close()
-		delete(d.connections, peerKey)
-	}
-	d.connMutex.Unlock()
-
-	// 关闭监听器
-	if d.listener != nil {
-		d.listener.Close()
-	}
-
-	// 关闭 TUN 设备
-	if d.tun != nil {
-		d.tun.Close()
-	}
-
-	// 等待所有协程结束
-	d.wg.Wait()
-
-	return nil
-}
-
-// findPeerByIP 根据IP地址查找对应的对端连接
-func (d *Device) findPeerByIP(destIP net.IP) *tls.Conn {
-	d.indexMutex.RLock()
-	d.connMutex.RLock()
-	defer d.indexMutex.RUnlock()
-	defer d.connMutex.RUnlock()
-
-	fmt.Printf("查找目标IP %s 对应的对端连接\n", destIP.String())
-	fmt.Printf("当前对端数量: %d\n", len(d.indexMap))
-	fmt.Printf("当前连接数量: %d\n", len(d.connections))
-
-	// 遍历所有对端，检查目的IP是否在允许的IP范围内
-	for peerKey, peer := range d.indexMap {
-		fmt.Printf("检查对端 %s: AllowedIPs=%s\n", peerKey[:8], peer.AllowedIPs.String())
-		if peer.AllowedIPs.Contains(destIP) {
-			fmt.Printf("目标IP %s 在对端 %s 的允许范围内\n", destIP.String(), peerKey[:8])
-			if conn, exists := d.connections[peerKey]; exists {
-				fmt.Printf("找到对端连接: %s\n", peerKey[:8])
-				return conn
-			} else {
-				fmt.Printf("对端 %s 没有活跃连接\n", peerKey[:8])
+			ciphertext := buf[:n]
+			plaintext := Decrypt(ciphertext, device.key.privateKey)
+			targetIp := net.IP(plaintext)
+			peer := device.allowedips.Lookup(targetIp)
+			if peer == nil {
+				device.log.Errorf("Peer not found for IP %s", targetIp.String())
+				return
 			}
-		}
-	}
+			peer.conn.Lock()
+			peer.conn.tcp = conn.(*net.TCPConn)
+			peer.conn.Unlock()
+			peer.isConnected = true
 
-	fmt.Printf("未找到目标IP %s 对应的对端连接\n", destIP.String())
-	return nil
+			device.log.Debugf("Connected to peer %s", peer.endpoint.local.String())
+			go peer.RoutineSequentialSender()
+			go peer.RoutineSequentialReceiver()
+		}()
+	}
 }
 
-// generateSelfSignedCert 生成自签名证书
-func generateSelfSignedCert() (tls.Certificate, error) {
-	// 生成私钥
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		return tls.Certificate{}, err
-	}
+func (device *Device) RoutineBoardcast() error {
+	defer func() {
+		device.log.Debugf("Routine: boardcast - stopped")
+	}()
+	device.log.Debugf("Routine: boardcast - started")
 
-	// 创建证书模板
-	template := x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject: pkix.Name{
-			Organization:  []string{"WireGuard-like VPN"},
-			Country:       []string{"US"},
-			Province:      []string{""},
-			Locality:      []string{"San Francisco"},
-			StreetAddress: []string{""},
-			PostalCode:    []string{""},
-		},
-		NotBefore:   time.Now(),
-		NotAfter:    time.Now().Add(365 * 24 * time.Hour), // 1年有效期
-		KeyUsage:    x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
-		DNSNames:    []string{"localhost"},
-	}
+	for {
+		// 对所有peer进行Boardcast
+		for _, peer := range device.peers {
+			if !peer.isConnected {
+				continue
+			}
+			packet := manualPacket(device.endpoint.local, peer.endpoint.local)
+			if packet == nil {
+				device.log.Errorf("Failed to create packet for peer %s", peer.endpoint.local.String())
+				continue
+			}
+			// 发送到peer的inbound队列，通过TCP发送给对端
+			device.log.Debugf("Sending packet to queue for peer %s, length: %d", peer.endpoint.local.String(), len(packet))
+			peer.queue.inbound.queue <- packet
+			device.log.Debugf("Boardcast packet to peer %s, queue length: %d", peer.endpoint.local.String(), len(peer.queue.inbound.queue))
+			// device.log.Debugf("Boardcast packet to peer %s, queue length: %d", peer.endpoint.local.String(), len(peer.queue.inbound.queue))
+		}
 
-	// 生成证书
-	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &priv.PublicKey, priv)
-	if err != nil {
-		return tls.Certificate{}, err
+		time.Sleep(3 * time.Second)
 	}
-
-	// 创建TLS证书
-	cert := tls.Certificate{
-		Certificate: [][]byte{certDER},
-		PrivateKey:  priv,
-	}
-
-	return cert, nil
 }

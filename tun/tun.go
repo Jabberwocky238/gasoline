@@ -1,53 +1,151 @@
-/* SPDX-License-Identifier: MIT
- *
- * Copyright (C) 2017-2025 WireGuard LLC. All Rights Reserved.
- */
-
 package tun
 
 import (
-	"os"
+	"fmt"
+	"net/netip"
+
+	"wwww/config"
+	"wwww/tun/common/log"
+
+	singTun "github.com/jabberwocky238/sing-tun"
+	// "github.com/metacubex/sing/common/ranges"
 )
 
-type Event int
+const DefaultMTU = 1500
 
-const (
-	EventUp = 1 << iota
-	EventDown
-	EventMTUUpdate
-)
+// Start-Process cmd -Verb RunAs
+func NewTun(tunName string, config *config.Config) (singTun.Tun, error) {
+	InetAddress := netip.MustParsePrefix(config.Interface.Address)
+	var allowedIPs []netip.Prefix
+	for _, peer := range config.Peers {
+		allowedIP, err := netip.ParsePrefix(peer.AllowedIPs)
+		if err != nil {
+			return nil, err
+		}
+		allowedIPs = append(allowedIPs, allowedIP)
+	}
 
-type Device interface {
-	// File returns the file descriptor of the device.
-	File() *os.File
+	InetAddress, err := calcAddressAndMask(InetAddress, allowedIPs)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Printf("InetAddress: %v\n", InetAddress)
 
-	// Read one or more packets from the Device (without any additional headers).
-	// On a successful read it returns the number of packets read, and sets
-	// packet lengths within the sizes slice. len(sizes) must be >= len(bufs).
-	// A nonzero offset can be used to instruct the Device on where to begin
-	// reading into each element of the bufs slice.
-	Read(bufs [][]byte, sizes []int, offset int) (n int, err error)
+	var Inet4Address []netip.Prefix
+	var Inet6Address []netip.Prefix
+	var Inet4Gateway netip.Addr
+	var Inet6Gateway netip.Addr
+	if InetAddress.Addr().Is4() {
+		Inet4Address = []netip.Prefix{InetAddress}
+	} else if InetAddress.Addr().Is6() {
+		Inet6Address = []netip.Prefix{InetAddress}
+	} else {
+		return nil, fmt.Errorf("unknown address type")
+	}
+	// Gateway就是InetAddress
+	// if InetAddress.Addr().Is4() {
+	// 	Inet4Gateway = netip.AddrFrom4(InetAddress.Addr().As4())
+	// } else {
+	// 	Inet6Gateway = netip.AddrFrom16(InetAddress.Addr().As16())
+	// }
 
-	// Write one or more packets to the device (without any additional headers).
-	// On a successful write it returns the number of packets written. A nonzero
-	// offset can be used to instruct the Device on where to begin writing from
-	// each packet contained within the bufs slice.
-	Write(bufs [][]byte, offset int) (int, error)
+	// SING-TUN
+	networkUpdateMonitor, err := singTun.NewNetworkUpdateMonitor(log.SingLogger)
+	if err != nil {
+		return nil, err
+	}
+	interfaceMonitorOptions := singTun.DefaultInterfaceMonitorOptions{
+		OverrideAndroidVPN: false,
+	}
+	interfaceMonitor, err := singTun.NewDefaultInterfaceMonitor(networkUpdateMonitor, log.SingLogger, interfaceMonitorOptions)
+	if err != nil {
+		return nil, fmt.Errorf("create DefaultInterfaceMonitor: %v", err)
+	}
 
-	// MTU returns the MTU of the Device.
-	MTU() (int, error)
+	tunOptions := singTun.Options{
+		Name:         tunName,
+		Inet4Address: Inet4Address,
+		Inet6Address: Inet6Address,
+		MTU:          DefaultMTU, // 使用标准MTU大小
+		GSO:          false,      // 在Linux下禁用GSO以避免兼容性问题
+		AutoRoute:    true,       // 启用自动路由配置
+		Inet4Gateway: Inet4Gateway,
+		Inet6Gateway: Inet6Gateway,
+		// DNSServers: []netip.Addr{},
+		IPRoute2TableIndex:     singTun.DefaultIPRoute2TableIndex,
+		IPRoute2RuleIndex:      singTun.DefaultIPRoute2RuleIndex,
+		AutoRedirectMarkMode:   false,
+		AutoRedirectInputMark:  singTun.DefaultAutoRedirectInputMark,
+		AutoRedirectOutputMark: singTun.DefaultAutoRedirectOutputMark,
+		// Inet4LoopbackAddress: []netip.Addr{
+		// 	netip.MustParseAddr("127.0.0.1"),
+		// },
+		// Inet6LoopbackAddress: []netip.Addr{
+		// 	netip.MustParseAddr("::1"),
+		// },
+		StrictRoute: false,
+		// Inet4RouteAddress: []netip.Prefix{
+		// 	netip.MustParsePrefix("10.0.0.1/24"),
+		// },
+		// Inet6RouteAddress: []netip.Prefix{
+		// 	netip.MustParsePrefix("2001:db8::1/24"),
+		// },
+		// Inet4RouteExcludeAddress: []netip.Prefix{},
+		// Inet6RouteExcludeAddress: []netip.Prefix{},
+		// IncludeInterface:         []string{},
+		// ExcludeInterface:         []string{},
+		// IncludeUID:               []ranges.Range[uint32]{},
+		// ExcludeUID:               []ranges.Range[uint32]{},
+		// ExcludeSrcPort:           []ranges.Range[uint16]{},
+		// ExcludeDstPort:           []ranges.Range[uint16]{},
+		// IncludeAndroidUser:       []int{},
+		// IncludePackage:           []string{},
+		// ExcludePackage:           []string{},
+		InterfaceMonitor: interfaceMonitor,
+		// EXP_RecvMsgX:             false,
+		// EXP_SendMsgX:             false,
+		Logger: log.SingLogger,
+	}
 
-	// Name returns the current name of the Device.
-	Name() (string, error)
+	tunIf, err := tunNew(tunOptions)
+	if err != nil {
+		log.Errorln("Error creating tun: %v", err)
+		return nil, err
+	}
+	return tunIf, nil
+}
 
-	// Events returns a channel of type Event, which is fed Device events.
-	Events() <-chan Event
+func calcAddressAndMask(interfaceAddress netip.Prefix, allowedIPs []netip.Prefix) (netip.Prefix, error) {
+	// 获取接口IP地址
+	addr := interfaceAddress.Addr()
 
-	// Close stops the Device and closes the Event channel.
-	Close() error
+	// 过滤出与interfaceAddress在同一网段的allowedIPs
+	var sameNetworkIPs []netip.Prefix
+	for _, allowedIP := range allowedIPs {
+		// 检查两个IP是否在同一网段（使用较短的掩码）
+		minBits := interfaceAddress.Bits()
+		if allowedIP.Bits() < minBits {
+			minBits = allowedIP.Bits()
+		}
+		network1 := netip.PrefixFrom(interfaceAddress.Addr(), minBits).Masked()
+		network2 := netip.PrefixFrom(allowedIP.Addr(), minBits).Masked()
+		if network1 == network2 {
+			sameNetworkIPs = append(sameNetworkIPs, allowedIP)
+		}
+	}
 
-	// BatchSize returns the preferred/max number of packets that can be read or
-	// written in a single read/write call. BatchSize must not change over the
-	// lifetime of a Device.
-	BatchSize() int
+	// 如果没有同网段的IP，使用接口地址
+	if len(sameNetworkIPs) == 0 {
+		return interfaceAddress, nil
+	}
+
+	// 计算最短子网掩码（最大前缀长度）
+	minBits := interfaceAddress.Bits()
+	for _, ip := range sameNetworkIPs {
+		if ip.Bits() < minBits {
+			minBits = ip.Bits()
+		}
+	}
+
+	return netip.PrefixFrom(addr, minBits), nil
 }

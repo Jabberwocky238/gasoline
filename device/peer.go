@@ -77,20 +77,29 @@ func (p *Peer) Start() error {
 		// tcp connection
 		p.conn.Lock()
 
-		// 设置连接超时和本地地址绑定
-		dialer := &net.Dialer{
-			Timeout: 5 * time.Second,
-			// 可以绑定到特定本地IP（如果需要）
-			// LocalAddr: &net.TCPAddr{IP: net.ParseIP("10.0.0.1")},
+		// 添加重试机制
+		var conn net.Conn
+		var err error
+		maxRetries := 3
+		for i := 0; i < maxRetries; i++ {
+			p.device.log.Debugf("Attempting connection %d/%d to %s", i+1, maxRetries, p.endpoint.remote.String())
+			conn, err = net.DialTimeout("tcp", p.endpoint.remote.String(), 3*time.Second)
+			if err == nil {
+				break
+			}
+			p.device.log.Warnf("Connection attempt %d failed: %v", i+1, err)
+			if i < maxRetries-1 {
+				time.Sleep(2 * time.Second) // 重试前等待2秒
+			}
 		}
-		conn, err := dialer.Dial("tcp4", p.endpoint.remote.String())
+
 		if err != nil {
-			p.device.log.Errorf("Failed to connect to peer endpoint %s: %v", p.endpoint.remote.String(), err)
+			p.device.log.Errorf("Failed to connect to peer endpoint %s after %d attempts: %v", p.endpoint.remote.String(), maxRetries, err)
 			p.conn.Unlock()
 			return err
 		}
 
-		p.device.log.Debugf("Successfully connected to %s", p.endpoint.remote.String())
+		// p.device.log.Debugf("Successfully connected to %s", p.endpoint.remote.String())
 
 		var buf = make([]byte, net.IPv4len)
 		plaintext := make([]byte, len(p.device.endpoint.local))
@@ -130,7 +139,7 @@ func (p *Peer) RoutineSequentialSender() {
 				p.device.log.Debugf("Queue closed, stopping sender")
 				return
 			}
-			p.device.log.Debugf("Sending packet to peer %s, length: %d", p.endpoint.local.String(), len(packet))
+			// p.device.log.Debugf("Sending packet to peer %s, length: %d", p.endpoint.local.String(), len(packet))
 
 			ciphertext := Encrypt(packet, p.key.publicKey)
 
@@ -142,7 +151,7 @@ func (p *Peer) RoutineSequentialSender() {
 				p.isConnected = false
 				return
 			}
-			p.device.log.Debugf("Successfully sent packet to peer %s", p.endpoint.local.String())
+			// p.device.log.Debugf("Successfully sent packet to peer %s", p.endpoint.local.String())
 		}
 	}
 }

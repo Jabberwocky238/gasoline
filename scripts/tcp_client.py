@@ -60,7 +60,7 @@ def test_tcp_connection(host="10.0.0.1", port=80, source_ip=None):
 if __name__ == "__main__":
     # 解析命令行参数
     host = sys.argv[1] if len(sys.argv) > 1 else "10.0.0.8"
-    host = sys.argv[1] if len(sys.argv) > 1 else "170.106.143.75"
+    host = sys.argv[1] if len(sys.argv) > 1 else "69.164.244.81"
     port = int(sys.argv[2]) if len(sys.argv) > 2 else 47789
     source_ip = sys.argv[3] if len(sys.argv) > 3 else None
     

@@ -1,6 +1,12 @@
 tuntest:
 	go run cmd/tuntest/main.go
 
+dialtest:
+	go run cmd/dialtest/main.go -w=true
+
+dialtest-no:
+	go run cmd/dialtest/main.go -w=false
+
 build: $(wildcard **/*.go)
 	go build -o build/run.exe main.go
 	GOOS=linux GOARCH=amd64 go build -o build/run main.go

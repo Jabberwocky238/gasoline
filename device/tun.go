@@ -84,7 +84,7 @@ func (device *Device) RoutineWriteToTUN() {
 	for {
 		select {
 		case packet := <-device.queue.outbound.queue:
-			device.log.Debugf("RoutineWriteToTUN: received packet, length: %d", len(packet))
+			// device.log.Debugf("RoutineWriteToTUN: received packet, length: %d", len(packet))
 			ipVersion := packet[0] >> 4
 			switch ipVersion {
 			case 4:

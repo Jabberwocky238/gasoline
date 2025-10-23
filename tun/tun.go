@@ -33,8 +33,8 @@ func NewTun(tunName string, config *config.Config) (singTun.Tun, error) {
 
 	var Inet4Address []netip.Prefix
 	var Inet6Address []netip.Prefix
-	var Inet4Gateway netip.Addr
-	var Inet6Gateway netip.Addr
+	// var Inet4Gateway netip.Addr
+	// var Inet6Gateway netip.Addr
 	if InetAddress.Addr().Is4() {
 		Inet4Address = []netip.Prefix{InetAddress}
 	} else if InetAddress.Addr().Is6() {
@@ -68,28 +68,24 @@ func NewTun(tunName string, config *config.Config) (singTun.Tun, error) {
 		Inet6Address: Inet6Address,
 		MTU:          DefaultMTU, // 使用标准MTU大小
 		GSO:          false,      // 在Linux下禁用GSO以避免兼容性问题
-		AutoRoute:    true,       // 启用自动路由配置
-		Inet4Gateway: Inet4Gateway,
-		Inet6Gateway: Inet6Gateway,
+		AutoRoute:    false,      // 禁用自动路由配置，使用手动路由
+		// Inet4Gateway: Inet4Gateway,  // 模仿wireguard行为
+		// Inet6Gateway: Inet6Gateway,  // 模仿wireguard行为
 		// DNSServers: []netip.Addr{},
 		IPRoute2TableIndex:     singTun.DefaultIPRoute2TableIndex,
 		IPRoute2RuleIndex:      singTun.DefaultIPRoute2RuleIndex,
 		AutoRedirectMarkMode:   false,
 		AutoRedirectInputMark:  singTun.DefaultAutoRedirectInputMark,
 		AutoRedirectOutputMark: singTun.DefaultAutoRedirectOutputMark,
-		// Inet4LoopbackAddress: []netip.Addr{
-		// 	netip.MustParseAddr("127.0.0.1"),
-		// },
-		// Inet6LoopbackAddress: []netip.Addr{
-		// 	netip.MustParseAddr("::1"),
-		// },
-		StrictRoute: false,
-		// Inet4RouteAddress: []netip.Prefix{
-		// 	netip.MustParsePrefix("10.0.0.1/24"),
-		// },
-		// Inet6RouteAddress: []netip.Prefix{
-		// 	netip.MustParsePrefix("2001:db8::1/24"),
-		// },
+		Inet4LoopbackAddress: []netip.Addr{
+			netip.MustParseAddr("127.0.0.1"),
+		},
+		Inet6LoopbackAddress: []netip.Addr{
+			netip.MustParseAddr("::1"),
+		},
+		StrictRoute:       false,
+		Inet4RouteAddress: Inet4Address, // 只路由VPN网段的流量，不劫持所有流量
+		Inet6RouteAddress: Inet6Address, // 只路由VPN网段的流量，不劫持所有流量
 		// Inet4RouteExcludeAddress: []netip.Prefix{},
 		// Inet6RouteExcludeAddress: []netip.Prefix{},
 		// IncludeInterface:         []string{},

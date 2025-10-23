@@ -160,9 +160,11 @@ func (device *Device) RoutineListenPort() error {
 			n, err := conn.Read(buf)
 			if err != nil {
 				device.log.Errorf("Failed to read from connection: %v", err)
+				conn.Close()
 				return
 			}
 			if n == 0 {
+				conn.Close()
 				return
 			}
 			ciphertext := buf[:n]
@@ -173,9 +175,7 @@ func (device *Device) RoutineListenPort() error {
 				device.log.Errorf("Peer not found for IP %s", targetIp.String())
 				return
 			}
-			peer.conn.Lock()
 			peer.conn.tcp = conn.(*net.TCPConn)
-			peer.conn.Unlock()
 			peer.isConnected = true
 
 			device.log.Debugf("Connected to peer %s", peer.endpoint.local.String())
@@ -203,9 +203,8 @@ func (device *Device) RoutineBoardcast() error {
 				continue
 			}
 			// 发送到peer的inbound队列，通过TCP发送给对端
-			device.log.Debugf("Sending packet to queue for peer %s, length: %d", peer.endpoint.local.String(), len(packet))
+			// device.log.Debugf("Sending packet to queue for peer %s, length: %d", peer.endpoint.local.String(), len(packet))
 			peer.queue.inbound.queue <- packet
-			device.log.Debugf("Boardcast packet to peer %s, queue length: %d", peer.endpoint.local.String(), len(peer.queue.inbound.queue))
 			// device.log.Debugf("Boardcast packet to peer %s, queue length: %d", peer.endpoint.local.String(), len(peer.queue.inbound.queue))
 		}
 

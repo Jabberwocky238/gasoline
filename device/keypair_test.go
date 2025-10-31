@@ -33,6 +33,7 @@ func TestKeypair(t *testing.T) {
 	}
 }
 
+// go test -v ./device -run TestKeypairGeneration
 func TestKeypairGeneration(t *testing.T) {
 	// 测试密钥生成
 	privatekey, err := NewPrivateKey()
@@ -51,4 +52,6 @@ func TestKeypairGeneration(t *testing.T) {
 
 	t.Logf("Generated private key: %x", privatekey[:])
 	t.Logf("Generated public key: %x", publickey[:])
+	t.Logf("Generated private key base64: %s", privatekey.ToBase64())
+	t.Logf("Generated public key base64: %s", publickey.ToBase64())
 }

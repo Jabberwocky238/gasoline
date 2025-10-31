@@ -33,8 +33,7 @@ type Peer struct {
 	}
 
 	queue struct {
-		// outbound *genericQueue  // 发送给peer的包
-		inbound *genericQueue // 从TUN读取的包，需要发送给其他peer
+		inbound *genericQueue
 	}
 
 	//legacy
@@ -186,7 +185,7 @@ func (p *Peer) RoutineSequentialReceiver() {
 		}
 		ciphertext := packet[:n]
 		plaintext := Decrypt(ciphertext, p.device.key.privateKey)
-		p.device.log.Debugf("Received packet from peer %s, length: %d, sending to outbound queue", p.endpoint.local.String(), n)
-		p.device.queue.outbound.queue <- plaintext
+		// p.device.log.Debugf("Received packet from peer %s, length: %d, sending to outbound queue", p.endpoint.local.String(), n)
+		p.device.queue.routing.queue <- plaintext
 	}
 }

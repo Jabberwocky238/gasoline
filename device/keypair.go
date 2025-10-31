@@ -67,6 +67,10 @@ func (sk *PrivateKey) FromBase64(src string) (err error) {
 	return nil
 }
 
+func (sk *PrivateKey) ToBase64() string {
+	return base64.StdEncoding.EncodeToString(sk[:])
+}
+
 func (pk *PublicKey) FromBase64(src string) (err error) {
 	key, err := parseKeyBase64(src)
 	if err != nil {
@@ -74,6 +78,10 @@ func (pk *PublicKey) FromBase64(src string) (err error) {
 	}
 	copy(pk[:], key[:])
 	return nil
+}
+
+func (pk *PublicKey) ToBase64() string {
+	return base64.StdEncoding.EncodeToString(pk[:])
 }
 
 func (pk *PublicKey) FromHex(src string) (err error) {

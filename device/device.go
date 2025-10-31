@@ -1,6 +1,7 @@
 package device
 
 import (
+	"bytes"
 	"net"
 	"net/netip"
 	"sync"
@@ -9,8 +10,11 @@ import (
 	"wwww/transport"
 	"wwww/transport/tcp"
 
+	"github.com/google/gopacket/layers"
 	singTun "github.com/jabberwocky238/sing-tun"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/net/ipv4"
+	"golang.org/x/net/ipv6"
 )
 
 type genericQueue struct {
@@ -53,8 +57,8 @@ type Device struct {
 	}
 
 	queue struct {
-		inbound  *genericQueue
-		outbound *genericQueue
+		outbound *genericQueue // 进入TUN的包
+		routing  *genericQueue // 需要路由的包
 	}
 
 	log *logrus.Logger
@@ -109,8 +113,8 @@ func (device *Device) Start() error {
 		device.log.Errorf("Failed to start tun: %v", err)
 		return err
 	}
-	device.queue.inbound = newGenericQueue()
 	device.queue.outbound = newGenericQueue()
+	device.queue.routing = newGenericQueue()
 
 	for _, peer := range device.peers {
 		err := peer.Start()
@@ -124,6 +128,7 @@ func (device *Device) Start() error {
 		go device.RoutineListenPort()
 	}
 
+	go device.RoutineRoutingPackets()
 	go device.RoutineReadFromTUN()
 	go device.RoutineWriteToTUN()
 	go device.RoutineBoardcast()
@@ -133,8 +138,8 @@ func (device *Device) Start() error {
 
 func (device *Device) Close() {
 	device.log.Debugf("Closing device")
-	device.queue.inbound.wg.Done()
 	device.queue.outbound.wg.Done()
+	device.queue.routing.wg.Done()
 }
 
 func (device *Device) RoutineListenPort() error {
@@ -222,5 +227,52 @@ func (device *Device) RoutineBoardcast() error {
 		}
 
 		time.Sleep(3 * time.Second)
+	}
+}
+
+func (device *Device) RoutineRoutingPackets() {
+	defer func() {
+		device.log.Debugf("Routine: routing packets - stopped")
+	}()
+
+	device.log.Debugf("Routine: routing packets - started")
+
+	for {
+		packet := <-device.queue.routing.queue
+		ipVersion := packet[0] >> 4
+		length := len(packet)
+
+		// lookup peer
+		var peer *Peer
+		var dst []byte
+		switch ipVersion {
+		case 4:
+			if length < ipv4.HeaderLen {
+				continue
+			}
+			showPacket(device.log, packet, layers.LayerTypeIPv4, "routing")
+			dst = packet[IPv4offsetDst : IPv4offsetDst+net.IPv4len]
+		case 6:
+			if length < ipv6.HeaderLen {
+				continue
+			}
+			showPacket(device.log, packet, layers.LayerTypeIPv6, "routing")
+			dst = packet[IPv6offsetDst : IPv6offsetDst+net.IPv6len]
+		default:
+			device.log.Debugf("Received packet with unknown IP version")
+			continue
+		}
+		// 判断接收者是不是自己
+		if bytes.Equal(dst, device.endpoint.local) {
+			device.queue.outbound.queue <- packet
+			continue
+		}
+		// 查找peer
+		peer = device.allowedips.Lookup(dst)
+		if peer == nil {
+			// device.log.Errorf("Peer not found for IP %s", net.IP(dst).String())
+			continue
+		}
+		peer.queue.inbound.queue <- packet
 	}
 }

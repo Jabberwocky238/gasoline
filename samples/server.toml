@@ -1,9 +1,9 @@
 [Interface]
 PrivateKey = "oPyKessWgQy8EzK1gee54XcyBwmm5KfN8AnAPX9Gx3Q="
 ListenPort = 47789
-Address = "10.0.0.2/24"
+Address = "10.0.0.1/24"
 
 [[Peer]]
 PublicKey = "14nWLDf+tZ6CXwC6WNEq/VWsbOoSr/yggbyRX17goEM="
-AllowedIPs = "10.0.0.1/32"
+AllowedIPs = "10.0.0.2/32"
 

@@ -24,3 +24,6 @@ lt-s:
 
 lt-c:
 	go run main.go -f ./samples/client.toml -n tun0
+
+# go run main.go -f samples/client2.toml -n tun1
+# go run main.go -f samples/client3.toml -n tun0

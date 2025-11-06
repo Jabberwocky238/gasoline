@@ -18,6 +18,16 @@ func showPacket(logger *logrus.Logger, packet []byte, layerType gopacket.LayerTy
 		logger.Debugf("Packet is nil")
 		return
 	}
+	// try to extract transport (UDP/TCP) ports
+	portInfo := ""
+	if udpL := packetObj.Layer(layers.LayerTypeUDP); udpL != nil {
+		udp := udpL.(*layers.UDP)
+		portInfo = fmt.Sprintf(", sport: %s, dport: %s", udp.SrcPort, udp.DstPort)
+	} else if tcpL := packetObj.Layer(layers.LayerTypeTCP); tcpL != nil {
+		tcp := tcpL.(*layers.TCP)
+		portInfo = fmt.Sprintf(", sport: %d, dport: %d", tcp.SrcPort, tcp.DstPort)
+	}
+
 	switch layerType {
 	case layers.LayerTypeIPv4:
 		ipv4Layer := layer.(*layers.IPv4)
@@ -25,14 +35,14 @@ func showPacket(logger *logrus.Logger, packet []byte, layerType gopacket.LayerTy
 		to := ipv4Layer.DstIP.String()
 		protocol := ipv4Layer.Protocol.String()
 		length := ipv4Layer.Length
-		logger.Debugf("%s, IPv4 packet: %s -> %s, %s, length: %d", extraInfo, from, to, protocol, length)
+		logger.Debugf("%s, IPv4: %s -> %s, %s, length: %d%s", extraInfo, from, to, protocol, length, portInfo)
 	case layers.LayerTypeIPv6:
 		ipv6Layer := layer.(*layers.IPv6)
 		from := ipv6Layer.SrcIP.String()
 		to := ipv6Layer.DstIP.String()
 		protocol := ipv6Layer.NextHeader
 		length := ipv6Layer.Length
-		logger.Debugf("%s, IPv6 packet: %s -> %s, %s, length: %d", extraInfo, from, to, protocol, length)
+		logger.Debugf("%s, IPv6: %s -> %s, %s, length: %d%s", extraInfo, from, to, protocol, length, portInfo)
 	default:
 		logger.Debugf("Unknown packet: %v", layer)
 	}

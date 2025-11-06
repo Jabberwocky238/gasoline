@@ -7,6 +7,7 @@ package device
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
@@ -89,15 +90,20 @@ func (pk *PublicKey) FromHex(src string) (err error) {
 	return err
 }
 
-func (sk *PrivateKey) PublicKey() (pk PublicKey) {
-	apk := (*[KeyLength]byte)(&pk)
+func (pk *PublicKey) Sha256() [32]byte {
+	return sha256.Sum256(pk[:])
+}
+
+func (sk *PrivateKey) PublicKey() PublicKey {
+	var pk = new(PublicKey)
+	apk := (*[KeyLength]byte)(pk)
 	ask := (*[KeyLength]byte)(sk)
 	curve25519.ScalarBaseMult(apk, ask)
-	return
+	return *pk
 }
 
 func NewPrivateKey() (sk PrivateKey, err error) {
 	_, err = rand.Read(sk[:])
 	sk.clamp()
-	return
+	return sk, err
 }

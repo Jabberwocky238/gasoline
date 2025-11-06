@@ -27,7 +27,7 @@ type Peer struct {
 
 	conn struct {
 		mu          sync.RWMutex
-		client      transport.TransportClient
+		handshake   *Handshake
 		conn        transport.TransportConn
 		isConnected bool
 	}
@@ -52,7 +52,7 @@ func (d *Device) NewPeer(cfg *config.Peer) (*Peer, error) {
 
 	// transport client
 	peer.conn.mu.Lock()
-	peer.conn.client = tcp.NewTCPClient()
+	peer.conn.handshake = nil
 	peer.conn.isConnected = false
 	peer.conn.mu.Unlock()
 
@@ -89,10 +89,12 @@ func (p *Peer) Start() error {
 		// 添加重试机制
 		var conn transport.TransportConn
 		var err error
+		var client transport.TransportClient = tcp.NewTCPClient()
+
 		maxRetries := 3
 		for i := 0; i < maxRetries; i++ {
 			p.device.log.Debugf("Attempting connection %d/%d to %s", i+1, maxRetries, p.endpoint.remote.String())
-			conn, err = p.conn.client.Dial(p.endpoint.remote.String())
+			conn, err = client.Dial(p.endpoint.remote.String())
 			if err == nil {
 				break
 			}
@@ -109,14 +111,14 @@ func (p *Peer) Start() error {
 		}
 
 		// p.device.log.Debugf("Successfully connected to %s", p.endpoint.remote.String())
-
-		var buf = make([]byte, net.IPv4len)
-		plaintext := make([]byte, len(p.device.endpoint.local))
-		copy(plaintext, p.device.endpoint.local)
-		ciphertext := Encrypt(plaintext, p.device.key.publicKey)
-		copy(buf, ciphertext)
-		conn.Write(buf)
-
+		handshake := NewHandshake(conn, p.device, p)
+		err = handshake.SendHandshake()
+		if err != nil {
+			p.device.log.Errorf("Failed to send handshake to peer endpoint %s: %v", p.endpoint.remote.String(), err)
+			p.conn.mu.Unlock()
+			return err
+		}
+		p.conn.handshake = handshake
 		p.conn.conn = conn
 		p.conn.isConnected = true
 		p.conn.mu.Unlock()
@@ -143,10 +145,7 @@ func (p *Peer) RoutineSequentialSender() {
 
 	for packet := range p.queue.inbound.queue {
 		// p.device.log.Debugf("Sending packet to peer %s, length: %d", p.endpoint.local.String(), len(packet))
-
-		ciphertext := Encrypt(packet, p.key.publicKey)
-
-		_, err := p.conn.conn.Write(ciphertext)
+		_, err := p.conn.conn.Write(packet)
 		if err != nil {
 			p.device.log.Errorf("Failed to send packet: %v", err)
 			p.conn.conn.Close()
@@ -176,9 +175,7 @@ func (p *Peer) RoutineSequentialReceiver() {
 			p.device.log.Debugf("Received packet with length 0 from peer %s", p.endpoint.local.String())
 			continue
 		}
-		ciphertext := packet[:n]
-		plaintext := Decrypt(ciphertext, p.device.key.privateKey)
 		// p.device.log.Debugf("Received packet from peer %s, length: %d, sending to outbound queue", p.endpoint.local.String(), n)
-		p.device.queue.routing.queue <- plaintext
+		p.device.queue.routing.queue <- packet[:n]
 	}
 }

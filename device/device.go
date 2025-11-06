@@ -5,7 +5,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
-	"time"
+	// "time"
 	"wwww/config"
 	"wwww/transport"
 	"wwww/transport/tcp"
@@ -39,13 +39,12 @@ type Device struct {
 	cfg *config.Config
 	tun singTun.Tun
 
-	peers map[PublicKey]*Peer
-
 	key struct {
 		privateKey PrivateKey
 		publicKey  PublicKey
 	}
 
+	peers      map[PublicKey]*Peer
 	allowedips AllowedIPs
 
 	listener struct {
@@ -131,7 +130,7 @@ func (device *Device) Start() error {
 	go device.RoutineRoutingPackets()
 	go device.RoutineReadFromTUN()
 	go device.RoutineWriteToTUN()
-	go device.RoutineBoardcast()
+	// go device.RoutineBoardcast()
 
 	return nil
 }
@@ -171,28 +170,20 @@ func (device *Device) RoutineListenPort() error {
 		}
 		device.log.Debugf("Accepted connection from %s", conn.RemoteAddr().String())
 		go func() {
-			var buf = make([]byte, net.IPv4len)
-			n, err := conn.Read(buf)
+			handshake := NewHandshake(conn, device, nil)
+			publicKey, err := handshake.ReceiveHandshake()
 			if err != nil {
-				device.log.Errorf("Failed to read from connection: %v", err)
-				conn.Close()
+				device.log.Errorf("Failed to receive handshake: %v", err)
 				return
 			}
-			if n == 0 {
-				conn.Close()
-				return
-			}
-			ciphertext := buf[:n]
-			plaintext := Decrypt(ciphertext, device.key.privateKey)
-			targetIp := net.IP(plaintext)
-			peer := device.allowedips.Lookup(targetIp)
+			peer := device.peers[*publicKey]
 			if peer == nil {
-				device.log.Errorf("Peer not found for IP %s", targetIp.String())
+				device.log.Errorf("Peer not found for public key %s", publicKey)
 				return
 			}
-
 			peer.conn.mu.Lock()
 			peer.conn.conn = conn
+			peer.conn.handshake = handshake
 			peer.conn.isConnected = true
 			peer.conn.mu.Unlock()
 
@@ -203,32 +194,32 @@ func (device *Device) RoutineListenPort() error {
 	}
 }
 
-func (device *Device) RoutineBoardcast() error {
-	defer func() {
-		device.log.Debugf("Routine: boardcast - stopped")
-	}()
-	device.log.Debugf("Routine: boardcast - started")
+// func (device *Device) RoutineBoardcast() error {
+// 	defer func() {
+// 		device.log.Debugf("Routine: boardcast - stopped")
+// 	}()
+// 	device.log.Debugf("Routine: boardcast - started")
 
-	for {
-		// 对所有peer进行Boardcast
-		for _, peer := range device.peers {
-			if !peer.conn.isConnected {
-				continue
-			}
-			packet := manualPacket(device.endpoint.local, peer.endpoint.local)
-			if packet == nil {
-				device.log.Errorf("Failed to create packet for peer %s", peer.endpoint.local.String())
-				continue
-			}
-			// 发送到peer的inbound队列，通过TCP发送给对端
-			// device.log.Debugf("Sending packet to queue for peer %s, length: %d", peer.endpoint.local.String(), len(packet))
-			peer.queue.inbound.queue <- packet
-			// device.log.Debugf("Boardcast packet to peer %s, queue length: %d", peer.endpoint.local.String(), len(peer.queue.inbound.queue))
-		}
+// 	for {
+// 		// 对所有peer进行Boardcast
+// 		for _, peer := range device.peers {
+// 			if !peer.conn.isConnected {
+// 				continue
+// 			}
+// 			packet := manualPacket(device.endpoint.local, peer.endpoint.local)
+// 			if packet == nil {
+// 				device.log.Errorf("Failed to create packet for peer %s", peer.endpoint.local.String())
+// 				continue
+// 			}
+// 			// 发送到peer的inbound队列，通过TCP发送给对端
+// 			// device.log.Debugf("Sending packet to queue for peer %s, length: %d", peer.endpoint.local.String(), len(packet))
+// 			peer.queue.inbound.queue <- packet
+// 			// device.log.Debugf("Boardcast packet to peer %s, queue length: %d", peer.endpoint.local.String(), len(peer.queue.inbound.queue))
+// 		}
 
-		time.Sleep(3 * time.Second)
-	}
-}
+// 		time.Sleep(3 * time.Second)
+// 	}
+// }
 
 func (device *Device) RoutineRoutingPackets() {
 	defer func() {

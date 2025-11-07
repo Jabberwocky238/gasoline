@@ -24,7 +24,7 @@ type genericQueue struct {
 
 func newGenericQueue() *genericQueue {
 	q := &genericQueue{
-		queue: make(chan []byte, 1024),
+		queue: make(chan []byte, 10240),
 		wg:    sync.WaitGroup{},
 	}
 	q.wg.Add(1)
@@ -223,6 +223,10 @@ func (device *Device) RoutineListenPort() error {
 // 	}
 // }
 
+var (
+	routingLenPeak = 0
+)
+
 func (device *Device) RoutineRoutingPackets() {
 	defer func() {
 		device.log.Debugf("Routine: routing packets - stopped")
@@ -231,6 +235,8 @@ func (device *Device) RoutineRoutingPackets() {
 	device.log.Debugf("Routine: routing packets - started")
 
 	for packet := range device.queue.routing.queue {
+		// routingLenPeak = max(routingLenPeak, len(device.queue.routing.queue))
+		// device.log.Debugf("queue length: %d, peak length: %d", len(device.queue.routing.queue), routingLenPeak)
 		ipVersion := packet[0] >> 4
 		length := len(packet)
 
@@ -242,13 +248,13 @@ func (device *Device) RoutineRoutingPackets() {
 			if length < ipv4.HeaderLen {
 				continue
 			}
-			device.debugger.v4chan <- packet
+			// device.debugger.v4chan <- packet
 			dst = packet[IPv4offsetDst : IPv4offsetDst+net.IPv4len]
 		case 6:
 			if length < ipv6.HeaderLen {
 				continue
 			}
-			device.debugger.v6chan <- packet
+			// device.debugger.v6chan <- packet
 			dst = packet[IPv6offsetDst : IPv6offsetDst+net.IPv6len]
 		default:
 			device.log.Debugf("Received packet with unknown IP version")

@@ -1,6 +1,7 @@
 package device
 
 import (
+	"bufio"
 	"container/list"
 	"encoding/binary"
 	"net"
@@ -139,29 +140,66 @@ func (p *Peer) Close() error {
 }
 
 func (p *Peer) RoutineSequentialSender() {
-	defer func() {
-		p.device.log.Debugf("Routine: sequential sender - stopped")
-	}()
-	p.device.log.Debugf("Routine: sequential sender - started")
+	// 使用bufio.Writer来缓冲写入，减少系统调用，让TCP可以批量发送
+	// 缓冲区大小设置为64KB，这样可以让TCP层累积多个数据包后一次性发送
+	writer := bufio.NewWriterSize(p.conn.conn, 64*1024)
 
 	var (
 		buf = make([]byte, 1600)
 	)
 
+	// 使用ticker定期刷新缓冲区，避免数据包延迟太久
+	flushTicker := time.NewTicker(10 * time.Millisecond)
+	defer func() {
+		flushTicker.Stop()
+		// 确保退出时刷新缓冲区，避免丢失数据
+		writer.Flush()
+		p.device.log.Debugf("Routine: sequential sender - stopped")
+	}()
+	p.device.log.Debugf("Routine: sequential sender - started")
+
 	for {
 		select {
-		case packet := <-p.queue.inbound.queue:
+		case packet, ok := <-p.queue.inbound.queue:
+			if !ok {
+				// channel已关闭，刷新缓冲区后退出
+				writer.Flush()
+				return
+			}
 			var msg TransportMsg
 			msg.packet = packet
 			msg.size = uint16(len(packet))
 			actualSize := TransportMsgHeaderSize + len(packet)
-			// 序列化到 msgBytes（复用预分配缓冲）
+
+			// 如果缓冲区空间不足，需要更大的缓冲区
+			if actualSize > len(buf) {
+				buf = make([]byte, actualSize)
+			}
+
+			// 序列化到 buf
 			msg.Marshal(buf[:actualSize])
-			// 只复制实际使用的部分
-			_, err := p.conn.conn.Write(buf[:actualSize])
+
+			// 写入到缓冲writer，而不是直接写入连接
+			_, err := writer.Write(buf[:actualSize])
 			if err != nil {
 				p.device.log.Errorf("Failed to send packet: %v", err)
 				return
+			}
+
+			// 如果缓冲区接近满，立即刷新以触发发送
+			if writer.Buffered() > 32*1024 {
+				if err := writer.Flush(); err != nil {
+					p.device.log.Errorf("Failed to flush buffer: %v", err)
+					return
+				}
+			}
+		case <-flushTicker.C:
+			// 定期刷新缓冲区，确保数据包不会延迟太久
+			if writer.Buffered() > 0 {
+				if err := writer.Flush(); err != nil {
+					p.device.log.Errorf("Failed to flush buffer: %v", err)
+					return
+				}
 			}
 		}
 	}

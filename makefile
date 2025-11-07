@@ -13,17 +13,23 @@ build: $(wildcard **/*.go)
 	go build -o build/run.exe main.go
 	GOOS=linux GOARCH=amd64 go build -o build/run main.go
 
-t-s:
+s:
 	go run main.go -f samples/server.toml -n tun1
 
-t-c:
+c:
 	go run main.go -f samples/client.toml -n tun0
 
-lt-s:
+ls:
 	go run main.go -f ./samples/server.toml -n tun1
 
-lt-c:
+lc:
 	go run main.go -f ./samples/client.toml -n tun0
+
+c2:
+	go run main.go -f ./samples/client2.toml -n tun1
+
+c3:
+	go run main.go -f ./samples/client3.toml -n tun0
 
 # go run main.go -f samples/client2.toml -n tun1
 # go run main.go -f samples/client3.toml -n tun0

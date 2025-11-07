@@ -29,7 +29,6 @@ func (device *Device) RoutineReadFromTUN() {
 
 	for {
 		// read packets
-		buf = make([]byte, 1600)
 		length, readErr := device.tun.Read(buf)
 		if readErr != nil {
 			device.log.Errorf("Failed to read packet from TUN device: %v", readErr)
@@ -39,7 +38,10 @@ func (device *Device) RoutineReadFromTUN() {
 			device.log.Debugf("Received packet with length 0 from TUN device")
 			continue
 		}
-		device.queue.routing.queue <- buf[:length]
+		// 复制数据包，确保发送到channel的是独立的副本，避免被下次读取覆盖
+		packet := make([]byte, length)
+		copy(packet, buf[:length])
+		device.queue.routing.queue <- packet
 	}
 }
 

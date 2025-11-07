@@ -35,9 +35,9 @@ func (d *Debugger) Start() {
 		for {
 			select {
 			case packet := <-d.v4chan:
-				showPacket(d.device.log, packet, layers.LayerTypeIPv4, "routing"+strconv.Itoa(len(d.device.queue.routing.queue)))
+				showPacket(d.device.log, packet, layers.LayerTypeIPv4, "routing:"+strconv.Itoa(len(d.device.queue.routing.queue)))
 			case packet := <-d.v6chan:
-				showPacket(d.device.log, packet, layers.LayerTypeIPv6, "routing"+strconv.Itoa(len(d.device.queue.routing.queue)))
+				showPacket(d.device.log, packet, layers.LayerTypeIPv6, "routing:"+strconv.Itoa(len(d.device.queue.routing.queue)))
 			}
 		}
 	}()

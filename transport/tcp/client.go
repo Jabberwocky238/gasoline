@@ -5,10 +5,14 @@ import (
 	"wwww/transport"
 )
 
-type TCPClient struct{}
+type TCPClient struct {
+	conn *net.TCPConn
+}
 
-func NewTCPClient() *TCPClient {
-	return &TCPClient{}
+func NewTCPClient() transport.TransportClient {
+	return &TCPClient{
+		conn: nil,
+	}
 }
 
 func (t *TCPClient) Dial(endpoint string) (transport.TransportConn, error) {
@@ -22,5 +26,10 @@ func (t *TCPClient) Dial(endpoint string) (transport.TransportConn, error) {
 		tcpConn.SetReadBuffer(8 * 1024 * 1024)  // 8MB读缓冲区
 		tcpConn.SetWriteBuffer(8 * 1024 * 1024) // 8MB写缓冲区
 	}
+	t.conn = conn.(*net.TCPConn)
 	return conn, nil
+}
+
+func (t *TCPClient) Close() error {
+	return t.conn.Close()
 }

@@ -12,14 +12,14 @@ import (
 type TCPServer struct {
 	listener *net.TCPListener
 
-	connChan chan net.Conn
+	connChan chan transport.TransportConn
 	ctx      context.Context
 	cancel   context.CancelFunc
 }
 
-func NewTCPServer() *TCPServer {
+func NewTCPServer() transport.TransportServer {
 	return &TCPServer{
-		connChan: make(chan net.Conn, 1024),
+		connChan: make(chan transport.TransportConn, 1024),
 	}
 }
 
@@ -51,9 +51,9 @@ func (t *TCPServer) Accept() (transport.TransportConn, error) {
 	case conn := <-t.connChan:
 		// 优化TCP连接性能
 		if tcpConn, ok := conn.(*net.TCPConn); ok {
-			tcpConn.SetNoDelay(true)                    // 关闭Nagle算法，减少延迟
-			tcpConn.SetReadBuffer(4 * 1024 * 1024)      // 4MB读缓冲区
-			tcpConn.SetWriteBuffer(4 * 1024 * 1024)     // 4MB写缓冲区
+			tcpConn.SetNoDelay(true)                // 关闭Nagle算法，减少延迟
+			tcpConn.SetReadBuffer(4 * 1024 * 1024)  // 4MB读缓冲区
+			tcpConn.SetWriteBuffer(4 * 1024 * 1024) // 4MB写缓冲区
 		}
 		return conn, nil
 	case <-t.ctx.Done():

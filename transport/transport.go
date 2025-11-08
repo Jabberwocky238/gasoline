@@ -10,6 +10,7 @@ type TransportServer interface {
 
 type TransportClient interface {
 	Dial(endpoint string) (TransportConn, error)
+	Close() error
 }
 
 type TransportConn interface {

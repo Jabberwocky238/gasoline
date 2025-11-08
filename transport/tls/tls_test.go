@@ -1,6 +1,7 @@
-package tlstransport
+package tls
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
@@ -40,6 +41,7 @@ func generateSelfSignedCert(host string) (certPEM, keyPEM []byte, err error) {
 func TestTLS(t *testing.T) {
 	host := "127.0.0.1"
 	port := 18081
+	ctx := context.Background()
 
 	certPEM, keyPEM, err := generateSelfSignedCert(host)
 	if err != nil {
@@ -53,13 +55,12 @@ func TestTLS(t *testing.T) {
 	}
 
 	serverCfg := &TLSServerConfig{
-		Host:    host,
-		Port:    port,
 		CertPEM: certPEM,
 		KeyPEM:  keyPEM,
 	}
-	server := NewTLSServer(serverCfg)
-	if err := server.Listen(); err != nil {
+	sctx := context.WithValue(ctx, "cfg", serverCfg)
+	server := NewTLSServer(sctx)
+	if err := server.Listen(host, port); err != nil {
 		t.Fatal(err)
 	}
 	defer server.Close()
@@ -71,8 +72,8 @@ func TestTLS(t *testing.T) {
 			RootCAs:    roots,
 		},
 	}
-	client := NewTLSClient(clientCfg)
-	defer client.Close()
+	cctx := context.WithValue(ctx, "cfg", clientCfg)
+	client := NewTLSClient(cctx)
 
 	// 服务端：简单 echo 处理
 	go func() {
@@ -89,7 +90,7 @@ func TestTLS(t *testing.T) {
 		}
 	}()
 
-	transportConn, err := client.Dial()
+	transportConn, err := client.Dial(clientCfg.Endpoint)
 	if err != nil {
 		t.Fatal(err)
 	}

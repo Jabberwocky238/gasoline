@@ -1,4 +1,4 @@
-package tlstransport
+package tls
 
 import (
 	"crypto/tls"
@@ -6,9 +6,6 @@ import (
 )
 
 type TLSServerConfig struct {
-	Host string
-	Port int
-
 	// 可直接传入 tls.Config；若为 nil 则使用 CertPEM/KeyPEM/ClientCAs 构造
 	TLSConfig *tls.Config
 

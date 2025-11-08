@@ -1,4 +1,4 @@
-package tlstransport
+package tls
 
 import (
 	"context"
@@ -14,24 +14,28 @@ type TLSServer struct {
 	cfg      *TLSServerConfig
 	listener net.Listener
 
-	connChan chan net.Conn
+	connChan chan transport.TransportConn
 	ctx      context.Context
 	cancel   context.CancelFunc
 }
 
-func NewTLSServer(cfg *TLSServerConfig) *TLSServer {
+func NewTLSServer(ctx context.Context) *TLSServer {
+	ctx, cancel := context.WithCancel(ctx)
+	cfg := ctx.Value("cfg").(*TLSServerConfig)
 	return &TLSServer{
 		cfg:      cfg,
-		connChan: make(chan net.Conn, 1024),
+		ctx:      ctx,
+		cancel:   cancel,
+		connChan: make(chan transport.TransportConn, 1024),
 	}
 }
 
-func (t *TLSServer) Listen() error {
+func (t *TLSServer) Listen(host string, port int) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.ctx = ctx
 	t.cancel = cancel
 
-	baseListener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", t.cfg.Host, t.cfg.Port))
+	baseListener, err := net.Listen("tcp", fmt.Sprintf("%s:%d", host, port))
 	if err != nil {
 		return err
 	}
@@ -73,9 +77,7 @@ func (t *TLSServer) acceptLoop() (net.Conn, error) {
 func (t *TLSServer) Accept() (transport.TransportConn, error) {
 	select {
 	case conn := <-t.connChan:
-		return &TransportTLSConn{
-			conn: conn.(*tls.Conn),
-		}, nil
+		return conn, nil
 	case <-t.ctx.Done():
 		return nil, errors.New("server closed")
 	}

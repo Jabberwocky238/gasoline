@@ -11,7 +11,7 @@ import (
 
 func TestTCP(t *testing.T) {
 	server := NewTCPServer()
-	err := server.Listen("127.0.0.1", 8080)
+	err := server.Listen("127.0.0.1", 18080)
 	defer server.Close()
 	if err != nil {
 		t.Fatal(err)
@@ -35,7 +35,7 @@ func TestTCP(t *testing.T) {
 	}()
 
 	client := NewTCPClient()
-	cltConn, err := client.Dial("127.0.0.1:8080")
+	cltConn, err := client.Dial("127.0.0.1:18080")
 	if err != nil {
 		t.Fatal(err)
 	}

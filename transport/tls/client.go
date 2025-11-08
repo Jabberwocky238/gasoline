@@ -1,9 +1,8 @@
-package tlstransport
+package tls
 
 import (
 	"context"
 	"crypto/tls"
-
 	"wwww/transport"
 )
 
@@ -14,11 +13,17 @@ type TLSClient struct {
 	cancel        context.CancelFunc
 }
 
-func NewTLSClient(cfg *TLSClientConfig) *TLSClient {
-	return &TLSClient{cfg: cfg}
+func NewTLSClient(ctx context.Context) transport.TransportClient {
+	ctx, cancel := context.WithCancel(ctx)
+	cfg := ctx.Value("cfg").(*TLSClientConfig)
+	return &TLSClient{
+		cfg:    cfg,
+		ctx:    ctx,
+		cancel: cancel,
+	}
 }
 
-func (t *TLSClient) Dial() (transport.TransportConn, error) {
+func (t *TLSClient) Dial(endpoint string) (transport.TransportConn, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.ctx = ctx
 	t.cancel = cancel
@@ -33,12 +38,12 @@ func (t *TLSClient) Dial() (transport.TransportConn, error) {
 		}
 	}
 
-	conn, err := tls.Dial("tcp", t.cfg.Endpoint, tlsCfg)
+	conn, err := tls.Dial("tcp", endpoint, tlsCfg)
 	if err != nil {
 		t.cancel()
 		return nil, err
 	}
-	t.transportConn = &TransportTLSConn{conn: conn}
+	t.transportConn = conn
 	return t.transportConn, nil
 }
 
@@ -47,7 +52,7 @@ func (t *TLSClient) Close() error {
 		t.cancel()
 	}
 	if t.transportConn != nil {
-		return t.transportConn.conn.Close()
+		return t.transportConn.Close()
 	}
 	return nil
 }

@@ -2,6 +2,7 @@ package device
 
 import (
 	"bytes"
+	"context"
 	"net"
 	"net/netip"
 	"sync"
@@ -9,7 +10,6 @@ import (
 	// "time"
 	"wwww/config"
 	"wwww/transport"
-	"wwww/transport/tcp"
 
 	singTun "github.com/jabberwocky238/sing-tun"
 	"github.com/sirupsen/logrus"
@@ -18,6 +18,7 @@ import (
 )
 
 type Device struct {
+	ctx context.Context
 	cfg *config.Config
 	tun singTun.Tun
 
@@ -48,7 +49,9 @@ type Device struct {
 }
 
 func NewDevice(cfg *config.Config, tun singTun.Tun) *Device {
+	var err error
 	device := new(Device)
+	device.ctx = context.Background()
 	device.log = logrus.New()
 	device.log.SetLevel(logrus.DebugLevel)
 	device.log.SetFormatter(&logrus.TextFormatter{
@@ -58,6 +61,11 @@ func NewDevice(cfg *config.Config, tun singTun.Tun) *Device {
 	device.cfg = cfg
 	device.tun = tun
 	device.pools = NewPool()
+	device.listener.server, err = NewServer(device.ctx, "tcp")
+	if err != nil {
+		device.log.Errorf("Failed to create server: %v", err)
+		return nil
+	}
 
 	var privateKey PrivateKey
 	if err := privateKey.FromBase64(device.cfg.Interface.PrivateKey); err != nil {
@@ -136,20 +144,16 @@ func (device *Device) RoutineListenPort() error {
 	host := "0.0.0.0"
 	port := device.cfg.Interface.ListenPort
 
-	server := tcp.NewTCPServer()
-	err := server.Listen(host, port)
+	err := device.listener.server.Listen(host, port)
 	if err != nil {
 		device.log.Errorf("Failed to listen on port %d: %v", port, err)
 		return err
 	}
 
-	device.listener.mu.Lock()
-	device.listener.server = server
-	device.listener.mu.Unlock()
-	defer server.Close()
+	defer device.listener.server.Close()
 
 	for {
-		conn, err := server.Accept()
+		conn, err := device.listener.server.Accept()
 		if err != nil {
 			device.log.Errorf("Failed to accept connection: %v", err)
 			continue

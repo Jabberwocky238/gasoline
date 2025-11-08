@@ -10,7 +10,6 @@ import (
 	"time"
 	"wwww/config"
 	"wwww/transport"
-	"wwww/transport/tcp"
 )
 
 type Peer struct {
@@ -30,6 +29,7 @@ type Peer struct {
 	conn struct {
 		mu          sync.RWMutex
 		handshake   *Handshake
+		client      transport.TransportClient
 		conn        transport.TransportConn
 		isConnected bool
 	}
@@ -44,9 +44,11 @@ type Peer struct {
 
 func (d *Device) NewPeer(cfg *config.Peer) (*Peer, error) {
 	peer := new(Peer)
+	var err error
+	var endpoint netip.AddrPort
+	var publicKey PublicKey
 
 	// key
-	var publicKey PublicKey
 	if err := publicKey.FromBase64(cfg.PublicKey); err != nil {
 		return nil, err
 	}
@@ -54,13 +56,16 @@ func (d *Device) NewPeer(cfg *config.Peer) (*Peer, error) {
 
 	// transport client
 	peer.conn.mu.Lock()
+	peer.conn.client, err = NewClient(d.ctx, "tcp")
+	if err != nil {
+		return nil, err
+	}
 	peer.conn.handshake = nil
 	peer.conn.isConnected = false
 	peer.conn.mu.Unlock()
 
 	// endpoint
-	var endpoint netip.AddrPort
-	var err error
+
 	if cfg.Endpoint != "" {
 		endpoint, err = netip.ParseAddrPort(cfg.Endpoint)
 		if err != nil {
@@ -91,12 +96,11 @@ func (p *Peer) Start() error {
 		// 添加重试机制
 		var conn transport.TransportConn
 		var err error
-		var client transport.TransportClient = tcp.NewTCPClient()
 
 		maxRetries := 3
 		for i := 0; i < maxRetries; i++ {
 			p.device.log.Debugf("Attempting connection %d/%d to %s", i+1, maxRetries, p.endpoint.remote.String())
-			conn, err = client.Dial(p.endpoint.remote.String())
+			conn, err = p.conn.client.Dial(p.endpoint.remote.String())
 			if err == nil {
 				break
 			}

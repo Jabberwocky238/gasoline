@@ -37,9 +37,7 @@ func TestUDP1(t *testing.T) {
 		}
 	}()
 
-	ccfg := &UDPClientConfig{
-		host: "127.0.0.1",
-	}
+	ccfg := &UDPClientConfig{}
 	cctx := context.WithValue(ctx, "cfg", ccfg)
 	client := NewUDPClient(cctx)
 	cltConn, err := client.Dial("127.0.0.1:8080")
@@ -102,9 +100,7 @@ func TestUDP2(t *testing.T) {
 		}
 	}()
 
-	ccfg := &UDPClientConfig{
-		host: "127.0.0.1",
-	}
+	ccfg := &UDPClientConfig{}
 	cctx := context.WithValue(ctx, "cfg", ccfg)
 	client1 := NewUDPClient(cctx)
 	client2 := NewUDPClient(cctx)

@@ -8,7 +8,6 @@ import (
 )
 
 type UDPClientConfig struct {
-	host string
 }
 
 type UDPClient struct {
@@ -17,7 +16,10 @@ type UDPClient struct {
 }
 
 func NewUDPClient(ctx context.Context) transport.TransportClient {
-	cfg := ctx.Value("cfg").(*UDPClientConfig)
+	cfg, ok := ctx.Value("cfg").(*UDPClientConfig)
+	if !ok {
+		cfg = &UDPClientConfig{}
+	}
 	return &UDPClient{
 		cfg: cfg,
 	}

@@ -11,7 +11,6 @@ import (
 	"wwww/transport"
 	"wwww/transport/tcp"
 
-	"github.com/google/gopacket/layers"
 	singTun "github.com/jabberwocky238/sing-tun"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/net/ipv4"
@@ -231,13 +230,13 @@ func (device *Device) RoutineRoutingPackets() {
 			if length < ipv4.HeaderLen {
 				continue
 			}
-			device.debugger.LogPacket(packet, layers.LayerTypeIPv4)
+			device.debugger.LogPacket(packet, 4)
 			dst = packet[IPv4offsetDst : IPv4offsetDst+net.IPv4len]
 		case 6:
 			if length < ipv6.HeaderLen {
 				continue
 			}
-			device.debugger.LogPacket(packet, layers.LayerTypeIPv6)
+			device.debugger.LogPacket(packet, 6)
 			dst = packet[IPv6offsetDst : IPv6offsetDst+net.IPv6len]
 		default:
 			device.log.Debugf("Received packet with unknown IP version")

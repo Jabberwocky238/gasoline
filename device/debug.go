@@ -36,14 +36,14 @@ func (d *Debugger) LogMsg(msg string) {
 	}
 }
 
-func (d *Debugger) LogPacket(packet []byte, layerType gopacket.LayerType) {
-	if layerType == layers.LayerTypeIPv4 {
+func (d *Debugger) LogPacket(packet []byte, layerType int) {
+	if layerType == 4 {
 		select {
 		case d.v4Chan <- packet:
 		default:
 			// drop packet
 		}
-	} else if layerType == layers.LayerTypeIPv6 {
+	} else if layerType == 6 {
 		select {
 		case d.v6Chan <- packet:
 		default:

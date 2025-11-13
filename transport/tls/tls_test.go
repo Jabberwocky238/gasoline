@@ -1,60 +1,37 @@
 package tls
 
 import (
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/pem"
-	"math/big"
-	"net"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
 
-func generateSelfSignedCert(host string) (certPEM, keyPEM []byte, err error) {
-	priv, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		return nil, nil, err
-	}
-	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(time.Now().UnixNano()),
-		Subject:      pkix.Name{CommonName: host},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(24 * time.Hour),
-		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
-		DNSNames:     []string{host},
-		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
-	}
-	derBytes, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
-	if err != nil {
-		return nil, nil, err
-	}
-	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: derBytes})
-	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv)})
-	return certPEM, keyPEM, nil
-}
-
-func TestTLS(t *testing.T) {
+// go test -v ./transport/tls -run TestTLSWithFile -timeout 5s
+func TestTLSWithFile(t *testing.T) {
 	host := "127.0.0.1"
 	port := 18081
 
-	certPEM, keyPEM, err := generateSelfSignedCert(host)
+	var certPEM, keyPEM []byte
+	var err error
+	pwd, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// 构建 RootCAs 以信任自签证书
-	roots := x509.NewCertPool()
-	if ok := roots.AppendCertsFromPEM(certPEM); !ok {
-		t.Fatal("failed to append self-signed cert to roots")
+	// read from file
+	certPEM, err = os.ReadFile(filepath.Join(pwd, "../..", "samples", "cert.pem"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPEM, err = os.ReadFile(filepath.Join(pwd, "../..", "samples", "key.pem"))
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	serverCfg := &TLSServerConfig{
-		CertPEM: certPEM,
-		KeyPEM:  keyPEM,
+		CertPem: certPEM,
+		KeyPem:  keyPEM,
 	}
 	server := NewTLSServer(serverCfg)
 	if err := server.Listen(host, port); err != nil {
@@ -63,11 +40,9 @@ func TestTLS(t *testing.T) {
 	defer server.Close()
 
 	clientCfg := &TLSClientConfig{
-		Endpoint: host + ":" + "18081",
-		TLSConfig: &tls.Config{
-			ServerName: host,
-			RootCAs:    roots,
-		},
+		ServerName:         host,
+		SNI:                true,
+		InsecureSkipVerify: true, // 跳过自签名证书验证
 	}
 	client := NewTLSClient(clientCfg)
 
@@ -83,10 +58,75 @@ func TestTLS(t *testing.T) {
 		}
 	}()
 
-	transportConn, err := client.Dial(clientCfg.Endpoint)
+	transportConn, err := client.Dial(host + ":" + "18081")
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	buf := make([]byte, 1024)
+	_, err = transportConn.Write([]byte("hello"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rlen, err := transportConn.Read(buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(buf[:rlen]) != "hello" {
+		t.Fatalf("data mismatch: %s != %s", string(buf[:rlen]), "hello")
+	}
+}
+
+// go test -v ./transport/tls -run TestTLSWithSelfSignedCert -timeout 5s
+func TestTLSWithSelfSignedCert(t *testing.T) {
+	host := "127.0.0.1"
+	port := 18081
+
+	certPEM, keyPEM, err := GenerateSelfSignedCert("localhost")
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverCfg := &TLSServerConfig{
+		ServerName: "localhost",
+		CertPem:    certPEM,
+		KeyPem:     keyPEM,
+	}
+	server := NewTLSServer(serverCfg)
+	if err := server.Listen(host, port); err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+
+	clientCfg := &TLSClientConfig{
+		ServerName:         "localhost",
+		SNI:                true,
+		InsecureSkipVerify: true, // 跳过自签名证书验证
+	}
+	client := NewTLSClient(clientCfg)
+
+	// 服务端：简单 echo 处理
+	go func() {
+		srvConn := <-server.Accept()
+		if srvConn == nil {
+			return
+		}
+		defer srvConn.Close()
+		// echo：从自身读并写回
+		buf := make([]byte, 1024)
+		n, err := srvConn.Read(buf)
+		if err == nil && n > 0 {
+			_, _ = srvConn.Write(buf[:n])
+		}
+	}()
+
+	// 等待服务器启动完成
+	time.Sleep(100 * time.Millisecond)
+
+	transportConn, err := client.Dial(host + ":" + "18081")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer transportConn.Close()
 
 	buf := make([]byte, 1024)
 	_, err = transportConn.Write([]byte("hello"))

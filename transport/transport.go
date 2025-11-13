@@ -14,11 +14,7 @@ type TransportClient interface {
 }
 
 type TransportConn interface {
-	Read(b []byte) (n int, err error)
-	Write(b []byte) (n int, err error)
-	Close() error
-	LocalAddr() net.Addr
-	RemoteAddr() net.Addr
+	net.Conn
 }
 
 // for example, there is an overlap among the layers:

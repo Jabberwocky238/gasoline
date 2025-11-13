@@ -2,6 +2,7 @@ package caesar
 
 import (
 	"net"
+	"time"
 	"wwww/transport"
 )
 
@@ -17,7 +18,7 @@ func (c *CaesarConn) Read(b []byte) (n int, err error) {
 	if err != nil {
 		return n, err
 	}
-	shifted := Decrypt(b[:n], c.shift)
+	shifted := decrypt(b[:n], c.shift)
 	if c.debugHook != nil {
 		c.debugHook(b[:n], shifted, "CaesarConn Read")
 	}
@@ -26,7 +27,7 @@ func (c *CaesarConn) Read(b []byte) (n int, err error) {
 }
 
 func (c *CaesarConn) Write(b []byte) (n int, err error) {
-	shifted := Encrypt(b, c.shift)
+	shifted := encrypt(b, c.shift)
 	n, err = c.conn.Write(shifted)
 	if err != nil {
 		return n, err
@@ -49,7 +50,19 @@ func (c *CaesarConn) RemoteAddr() net.Addr {
 	return c.conn.RemoteAddr()
 }
 
-func Encrypt(plaintext []byte, shift int) []byte {
+func (c *CaesarConn) SetDeadline(t time.Time) error {
+	return c.conn.SetDeadline(t)
+}
+
+func (c *CaesarConn) SetReadDeadline(t time.Time) error {
+	return c.conn.SetReadDeadline(t)
+}
+
+func (c *CaesarConn) SetWriteDeadline(t time.Time) error {
+	return c.conn.SetWriteDeadline(t)
+}
+
+func encrypt(plaintext []byte, shift int) []byte {
 	// 简单的凯撒编码，位移量为shift
 	ciphertext := make([]byte, len(plaintext))
 
@@ -60,7 +73,7 @@ func Encrypt(plaintext []byte, shift int) []byte {
 	return ciphertext
 }
 
-func Decrypt(ciphertext []byte, shift int) []byte {
+func decrypt(ciphertext []byte, shift int) []byte {
 	// 简单的凯撒解码，位移量为shift
 	plaintext := make([]byte, len(ciphertext))
 

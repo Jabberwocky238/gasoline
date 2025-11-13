@@ -7,28 +7,21 @@ import (
 
 type TLSClient struct {
 	cfg           *TLSClientConfig
+	tlsCfg        *tls.Config
 	transportConn *TransportTLSConn
 }
 
 func NewTLSClient(cfg *TLSClientConfig) transport.TransportClient {
+	tlsCfg := cfg.ToTlsConfig()
 	return &TLSClient{
 		cfg:           cfg,
+		tlsCfg:        tlsCfg,
 		transportConn: nil,
 	}
 }
 
 func (t *TLSClient) Dial(endpoint string) (transport.TransportConn, error) {
-	tlsCfg := t.cfg.TLSConfig
-	if tlsCfg == nil {
-		tlsCfg = &tls.Config{
-			InsecureSkipVerify: t.cfg.InsecureSkipVerify,
-			ServerName:         t.cfg.ServerName,
-			RootCAs:            t.cfg.RootCAs,
-			Certificates:       t.cfg.Certificates,
-		}
-	}
-
-	conn, err := tls.Dial("tcp", endpoint, tlsCfg)
+	conn, err := tls.Dial("tcp", endpoint, t.tlsCfg)
 	if err != nil {
 		return nil, err
 	}

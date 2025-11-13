@@ -9,15 +9,22 @@ import (
 )
 
 type TLSServer struct {
-	cfg      *TLSServerConfig
+	cfg    *TLSServerConfig
+	tlsCfg *tls.Config
+
 	listener net.Listener
 
 	connChan chan transport.TransportConn
 }
 
 func NewTLSServer(cfg *TLSServerConfig) *TLSServer {
+	tlsCfg, err := cfg.ToTlsConfig()
+	if err != nil {
+		return nil
+	}
 	return &TLSServer{
 		cfg:      cfg,
+		tlsCfg:   tlsCfg,
 		connChan: make(chan transport.TransportConn, 1024),
 	}
 }
@@ -27,27 +34,7 @@ func (t *TLSServer) Listen(host string, port int) error {
 	if err != nil {
 		return err
 	}
-
-	tlsCfg := t.cfg.TLSConfig
-	if tlsCfg == nil {
-		tlsCfg = &tls.Config{}
-		if len(t.cfg.CertPEM) > 0 && len(t.cfg.KeyPEM) > 0 {
-			cert, err := tls.X509KeyPair(t.cfg.CertPEM, t.cfg.KeyPEM)
-			if err != nil {
-				baseListener.Close()
-				return err
-			}
-			tlsCfg.Certificates = []tls.Certificate{cert}
-		}
-		if t.cfg.ClientCAs != nil {
-			tlsCfg.ClientCAs = t.cfg.ClientCAs
-			if t.cfg.RequireClientCert {
-				tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
-			}
-		}
-	}
-
-	t.listener = tls.NewListener(baseListener, tlsCfg)
+	t.listener = tls.NewListener(baseListener, t.tlsCfg)
 	go t.acceptLoop()
 	return nil
 }

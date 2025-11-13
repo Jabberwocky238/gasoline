@@ -3,12 +3,13 @@ package config
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"wwww/transport"
 	"wwww/transport/caesar"
 	"wwww/transport/tcp"
 	"wwww/transport/tls"
-	"wwww/transport/udp"
+	"wwww/transport/trojan"
 )
 
 // makeDependenciesList 递归构建依赖列表，确保无依赖的项在前，有依赖的项在后
@@ -84,19 +85,52 @@ func FromConfigServer(ctx context.Context, cfgs []Transport) (transport.Transpor
 		case "tcp":
 			return tcp.NewTCPServer()
 		case "tls":
-			tlsCfg := &tls.TLSServerConfig{
-				CertPEM: cfg.Cfg["CertPEM"].([]byte),
-				KeyPEM:  cfg.Cfg["KeyPEM"].([]byte),
+			tlsCfg := new(tls.TLSServerConfig)
+
+			// 优先使用配置中直接提供的 CertPem 和 KeyPem
+			if certPem, ok := cfg.Cfg["CertPem"].([]byte); ok && len(certPem) > 0 {
+				tlsCfg.CertPem = certPem
+			} else if certFile, ok := cfg.Cfg["CertFile"].(string); ok && certFile != "" {
+				// 如果未直接提供，则从文件读取
+				certPem, err := os.ReadFile(certFile)
+				if err != nil {
+					return nil
+				}
+				tlsCfg.CertPem = certPem
 			}
+
+			if keyPem, ok := cfg.Cfg["KeyPem"].([]byte); ok && len(keyPem) > 0 {
+				tlsCfg.KeyPem = keyPem
+			} else if keyFile, ok := cfg.Cfg["KeyFile"].(string); ok && keyFile != "" {
+				// 如果未直接提供，则从文件读取
+				keyPem, err := os.ReadFile(keyFile)
+				if err != nil {
+					return nil
+				}
+				tlsCfg.KeyPem = keyPem
+			}
+
+			// 设置其他字段
+			if serverName, ok := cfg.Cfg["ServerName"].(string); ok {
+				tlsCfg.ServerName = serverName
+			}
+
 			return tls.NewTLSServer(tlsCfg)
-		case "udp":
-			return udp.NewUDPServer()
 		case "caesar":
 			caesarCfg := &caesar.CaesarConfig{
 				Shift: int(cfg.Cfg["Shift"].(int64)),
 			}
 			underlyingServer := serverMap[cfg.Cfg["Underlying"].(string)]
 			return caesar.NewCaesarServer(caesarCfg, underlyingServer, nil)
+
+		case "trojan":
+			trojanCfg := &trojan.ServerConfig{
+				RedirectHost: cfg.Cfg["RedirectHost"].(string),
+				RedirectPort: int(cfg.Cfg["RedirectPort"].(int64)),
+				Passwords:    cfg.Cfg["Passwords"].([]string),
+			}
+			underlyingServer := serverMap[cfg.Cfg["Underlying"].(string)]
+			return trojan.NewServer(ctx, underlyingServer, trojanCfg)
 		}
 		return nil
 	}
@@ -135,17 +169,29 @@ func FromConfigClient(ctx context.Context, cfgs []Transport) (transport.Transpor
 			return tcp.NewTCPClient()
 		case "tls":
 			tlsCfg := &tls.TLSClientConfig{
-				ServerName: cfg.Cfg["ServerName"].(string),
+				ServerName:         cfg.Cfg["ServerName"].(string),
+				SNI:                cfg.Cfg["SNI"].(bool),
+				InsecureSkipVerify: cfg.Cfg["InsecureSkipVerify"].(bool),
+			}
+			if sni, ok := cfg.Cfg["SNI"].(bool); ok {
+				tlsCfg.SNI = sni
+			}
+			if insecureSkipVerify, ok := cfg.Cfg["InsecureSkipVerify"].(bool); ok {
+				tlsCfg.InsecureSkipVerify = insecureSkipVerify
 			}
 			return tls.NewTLSClient(tlsCfg)
-		case "udp":
-			return udp.NewUDPClient(ctx)
 		case "caesar":
 			caesarCfg := &caesar.CaesarConfig{
 				Shift: int(cfg.Cfg["Shift"].(int64)),
 			}
 			underlyingClient := clientMap[cfg.Cfg["Underlying"].(string)]
 			return caesar.NewCaesarClient(caesarCfg, underlyingClient, nil)
+		case "trojan":
+			trojanCfg := &trojan.ClientConfig{
+				Password: cfg.Cfg["Password"].(string),
+			}
+			underlyingClient := clientMap[cfg.Cfg["Underlying"].(string)]
+			return trojan.NewClient(ctx, underlyingClient, trojanCfg)
 		}
 		return nil
 	}

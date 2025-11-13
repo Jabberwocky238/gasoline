@@ -1,33 +1,47 @@
 package tls
 
-import (
-	"crypto/tls"
-	"crypto/x509"
-)
+import "crypto/tls"
 
 type TLSServerConfig struct {
-	// 可直接传入 tls.Config；若为 nil 则使用 CertPEM/KeyPEM/ClientCAs 构造
-	TLSConfig *tls.Config
+	ServerName string
+	KeyPem     []byte
+	CertPem    []byte
+}
 
-	// 便捷字段：用于快速构造自签/内存证书
-	CertPEM []byte
-	KeyPEM  []byte
+func (c *TLSServerConfig) ToTlsConfig() (*tls.Config, error) {
+	cfg := &tls.Config{}
 
-	// 可选：双向 TLS 时的客户端 CA
-	ClientCAs *x509.CertPool
-	// 是否要求客户端证书
-	RequireClientCert bool
+	if len(c.CertPem) > 0 && len(c.KeyPem) > 0 {
+		cert, err := tls.X509KeyPair(c.CertPem, c.KeyPem)
+		if err != nil {
+			return nil, err
+		}
+		cfg.Certificates = []tls.Certificate{cert}
+	}
+
+	if c.ServerName != "" {
+		cfg.ServerName = c.ServerName
+	}
+
+	return cfg, nil
 }
 
 type TLSClientConfig struct {
-	Endpoint string // host:port
-
-	// 直接传入 tls.Config；若为 nil 则使用下列便捷字段构造
-	TLSConfig *tls.Config
-
-	// 便捷字段
-	InsecureSkipVerify bool
 	ServerName         string
-	RootCAs            *x509.CertPool
-	Certificates       []tls.Certificate // 客户端证书（可选）
+	SNI                bool
+	InsecureSkipVerify bool
+}
+
+func (c *TLSClientConfig) ToTlsConfig() *tls.Config {
+	cfg := &tls.Config{
+		InsecureSkipVerify: c.InsecureSkipVerify,
+	}
+
+	// 如果 SNI 为 true，设置 ServerName（用于 SNI 扩展和证书验证）
+	// 如果 SNI 为 false，不设置 ServerName（禁用 SNI）
+	if c.SNI && c.ServerName != "" {
+		cfg.ServerName = c.ServerName
+	}
+
+	return cfg
 }

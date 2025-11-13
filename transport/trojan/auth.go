@@ -230,7 +230,6 @@ func NewAuthenticator(ctx context.Context, passwords []string) *Authenticator {
 		hash := SHA224String(password)
 		u.AddUser(hash)
 	}
-	fmt.Println("trojan authenticator created")
 	return u
 }
 

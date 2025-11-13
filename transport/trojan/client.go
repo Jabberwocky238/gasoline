@@ -113,7 +113,6 @@ func NewClient(ctx context.Context, client transport.TransportClient, cfg *Clien
 	if err != nil {
 		panic(err)
 	}
-	fmt.Println("trojan client created")
 	return &TrojanClient{
 		underlay: client,
 		cfg:      cfg,

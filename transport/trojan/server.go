@@ -169,7 +169,5 @@ func NewServer(ctx context.Context, underlay transport.TransportServer, cfg *Ser
 		ctx:       ctx,
 		redir:     NewRedirector(ctx),
 	}
-
-	fmt.Println("trojan server created")
 	return s
 }

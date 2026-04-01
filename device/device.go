@@ -3,12 +3,14 @@ package device
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net"
 	"net/netip"
 	"time"
 
 	// "time"
 	"wwww/config"
+	"wwww/transport"
 
 	singTun "github.com/jabberwocky238/sing-tun"
 	"golang.org/x/net/ipv4"
@@ -41,51 +43,22 @@ type Device struct {
 
 	pools    *Pools // 内存池
 	debugger *Debugger
+	watcher  *Watcher
 }
 
 func NewDevice(cfg *config.Config, tun singTun.Tun) *Device {
-	var err error
-	device := new(Device)
+	device := &Device{
+		cfg:   cfg,
+		tun:   tun,
+		pools: NewPool(),
+	}
 	device.ctx, device.cancel = context.WithCancel(context.Background())
-
 	device.debugger = NewDebugger(device)
-	device.cfg = cfg
-	device.tun = tun
-	device.pools = NewPool()
-	if device.cfg.Interface.ListenPort > 0 {
-		device.listener, err = NewDeviceListener(device.ctx, device.cfg)
-		if err != nil {
-			log.Errorf("Failed to create listener: %v", err)
-			return nil
-		}
-	}
 
-	var privateKey PrivateKey
-	if err := privateKey.FromBase64(device.cfg.Interface.PrivateKey); err != nil {
-		log.Errorf("Failed to parse private key: %v", err)
+	if err := device.initialize(); err != nil {
+		log.Errorf("Failed to initialize device: %v", err)
+		device.cancel()
 		return nil
-	}
-	device.key.privateKey = privateKey
-	device.key.publicKey = privateKey.PublicKey()
-
-	prefix, err := netip.ParsePrefix(device.cfg.Interface.Address)
-	if err != nil {
-		log.Errorf("Failed to parse interface address: %v", err)
-		return nil
-	}
-	localIp := prefix.Addr().AsSlice()
-	device.endpoint.local = localIp
-	log.Debugf("Device local IP %s", net.IP(localIp).String())
-
-	device.peers = make(map[PublicKey]*Peer)
-	for _, peerConfig := range device.cfg.Peers {
-		peer, err := device.NewPeer(&peerConfig)
-		if err != nil {
-			log.Errorf("Failed to create peer: %v", err)
-			continue
-		}
-		device.peers[peer.key.publicKey] = peer
-		device.allowedips.Insert(peer.allowedIPs, peer)
 	}
 
 	return device
@@ -102,6 +75,14 @@ func (device *Device) Start() error {
 	go device.debugger.Start() // lifetime listen to device
 	device.queue.outbound = newGenericQueue()
 	device.queue.routing = newGenericQueue()
+
+	watcher, err := NewWatcher(device.ctx, ".gasoline")
+	if err != nil {
+		log.Errorf("Failed to initialize watcher: %v", err)
+	} else {
+		device.watcher = watcher
+		go device.watcher.Start()
+	}
 
 	for _, peer := range device.peers {
 		err := peer.Start()
@@ -126,9 +107,18 @@ func (device *Device) Start() error {
 
 func (device *Device) Close() {
 	log.Debugf("Closing device")
-	device.queue.outbound.wg.Done()
-	device.queue.routing.wg.Done()
-	device.listener.Close()
+	if device.queue.outbound != nil {
+		device.queue.outbound.wg.Done()
+	}
+	if device.queue.routing != nil {
+		device.queue.routing.wg.Done()
+	}
+	if device.listener != nil {
+		device.listener.Close()
+	}
+	if device.watcher != nil {
+		device.watcher.Close()
+	}
 	device.cancel()
 	device.tun.Close()
 }
@@ -150,28 +140,7 @@ func (device *Device) RoutineListenPort() error {
 
 	for conn := range device.listener.Accept() {
 		log.Debugf("Accepted connection from %s", conn.RemoteAddr().String())
-		go func() {
-			handshake := NewHandshake(conn, device, nil)
-			publicKey, err := handshake.ReceiveHandshake()
-			if err != nil {
-				log.Errorf("Failed to receive handshake: %v", err)
-				return
-			}
-			peer := device.peers[*publicKey]
-			if peer == nil {
-				log.Errorf("Peer not found for public key %s", publicKey)
-				return
-			}
-			peer.conn.mu.Lock()
-			peer.conn.conn = conn
-			peer.conn.handshake = handshake
-			peer.conn.isConnected = true
-			peer.conn.mu.Unlock()
-
-			log.Debugf("Connected to peer %s", peer.endpoint.local.String())
-			go peer.RoutineSequentialSender()
-			go peer.RoutineSequentialReceiver()
-		}()
+		go device.handleIncomingConnection(conn)
 	}
 	return nil
 }
@@ -198,47 +167,125 @@ func (device *Device) RoutineRoutingPackets() {
 	}()
 
 	for pb := range device.queue.routing.c {
-		// lookup peer
-		var peer *Peer
-		var dst []byte
-		switch pb.IpVersion() {
-		case 4:
-			if pb.length < ipv4.HeaderLen {
-				incorrectPacketCount++
-				device.pools.PutPacketBuffer(pb)
-				continue
-			}
-			// device.debugger.LogPacket(pb.CopyPacket(), 4)
-			dst = pb.Packet()[IPv4offsetDst : IPv4offsetDst+net.IPv4len]
-		case 6:
-			if pb.length < ipv6.HeaderLen {
-				incorrectPacketCount++
-				device.pools.PutPacketBuffer(pb)
-				continue
-			}
-			// device.debugger.LogPacket(pb.CopyPacket(), 6)
-			dst = pb.Packet()[IPv6offsetDst : IPv6offsetDst+net.IPv6len]
-		default:
-			log.Debugf("Received packet with unknown IP version")
+		dst, err := packetDestination(pb)
+		if err != nil {
+			log.Debugf("Dropping packet during routing: %v", err)
 			device.pools.PutPacketBuffer(pb)
 			incorrectPacketCount++
 			continue
 		}
 
 		correctPacketCount++
-		// 判断接收者是不是自己
 		if bytes.Equal(dst, device.endpoint.local) {
 			device.queue.outbound.c <- pb
 			continue
 		}
-		// 查找peer
-		peer = device.allowedips.Lookup(dst)
+
+		peer := device.allowedips.Lookup(dst)
 		if peer == nil {
-			// device.log.Errorf("Peer not found for IP %s", net.IP(dst).String())
 			device.pools.PutPacketBuffer(pb)
 			incorrectPacketCount++
 			continue
 		}
 		peer.queue.inbound.c <- pb
+	}
+}
+
+func (device *Device) initialize() error {
+	if err := device.initializeListener(); err != nil {
+		return err
+	}
+	if err := device.initializeKeys(); err != nil {
+		return err
+	}
+	if err := device.initializeLocalEndpoint(); err != nil {
+		return err
+	}
+	device.initializePeers()
+	return nil
+}
+
+func (device *Device) initializeListener() error {
+	if device.cfg.Interface.ListenPort <= 0 {
+		return nil
+	}
+
+	listener, err := NewDeviceListener(device.ctx, device.cfg)
+	if err != nil {
+		return err
+	}
+	device.listener = listener
+	return nil
+}
+
+func (device *Device) initializeKeys() error {
+	var privateKey PrivateKey
+	if err := privateKey.FromBase64(device.cfg.Interface.PrivateKey); err != nil {
+		return err
+	}
+	device.key.privateKey = privateKey
+	device.key.publicKey = privateKey.PublicKey()
+	return nil
+}
+
+func (device *Device) initializeLocalEndpoint() error {
+	prefix, err := netip.ParsePrefix(device.cfg.Interface.Address)
+	if err != nil {
+		return err
+	}
+
+	localIP := prefix.Addr().AsSlice()
+	device.endpoint.local = localIP
+	log.Debugf("Device local IP %s", net.IP(localIP).String())
+	return nil
+}
+
+func (device *Device) initializePeers() {
+	device.peers = make(map[PublicKey]*Peer)
+	for _, peerConfig := range device.cfg.Peers {
+		peer, err := device.NewPeer(&peerConfig)
+		if err != nil {
+			log.Errorf("Failed to create peer: %v", err)
+			continue
+		}
+		device.peers[peer.key.publicKey] = peer
+		device.allowedips.Insert(peer.allowedIPs, peer)
+	}
+}
+
+func (device *Device) handleIncomingConnection(conn transport.TransportConn) {
+	handshake := NewHandshake(conn, device, nil)
+	publicKey, err := handshake.ReceiveHandshake()
+	if err != nil {
+		log.Errorf("Failed to receive handshake: %v", err)
+		return
+	}
+
+	peer := device.peers[*publicKey]
+	if peer == nil {
+		log.Errorf("Peer not found for public key %s", publicKey)
+		return
+	}
+
+	peer.attachConnection(conn, handshake)
+	log.Debugf("Connected to peer %s", peer.endpoint.local.String())
+	go peer.RoutineSequentialSender()
+	go peer.RoutineSequentialReceiver()
+}
+
+func packetDestination(pb *PacketBuffer) ([]byte, error) {
+	switch pb.IpVersion() {
+	case 4:
+		if pb.length < ipv4.HeaderLen {
+			return nil, fmt.Errorf("short IPv4 packet: %d", pb.length)
+		}
+		return pb.Packet()[IPv4offsetDst : IPv4offsetDst+net.IPv4len], nil
+	case 6:
+		if pb.length < ipv6.HeaderLen {
+			return nil, fmt.Errorf("short IPv6 packet: %d", pb.length)
+		}
+		return pb.Packet()[IPv6offsetDst : IPv6offsetDst+net.IPv6len], nil
+	default:
+		return nil, fmt.Errorf("unknown IP version: %d", pb.IpVersion())
 	}
 }

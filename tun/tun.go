@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net/netip"
 
-	"wwww/config"
 	"wwww/tun/common/log"
 
 	singTun "github.com/jabberwocky238/sing-tun"

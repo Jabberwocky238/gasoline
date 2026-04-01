@@ -1,71 +1,23 @@
-# Gasoline: wireguard but customized transport protocol
+# Gasoline
 
-English | [中文](README_CN.md)
+## IDEA
 
-**Gasoline** is a mesh networking tool with customizable transport layers, inspired by WireGuard. It provides a flexible VPN solution with **customizable transport layers**, designed for bypassing GFW and anti-censorship, building secure mesh networks.
+多租户隔离的tunnel系统。
 
-## Features
+server之间使用udp mesh互联。
 
-- **WireGuard-style Architecture**: Uses WireGuard for core processing and configuration style, extending its basic functionality
-- **Customizable Transport Layers**: Supports multiple transport protocols including:
-  - TCP
-  - TLS
-  - Trojan (with fallback port support)
-  - Caesar (Caesar cipher)
-  - Design on Your Own ~
-- **Protocol Nesting Support**: Stack multiple transport layers to enhance security and obfuscation
-- **Cross-platform**: Supports Windows, Linux, macOS and other platforms
-- **Modern Programming Style**: Uses sing-tun to replace WireGuard's complex implementation
+client和server之间使用udp或者tcp链接。
 
-## Quick Start
 
-### Installation
 
-**Binary packages are not yet available as testing is not complete**
+## ARCH
 
-### Configuration
+main.go是统一启用入口
 
-Create a configuration file (e.g., `config.toml`) based on the examples in the `samples/` directory.
+./gasoline client为启动客户端，
+./gasoline server为启动服务端，
+客户端和服务端的差别为，是否有公网ip。
 
-**Server Configuration Example:**
+启动后，观察.gasoline/文件夹，
 
-```toml
-[Interface]
-PrivateKey = "your-private-key"
-ListenPort = 47789
-Address = "10.0.0.1/24"
-
-[[Peer]]
-PublicKey = "peer-public-key"
-AllowedIPs = "10.0.0.2/32"
-```
-
-**Client Configuration Example:**
-
-```toml
-[Interface]
-PrivateKey = "your-private-key"
-Address = "10.0.0.2/32"
-
-[[Peer]]
-PublicKey = "server-public-key"
-AllowedIPs = "10.0.0.1/24"
-Endpoint = "server-ip:47789"
-```
-
-Customized transport layer, plz goto [doc](docs/custom-transport-layer.md)
-
-### Running
-
-```bash
-# Run with configuration file
-./gasoline -f config.toml
-
-# Specify TUN device name (optional)
-./gasoline -f config.toml -n tun0
-```
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
+.gasoline/

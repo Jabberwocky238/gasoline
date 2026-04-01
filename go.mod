@@ -3,22 +3,19 @@ module wwww
 go 1.24.9
 
 require (
-	github.com/BurntSushi/toml v1.5.0
 	github.com/google/gopacket v1.1.19
 	github.com/jabberwocky238/sing-tun v1.0.0
 	github.com/metacubex/sing v0.5.6
-	github.com/stretchr/testify v1.11.1
+	github.com/quic-go/quic-go v0.59.0
 	golang.org/x/net v0.46.0
 )
 
 require (
-	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/mdlayher/netlink v1.8.0 // indirect
 	github.com/mdlayher/socket v0.5.1 // indirect
-	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/sagernet/fswatch v0.1.1 // indirect
 	github.com/sagernet/gvisor v0.0.0-20250811.0-sing-box-mod.1 // indirect
 	github.com/sagernet/netlink v0.0.0-20240916134442-83396419aa8b // indirect
@@ -28,7 +25,7 @@ require (
 	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba // indirect
 	golang.org/x/exp v0.0.0-20251017212417-90e834f514db // indirect
 	golang.org/x/sync v0.17.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
+	golang.org/x/text v0.30.0 // indirect
 )
 
 require (

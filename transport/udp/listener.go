@@ -8,15 +8,9 @@ import (
 	"github.com/jabberwocky238/gasoline/common"
 )
 
-type connMap struct {
-	// Map of client addresses to their respective connections
-
-}
-
 type Listener struct {
 	udpAddr *net.UDPAddr
 	conn    *net.UDPConn
-	clients sync.Map
 	handler func(conn common.Conn, metadata *common.Metadata)
 }
 

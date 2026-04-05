@@ -5,7 +5,7 @@ package tun
 import (
 	"net/netip"
 
-	tun "github.com/jabberwocky238/sing-tun"
+	tun "github.com/sagernet/sing-tun"
 )
 
 func tunNew(options tun.Options) (tun.Tun, error) {

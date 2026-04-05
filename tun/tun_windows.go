@@ -4,7 +4,7 @@ import (
 	"log"
 	"time"
 
-	singTun "github.com/jabberwocky238/sing-tun"
+	singTun "github.com/sagernet/sing-tun"
 )
 
 func tunNew(options singTun.Options) (tunIf singTun.Tun, err error) {

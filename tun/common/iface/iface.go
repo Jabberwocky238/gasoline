@@ -9,7 +9,7 @@ import (
 	"github.com/metacubex/bart"
 	"github.com/metacubex/sing/common/control"
 
-	"wwww/tun/common/singledo"
+	"github.com/jabberwocky238/gasoline/tun/common/singledo"
 )
 
 type defaultInterfaceFinder struct{}

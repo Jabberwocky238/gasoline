@@ -8,11 +8,7 @@ import (
 	"net/netip"
 	"time"
 
-	// "time"
-	"wwww/config"
-	"wwww/transport"
-
-	singTun "github.com/jabberwocky238/sing-tun"
+	singTun "github.com/sagernet/sing-tun"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
 )
@@ -31,7 +27,6 @@ type Device struct {
 	peers      map[PublicKey]*Peer
 	allowedips AllowedIPs
 
-	listener *DeviceListener
 	endpoint struct {
 		local net.IP
 	}

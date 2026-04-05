@@ -1,0 +1,6 @@
+[submodule "wireguard-go"]
+	path = wireguard-go
+	url = https://github.com/WireGuard/wireguard-go.git
+[submodule "mihomo"]
+	path = mihomo
+	url = https://github.com/MetaCubeX/mihomo.git

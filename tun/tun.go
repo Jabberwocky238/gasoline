@@ -4,25 +4,56 @@ import (
 	"fmt"
 	"net/netip"
 
-	"wwww/tun/common/log"
+	"github.com/jabberwocky238/gasoline/tun/common/log"
 
-	singTun "github.com/jabberwocky238/sing-tun"
-	// "github.com/metacubex/sing/common/ranges"
+	singTun "github.com/sagernet/sing-tun"
 )
 
 const DefaultMTU = 1500
 
-// Start-Process cmd -Verb RunAs
-func NewTun(tunName string, config *config.Config) (singTun.Tun, error) {
-	InetAddress := netip.MustParsePrefix(config.Interface.Address)
-	var allowedIPs []netip.Prefix
-	for _, peer := range config.Peers {
-		allowedIP, err := netip.ParsePrefix(peer.AllowedIPs)
-		if err != nil {
-			return nil, err
-		}
-		allowedIPs = append(allowedIPs, allowedIP)
+type Tun struct {
+	tunIf singTun.Tun
+}
+
+func New(name string, address string) (*Tun, error) {
+	tunIf, err := newSingTun(name, address)
+	if err != nil {
+		return nil, err
 	}
+	return &Tun{tunIf: tunIf}, nil
+}
+
+func (t *Tun) Read(buf []byte) (int, error) {
+	return t.tunIf.Read(buf)
+}
+
+func (t *Tun) Write(buf []byte) (int, error) {
+	return t.tunIf.Write(buf)
+}
+
+func (t *Tun) Close() error {
+	return t.tunIf.Close()
+}
+
+func (t *Tun) Start() error {
+	return t.tunIf.Start()
+}
+
+func (t *Tun) UpdateRouteOptions(tunOptions singTun.Options) error {
+	return t.tunIf.UpdateRouteOptions(tunOptions)
+}
+
+// Start-Process cmd -Verb RunAs
+func newSingTun(tunName string, Address string) (singTun.Tun, error) {
+	InetAddress := netip.MustParsePrefix(Address)
+	var allowedIPs []netip.Prefix
+	// for _, peer := range cfg.Peers {
+	// 	allowedIP, err := netip.ParsePrefix(peer.AllowedIPs)
+	// 	if err != nil {
+	// 		return nil, err
+	// 	}
+	// 	allowedIPs = append(allowedIPs, allowedIP)
+	// }
 
 	InetAddress, err := calcAddressAndMask(InetAddress, allowedIPs)
 	if err != nil {

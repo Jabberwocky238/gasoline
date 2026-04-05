@@ -2,7 +2,8 @@ package device
 
 import (
 	"net"
-	"wwww/transport"
+
+	"github.com/jabberwocky238/gasoline/transport"
 )
 
 type Handshake struct {

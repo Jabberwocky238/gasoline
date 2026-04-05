@@ -2,6 +2,8 @@ package device
 
 import (
 	"net"
+
+	singTun "github.com/sagernet/sing-tun"
 )
 
 const (
@@ -16,7 +18,7 @@ const (
 	IPv6offsetDst           = IPv6offsetSrc + net.IPv6len
 )
 
-func (device *Device) RoutineReadFromTUN(i int) {
+func RoutineReadFromTUN(i int, tun singTun.Tun, OnPacket func(pb *PacketBuffer), pools *Pools) {
 	defer func() {
 		log.Debugf("Routine: TUN reader - %d - stopped", i)
 	}()
@@ -26,7 +28,7 @@ func (device *Device) RoutineReadFromTUN(i int) {
 
 	for {
 		// read packets
-		length, readErr := device.tun.Read(buf)
+		length, readErr := tun.Read(buf)
 		if readErr != nil {
 			log.Errorf("Failed to read packet from TUN device: %v", readErr)
 			break
@@ -35,13 +37,13 @@ func (device *Device) RoutineReadFromTUN(i int) {
 			log.Debugf("Received packet with length 0 from TUN device")
 			continue
 		}
-		pb := device.pools.GetPacketBuffer()
+		pb := pools.GetPacketBuffer()
 		pb.SetPacket(buf[:length])
-		device.queue.routing.c <- pb
+		OnPacket(pb)
 	}
 }
 
-func (device *Device) RoutineWriteToTUN() {
+func RoutineWriteToTUN() {
 	defer func() {
 		log.Debugf("Routine: TUN writer - stopped")
 	}()

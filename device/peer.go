@@ -7,8 +7,9 @@ import (
 	"net/netip"
 	"sync"
 	"time"
-	"wwww/config"
-	"wwww/transport"
+
+	"github.com/jabberwocky238/gasoline/config"
+	"github.com/jabberwocky238/gasoline/transport"
 )
 
 type Peer struct {
@@ -136,6 +137,14 @@ func (p *Peer) Start() error {
 		go p.RoutineSequentialReceiver()
 	}
 	return nil
+}
+
+func (p *Peer) attachConnection(conn transport.TransportConn, handshake *Handshake) {
+	p.conn.mu.Lock()
+	defer p.conn.mu.Unlock()
+	p.conn.conn = conn
+	p.conn.handshake = handshake
+	p.conn.isConnected = true
 }
 
 func (p *Peer) Close() error {

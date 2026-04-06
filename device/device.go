@@ -8,6 +8,9 @@ import (
 	"net/netip"
 	"time"
 
+	"github.com/jabberwocky238/gasoline/protocol"
+	"github.com/jabberwocky238/gasoline/transport"
+
 	singTun "github.com/sagernet/sing-tun"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
@@ -31,12 +34,14 @@ type Device struct {
 		local net.IP
 	}
 
+	listener transport.Listener
+
 	queue struct {
 		outbound *genericQueue // 进入TUN的包
 		routing  *genericQueue // 需要路由的包
 	}
 
-	pools    *Pools // 内存池
+	pools    *Pools
 	debugger *Debugger
 	watcher  *Watcher
 }
@@ -67,7 +72,7 @@ func (device *Device) Start() error {
 		return err
 	}
 
-	go device.debugger.Start() // lifetime listen to device
+	go device.debugger.Start()
 	device.queue.outbound = newGenericQueue()
 	device.queue.routing = newGenericQueue()
 
@@ -87,15 +92,13 @@ func (device *Device) Start() error {
 		}
 	}
 
-	if device.cfg.Interface.ListenPort > 0 {
-		go device.RoutineListenPort() // lifetime listen to device.listener
+	if device.listener != nil {
+		go device.RoutineListenPort()
 	}
 
-	go device.RoutineRoutingPackets() // lifetime listen to device.queue.routing
-	go device.RoutineReadFromTUN(0)   // lifetime listen to device.tun
-	go device.RoutineWriteToTUN()     // lifetime listen to device.tun and device.queue.outbound
-
-	// go device.RoutineBoardcast()
+	go device.RoutineRoutingPackets()
+	go device.RoutineReadFromTUN(0)
+	go device.RoutineWriteToTUN()
 
 	return nil
 }
@@ -118,33 +121,27 @@ func (device *Device) Close() {
 	device.tun.Close()
 }
 
-func (device *Device) RoutineListenPort() error {
-	defer func() {
-		log.Debugf("Routine: listen port - stopped")
-	}()
+func (device *Device) RoutineListenPort() {
+	defer log.Debugf("Routine: listen port - stopped")
 	log.Debugf("Routine: listen port - started")
 
-	host := "0.0.0.0"
-	port := device.cfg.Interface.ListenPort
-
-	err := device.listener.Listen(host, port)
-	if err != nil {
-		log.Errorf("Failed to listen on port %d: %v", port, err)
-		return err
+	for {
+		conn, result, err := device.listener.Accept()
+		if err != nil {
+			select {
+			case <-device.ctx.Done():
+				return
+			default:
+				log.Errorf("Failed to accept connection: %v", err)
+				continue
+			}
+		}
+		go device.handleIncomingConnection(conn, result)
 	}
-
-	for conn := range device.listener.Accept() {
-		log.Debugf("Accepted connection from %s", conn.RemoteAddr().String())
-		go device.handleIncomingConnection(conn)
-	}
-	return nil
 }
 
 func (device *Device) RoutineRoutingPackets() {
-	defer func() {
-		log.Debugf("Routine: routing packets - stopped")
-	}()
-
+	defer log.Debugf("Routine: routing packets - stopped")
 	log.Debugf("Routine: routing packets - started")
 
 	var (
@@ -204,7 +201,6 @@ func (device *Device) initializeListener() error {
 	if device.cfg.Interface.ListenPort <= 0 {
 		return nil
 	}
-
 	listener, err := NewDeviceListener(device.ctx, device.cfg)
 	if err != nil {
 		return err
@@ -228,7 +224,6 @@ func (device *Device) initializeLocalEndpoint() error {
 	if err != nil {
 		return err
 	}
-
 	localIP := prefix.Addr().AsSlice()
 	device.endpoint.local = localIP
 	log.Debugf("Device local IP %s", net.IP(localIP).String())
@@ -248,21 +243,23 @@ func (device *Device) initializePeers() {
 	}
 }
 
-func (device *Device) handleIncomingConnection(conn transport.TransportConn) {
-	handshake := NewHandshake(conn, device, nil)
-	publicKey, err := handshake.ReceiveHandshake()
-	if err != nil {
-		log.Errorf("Failed to receive handshake: %v", err)
-		return
-	}
+func (device *Device) handleIncomingConnection(conn transport.Conn, result *protocol.HandshakeResult) {
+	log.Debugf("Handshake completed with client %x from %s", result.ClientID, conn.RemoteAddr())
 
-	peer := device.peers[*publicKey]
+	var peer *Peer
+	for _, p := range device.peers {
+		if p.clientID == result.ClientID {
+			peer = p
+			break
+		}
+	}
 	if peer == nil {
-		log.Errorf("Peer not found for public key %s", publicKey)
+		log.Errorf("No peer found for clientID %x", result.ClientID)
+		conn.Close()
 		return
 	}
 
-	peer.attachConnection(conn, handshake)
+	peer.attachConnection(conn)
 	log.Debugf("Connected to peer %s", peer.endpoint.local.String())
 	go peer.RoutineSequentialSender()
 	go peer.RoutineSequentialReceiver()

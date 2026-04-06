@@ -1,5 +1,11 @@
 package protocol
 
+import (
+	"encoding/binary"
+	"fmt"
+	"io"
+)
+
 const (
 	HandshakeVersion = 0x01
 )
@@ -7,33 +13,309 @@ const (
 type HandshakeType byte
 
 const (
-	NoAuth HandshakeType = iota
+	NoAuth       HandshakeType = iota
+	HMACAuth
 	UserPassAuth
-	EabKeyHmac
 )
 
-type ServerConfigType byte
+func (t HandshakeType) String() string {
+	switch t {
+	case NoAuth:
+		return "NoAuth"
+	case HMACAuth:
+		return "HMAC"
+	case UserPassAuth:
+		return "UserPass"
+	default:
+		return "Unknown"
+	}
+}
 
 const (
-	NoConfig ServerConfigType = iota
-	WgConfig
+	HandshakeOK   byte = 0x00
+	HandshakeFail byte = 0x01
 )
 
-type HandshakeClienthello struct {
-	version  byte
-	clientID [16]byte
+// --------------- Auth Interfaces ---------------
+
+// ClientAuthenticator is the client-side auth strategy.
+type ClientAuthenticator interface {
+	Type() HandshakeType
+	Respond(challenge []byte) ([]byte, error)
 }
 
-type HandshakeServerhello struct {
-	version   byte
-	transport HandshakeType
-	payload   [256]byte
+// ServerAuthenticator is the server-side auth strategy.
+type ServerAuthenticator interface {
+	Type() HandshakeType
+	GenerateChallenge() ([]byte, error)
+	VerifyResponse(clientID [16]byte, challenge, response []byte) error
 }
 
-type HandshakeClientRequest struct {
-	payload [256]byte
+// ConfigFunc generates a SessionConfig for a clientID after auth succeeds.
+type ConfigFunc func(clientID [16]byte) (*SessionConfig, error)
+
+// --------------- Handshake Result ---------------
+
+// HandshakeResult is returned after a successful handshake.
+type HandshakeResult struct {
+	ClientID [16]byte
+	Config   SessionConfig
+	Keypair  *SessionKeypair
 }
 
-type HandshakeServerResponse struct {
-	config [256]byte
+// --------------- Handshake Protocol ---------------
+
+// ClientHandshake performs the 4-step handshake on the client side.
+//
+//	1. C→S: ClientHello  (version + clientID)
+//	2. S→C: ServerHello  (version + authType + challenge)
+//	3. C→S: ClientRequest(auth response)
+//	4. S→C: ServerResponse(status + config)
+//	5. derive AEAD keypair via ECDH
+func ClientHandshake(rw io.ReadWriter, clientID [16]byte, auth ClientAuthenticator) (*HandshakeResult, error) {
+	// 1. Send ClientHello
+	hello := &ClientHello{Version: HandshakeVersion, ClientID: clientID}
+	if err := hello.WriteTo(rw); err != nil {
+		return nil, fmt.Errorf("send ClientHello: %w", err)
+	}
+
+	// 2. Receive ServerHello
+	var serverHello ServerHello
+	if err := serverHello.ReadFrom(rw); err != nil {
+		return nil, fmt.Errorf("recv ServerHello: %w", err)
+	}
+	if serverHello.Version != HandshakeVersion {
+		return nil, fmt.Errorf("version mismatch: got %d, want %d", serverHello.Version, HandshakeVersion)
+	}
+	if serverHello.AuthType != auth.Type() {
+		return nil, fmt.Errorf("auth type mismatch: server=%s, client=%s", serverHello.AuthType, auth.Type())
+	}
+
+	// 3. Send ClientRequest
+	response, err := auth.Respond(serverHello.Payload)
+	if err != nil {
+		return nil, fmt.Errorf("auth respond: %w", err)
+	}
+	req := &ClientRequest{Payload: response}
+	if err := req.WriteTo(rw); err != nil {
+		return nil, fmt.Errorf("send ClientRequest: %w", err)
+	}
+
+	// 4. Receive ServerResponse
+	var serverResp ServerResponse
+	if err := serverResp.ReadFrom(rw); err != nil {
+		return nil, fmt.Errorf("recv ServerResponse: %w", err)
+	}
+	if serverResp.Status != HandshakeOK {
+		return nil, fmt.Errorf("handshake rejected: status=%d", serverResp.Status)
+	}
+
+	// Parse config
+	var cfg SessionConfig
+	if err := cfg.Unmarshal(serverResp.Config); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+
+	// 5. Derive AEAD keypair: client is initiator
+	keypair, err := DeriveSessionKeypair(cfg.ClientPrivateKey, cfg.ServerPublicKey, true)
+	if err != nil {
+		return nil, fmt.Errorf("derive session keys: %w", err)
+	}
+
+	return &HandshakeResult{ClientID: clientID, Config: cfg, Keypair: keypair}, nil
+}
+
+// ServerHandshake performs the 4-step handshake on the server side.
+func ServerHandshake(rw io.ReadWriter, auth ServerAuthenticator, configFn ConfigFunc) (*HandshakeResult, error) {
+	// 1. Receive ClientHello
+	var hello ClientHello
+	if err := hello.ReadFrom(rw); err != nil {
+		return nil, fmt.Errorf("recv ClientHello: %w", err)
+	}
+	if hello.Version != HandshakeVersion {
+		return nil, fmt.Errorf("version mismatch: got %d, want %d", hello.Version, HandshakeVersion)
+	}
+
+	// 2. Send ServerHello with challenge
+	challenge, err := auth.GenerateChallenge()
+	if err != nil {
+		return nil, fmt.Errorf("generate challenge: %w", err)
+	}
+	serverHello := &ServerHello{
+		Version:  HandshakeVersion,
+		AuthType: auth.Type(),
+		Payload:  challenge,
+	}
+	if err := serverHello.WriteTo(rw); err != nil {
+		return nil, fmt.Errorf("send ServerHello: %w", err)
+	}
+
+	// 3. Receive ClientRequest
+	var req ClientRequest
+	if err := req.ReadFrom(rw); err != nil {
+		return nil, fmt.Errorf("recv ClientRequest: %w", err)
+	}
+
+	// 4. Verify auth
+	if err := auth.VerifyResponse(hello.ClientID, challenge, req.Payload); err != nil {
+		fail := &ServerResponse{Status: HandshakeFail}
+		fail.WriteTo(rw)
+		return nil, fmt.Errorf("auth verify: %w", err)
+	}
+
+	cfg, err := configFn(hello.ClientID)
+	if err != nil {
+		fail := &ServerResponse{Status: HandshakeFail}
+		fail.WriteTo(rw)
+		return nil, fmt.Errorf("generate config: %w", err)
+	}
+
+	resp := &ServerResponse{Status: HandshakeOK, Config: cfg.Marshal()}
+	if err := resp.WriteTo(rw); err != nil {
+		return nil, fmt.Errorf("send ServerResponse: %w", err)
+	}
+
+	// 5. Derive AEAD keypair: server is responder
+	// Server knows client_private (it generated it), so:
+	// ECDH(client_private, server_public) == ECDH(server_private, client_public)
+	keypair, err := DeriveSessionKeypair(cfg.ClientPrivateKey, cfg.ServerPublicKey, false)
+	if err != nil {
+		return nil, fmt.Errorf("derive session keys: %w", err)
+	}
+
+	return &HandshakeResult{ClientID: hello.ClientID, Config: *cfg, Keypair: keypair}, nil
+}
+
+// --------------- Wire Messages ---------------
+
+// ClientHello: version(1) + clientID(16) = 17 bytes
+type ClientHello struct {
+	Version  byte
+	ClientID [16]byte
+}
+
+func (m *ClientHello) WriteTo(w io.Writer) error {
+	buf := make([]byte, 17)
+	buf[0] = m.Version
+	copy(buf[1:], m.ClientID[:])
+	_, err := w.Write(buf)
+	return err
+}
+
+func (m *ClientHello) ReadFrom(r io.Reader) error {
+	buf := make([]byte, 17)
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return err
+	}
+	m.Version = buf[0]
+	copy(m.ClientID[:], buf[1:])
+	return nil
+}
+
+// ServerHello: version(1) + authType(1) + payloadLen(2) + payload(N)
+type ServerHello struct {
+	Version  byte
+	AuthType HandshakeType
+	Payload  []byte
+}
+
+func (m *ServerHello) WriteTo(w io.Writer) error {
+	header := make([]byte, 4)
+	header[0] = m.Version
+	header[1] = byte(m.AuthType)
+	binary.BigEndian.PutUint16(header[2:], uint16(len(m.Payload)))
+	if _, err := w.Write(header); err != nil {
+		return err
+	}
+	if len(m.Payload) > 0 {
+		_, err := w.Write(m.Payload)
+		return err
+	}
+	return nil
+}
+
+func (m *ServerHello) ReadFrom(r io.Reader) error {
+	header := make([]byte, 4)
+	if _, err := io.ReadFull(r, header); err != nil {
+		return err
+	}
+	m.Version = header[0]
+	m.AuthType = HandshakeType(header[1])
+	payloadLen := binary.BigEndian.Uint16(header[2:])
+	if payloadLen > 0 {
+		m.Payload = make([]byte, payloadLen)
+		if _, err := io.ReadFull(r, m.Payload); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ClientRequest: payloadLen(2) + payload(N)
+type ClientRequest struct {
+	Payload []byte
+}
+
+func (m *ClientRequest) WriteTo(w io.Writer) error {
+	header := make([]byte, 2)
+	binary.BigEndian.PutUint16(header, uint16(len(m.Payload)))
+	if _, err := w.Write(header); err != nil {
+		return err
+	}
+	if len(m.Payload) > 0 {
+		_, err := w.Write(m.Payload)
+		return err
+	}
+	return nil
+}
+
+func (m *ClientRequest) ReadFrom(r io.Reader) error {
+	header := make([]byte, 2)
+	if _, err := io.ReadFull(r, header); err != nil {
+		return err
+	}
+	payloadLen := binary.BigEndian.Uint16(header)
+	if payloadLen > 0 {
+		m.Payload = make([]byte, payloadLen)
+		if _, err := io.ReadFull(r, m.Payload); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ServerResponse: status(1) + configLen(2) + config(N)
+type ServerResponse struct {
+	Status byte
+	Config []byte
+}
+
+func (m *ServerResponse) WriteTo(w io.Writer) error {
+	header := make([]byte, 3)
+	header[0] = m.Status
+	binary.BigEndian.PutUint16(header[1:], uint16(len(m.Config)))
+	if _, err := w.Write(header); err != nil {
+		return err
+	}
+	if len(m.Config) > 0 {
+		_, err := w.Write(m.Config)
+		return err
+	}
+	return nil
+}
+
+func (m *ServerResponse) ReadFrom(r io.Reader) error {
+	header := make([]byte, 3)
+	if _, err := io.ReadFull(r, header); err != nil {
+		return err
+	}
+	m.Status = header[0]
+	configLen := binary.BigEndian.Uint16(header[1:])
+	if configLen > 0 {
+		m.Config = make([]byte, configLen)
+		if _, err := io.ReadFull(r, m.Config); err != nil {
+			return err
+		}
+	}
+	return nil
 }

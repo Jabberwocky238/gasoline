@@ -8,16 +8,6 @@ const (
 	QUIC
 )
 
-type Handshake interface {
-}
-
-type Conn interface {
-	Write(Packet) error
-	Read() (Packet, error)
-	Metadata() *Metadata
-	Close() error
-}
-
 func (t Transport) String() string {
 	switch t {
 	case TCP:
@@ -35,9 +25,7 @@ func (t Transport) Network() string {
 	switch t {
 	case TCP:
 		return "tcp"
-	case UDP:
-		return "udp"
-	case QUIC:
+	case UDP, QUIC:
 		return "udp"
 	default:
 		return ""

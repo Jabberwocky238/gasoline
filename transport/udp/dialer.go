@@ -3,37 +3,37 @@ package udp
 import (
 	"net"
 
-	"github.com/jabberwocky238/gasoline/common"
+	"github.com/jabberwocky238/gasoline/protocol"
+	"github.com/jabberwocky238/gasoline/transport"
 )
 
 type Dialer struct {
-	endpoint string
-	conn     *net.UDPConn
+	clientID [16]byte
+	auth     protocol.ClientAuthenticator
 }
 
-func NewDialer(endpoint string) *Dialer {
-	return &Dialer{endpoint: endpoint}
+func NewDialer(clientID [16]byte, auth protocol.ClientAuthenticator) *Dialer {
+	return &Dialer{clientID: clientID, auth: auth}
 }
 
-func (d *Dialer) Dial() (common.Conn, error) {
-	udpAddr, err := net.ResolveUDPAddr("udp", d.endpoint)
+func (d *Dialer) Dial(endpoint string) (transport.Conn, *protocol.HandshakeResult, error) {
+	udpAddr, err := net.ResolveUDPAddr("udp", endpoint)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	conn, err := net.DialUDP("udp", nil, udpAddr)
+	rawConn, err := net.DialUDP("udp", nil, udpAddr)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	d.conn = conn
-	return d, nil
-}
 
-// common.PacketSender
-func (d *Dialer) Write(packet Packet) error {
-
-	_, err = d.conn.Write(packet.Data)
+	// Handshake over stream adapter (buffers datagrams for io.ReadFull)
+	adapter := newClientStreamAdapter(rawConn)
+	result, err := protocol.ClientHandshake(adapter, d.clientID, d.auth)
 	if err != nil {
-		return err
+		rawConn.Close()
+		return nil, nil, err
 	}
-	return nil
+
+	// After handshake: switch to datagram + AEAD mode
+	return newClientConn(rawConn, result.Keypair), result, nil
 }

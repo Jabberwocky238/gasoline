@@ -11,52 +11,100 @@ import (
 //
 // Wire format:
 //
-//	[clientPrivateKey:32][serverPublicKey:32][prefixAddr:16][prefixBits:1] = 81 bytes
+//	[clientPrivateKey:32][serverPublicKey:32][prefixAddr:16][prefixBits:1]
+//	[rangeCount:2][range0_addr:16][range0_bits:1]...[rangeN_addr:16][rangeN_bits:1]
+//
+// Fixed part = 81 bytes, each range = 17 bytes.
 type SessionConfig struct {
-	ClientPrivateKey PrivateKey   // WG private key assigned to client
-	ServerPublicKey  PublicKey    // Server's WG public key
-	IPPrefix         netip.Prefix // Client's assigned IP prefix (e.g. 10.0.0.2/24)
+	ClientPrivateKey PrivateKey     // WG private key assigned to client
+	ServerPublicKey  PublicKey      // Server's WG public key
+	IPPrefix         netip.Prefix   // Client's assigned IP (e.g. 10.0.0.2/24)
+	AllowedRanges    []netip.Prefix // Internal network ranges routable via VPN
 }
 
-const sessionConfigSize = 32 + 32 + 16 + 1 // 81
+const (
+	configFixedSize = 32 + 32 + 16 + 1 // 81
+	prefixEntrySize = 16 + 1            // 17 per prefix
+)
 
 func (c *SessionConfig) Marshal() []byte {
-	buf := make([]byte, sessionConfigSize)
+	rangeCount := len(c.AllowedRanges)
+	totalSize := configFixedSize + 2 + rangeCount*prefixEntrySize
+	buf := make([]byte, totalSize)
+
+	// Keys
 	copy(buf[0:32], c.ClientPrivateKey[:])
 	copy(buf[32:64], c.ServerPublicKey[:])
 
-	addr := c.IPPrefix.Addr().As16()
-	copy(buf[64:80], addr[:])
+	// Client IP prefix (always stored as 16-byte addr)
+	addr16 := c.IPPrefix.Addr().As16()
+	copy(buf[64:80], addr16[:])
 	buf[80] = byte(c.IPPrefix.Bits())
+
+	// Allowed ranges
+	binary.BigEndian.PutUint16(buf[81:83], uint16(rangeCount))
+	offset := 83
+	for _, r := range c.AllowedRanges {
+		a16 := r.Addr().As16()
+		copy(buf[offset:offset+16], a16[:])
+		buf[offset+16] = byte(r.Bits())
+		offset += prefixEntrySize
+	}
+
 	return buf
 }
 
 func (c *SessionConfig) Unmarshal(data []byte) error {
-	if len(data) < sessionConfigSize {
+	if len(data) < configFixedSize+2 {
 		return fmt.Errorf("session config too short: %d bytes", len(data))
 	}
+
+	// Keys
 	copy(c.ClientPrivateKey[:], data[0:32])
 	copy(c.ServerPublicKey[:], data[32:64])
 
-	var addr16 [16]byte
-	copy(addr16[:], data[64:80])
+	// Client IP prefix
+	var a16 [16]byte
+	copy(a16[:], data[64:80])
 	bits := int(data[80])
-
-	// Detect IPv4 vs IPv6 by checking if it's an IPv4-mapped IPv6
-	addr := netip.AddrFrom16(addr16)
+	addr := netip.AddrFrom16(a16)
 	if addr.Is4In6() {
 		addr = addr.Unmap()
 	}
 	c.IPPrefix = netip.PrefixFrom(addr, bits)
+
+	// Allowed ranges
+	rangeCount := int(binary.BigEndian.Uint16(data[81:83]))
+	expectedLen := configFixedSize + 2 + rangeCount*prefixEntrySize
+	if len(data) < expectedLen {
+		return fmt.Errorf("session config too short for %d ranges: need %d, got %d",
+			rangeCount, expectedLen, len(data))
+	}
+
+	c.AllowedRanges = make([]netip.Prefix, rangeCount)
+	offset := 83
+	for i := 0; i < rangeCount; i++ {
+		var ra [16]byte
+		copy(ra[:], data[offset:offset+16])
+		rbits := int(data[offset+16])
+		raddr := netip.AddrFrom16(ra)
+		if raddr.Is4In6() {
+			raddr = raddr.Unmap()
+		}
+		c.AllowedRanges[i] = netip.PrefixFrom(raddr, rbits)
+		offset += prefixEntrySize
+	}
+
 	return nil
 }
 
-// MarshalSessionConfig is a convenience for ServerResponse.Config encoding.
-func MarshalSessionConfig(clientPriv PrivateKey, serverPub PublicKey, prefix netip.Prefix) []byte {
+// MarshalSessionConfig is a convenience helper.
+func MarshalSessionConfig(clientPriv PrivateKey, serverPub PublicKey, prefix netip.Prefix, allowedRanges []netip.Prefix) []byte {
 	cfg := &SessionConfig{
 		ClientPrivateKey: clientPriv,
 		ServerPublicKey:  serverPub,
 		IPPrefix:         prefix,
+		AllowedRanges:    allowedRanges,
 	}
 	return cfg.Marshal()
 }

@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"bytes"
+	"net/netip"
 	"testing"
 )
 
@@ -138,16 +139,18 @@ func TestSessionConfigMarshalUnmarshal(t *testing.T) {
 	original := &SessionConfig{
 		ClientPrivateKey: priv,
 		ServerPublicKey:  pub,
+		IPPrefix:         netip.MustParsePrefix("10.0.0.2/24"),
+		AllowedRanges: []netip.Prefix{
+			netip.MustParsePrefix("10.0.0.0/24"),
+			netip.MustParsePrefix("192.168.1.0/24"),
+			netip.MustParsePrefix("172.16.0.0/12"),
+		},
 	}
-	// Set IPPrefix
-	import_netip := func() {
-		// use netip inside test
-	}
-	_ = import_netip
 
 	data := original.Marshal()
-	if len(data) != sessionConfigSize {
-		t.Fatalf("marshal size: got %d, want %d", len(data), sessionConfigSize)
+	expectedSize := configFixedSize + 2 + 3*prefixEntrySize
+	if len(data) != expectedSize {
+		t.Fatalf("marshal size: got %d, want %d", len(data), expectedSize)
 	}
 
 	var decoded SessionConfig
@@ -159,5 +162,37 @@ func TestSessionConfigMarshalUnmarshal(t *testing.T) {
 	}
 	if decoded.ServerPublicKey != original.ServerPublicKey {
 		t.Error("ServerPublicKey mismatch")
+	}
+	if decoded.IPPrefix != original.IPPrefix {
+		t.Errorf("IPPrefix: got %s, want %s", decoded.IPPrefix, original.IPPrefix)
+	}
+	if len(decoded.AllowedRanges) != 3 {
+		t.Fatalf("AllowedRanges count: got %d, want 3", len(decoded.AllowedRanges))
+	}
+	for i, r := range decoded.AllowedRanges {
+		if r != original.AllowedRanges[i] {
+			t.Errorf("AllowedRanges[%d]: got %s, want %s", i, r, original.AllowedRanges[i])
+		}
+	}
+}
+
+func TestSessionConfigEmptyRanges(t *testing.T) {
+	priv, _ := NewPrivateKey()
+	cfg := &SessionConfig{
+		ClientPrivateKey: priv,
+		ServerPublicKey:  priv.PublicKey(),
+		IPPrefix:         netip.MustParsePrefix("10.0.0.5/24"),
+	}
+
+	data := cfg.Marshal()
+	var decoded SessionConfig
+	if err := decoded.Unmarshal(data); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if len(decoded.AllowedRanges) != 0 {
+		t.Errorf("expected 0 ranges, got %d", len(decoded.AllowedRanges))
+	}
+	if decoded.IPPrefix.String() != "10.0.0.5/24" {
+		t.Errorf("IPPrefix: got %s", decoded.IPPrefix)
 	}
 }

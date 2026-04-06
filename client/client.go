@@ -8,7 +8,6 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/jabberwocky238/gasoline/device"
-	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/transport"
 	tunPkg "github.com/jabberwocky238/gasoline/tun"
 )
@@ -18,9 +17,8 @@ type Config struct {
 	Endpoint string
 	// Client identity
 	ClientID [16]byte
-	// Auth strategy for handshake
-	Auth protocol.ClientAuthenticator
 	// Dialer creates the transport connection (TCP/UDP/QUIC)
+	// Auth and handshake are handled internally by the Dialer.
 	Dialer transport.Dialer
 }
 

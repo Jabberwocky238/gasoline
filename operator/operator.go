@@ -5,11 +5,10 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"sync"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 
-	"github.com/jabberwocky238/gasoline/device"
 	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/transport"
 
@@ -17,94 +16,214 @@ import (
 	"golang.org/x/net/ipv6"
 )
 
+type SessionIDType [16]byte
+type OperatorUUIDType [16]byte
+type VNetIDType [16]byte
+
 type Config struct {
-	// Auth strategy for incoming handshakes
+	// UUID is this operator's unique identifier
+	UUID OperatorUUIDType
+	// Auth strategy for incoming client handshakes
 	Auth protocol.ServerAuthenticator
 	// ConfigFunc generates SessionConfig for each client after auth
 	ConfigFn protocol.ConfigFunc
-	// Listener accepts transport connections
-	Listener transport.Listener
-}
-
-// peerConn represents a connected client.
-type peerConn struct {
-	conn     transport.Conn
-	clientID [16]byte
-	ip       netip.Prefix // assigned IP
+	// ClientListener accepts client transport connections
+	ClientListener transport.Listener
+	// OperatorListenAddr is the TCP address for inter-operator connections
+	OperatorListenAddr string
 }
 
 // Operator accepts client connections, decrypts packets, and routes them
 // to the correct client by destination IP.
 type Operator struct {
-	mu     sync.RWMutex
 	ctx    context.Context
 	cancel context.CancelFunc
 
 	cfg *Config
 
-	// connected clients indexed by assigned IP → peerConn
-	peers      map[netip.Addr]*peerConn
-	allowedips device.AllowedIPs
+	clients   *ClientTable
+	operators *OperatorTable
+	Registry  *Registry
 
-	pools *device.Pools
+	// TCP listener for inter-operator connections
+	opListener net.Listener
 }
 
 func New(cfg *Config) *Operator {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Operator{
-		cfg:    cfg,
-		ctx:    ctx,
-		cancel: cancel,
-		peers:  make(map[netip.Addr]*peerConn),
-		pools:  device.NewPool(),
+		cfg:       cfg,
+		ctx:       ctx,
+		cancel:    cancel,
+		clients:   NewClientTable(),
+		operators: NewOperatorTable(),
+		Registry:  NewRegistry(),
 	}
 }
 
-// Start begins accepting client connections and routing packets.
+// Start begins accepting client and operator connections.
 func (o *Operator) Start() error {
-	log.Infof("Operator listening on %s", o.cfg.Listener.Addr())
-	go o.routineAccept()
+	// Client endpoint
+	log.Infof("Client endpoint listening on %s", o.cfg.ClientListener.Addr())
+	go o.routineAcceptClients()
+
+	// Operator endpoint
+	ln, err := net.Listen("tcp", o.cfg.OperatorListenAddr)
+	if err != nil {
+		return fmt.Errorf("operator listen on %s: %w", o.cfg.OperatorListenAddr, err)
+	}
+	o.opListener = ln
+	log.Infof("Operator endpoint listening on %s", o.cfg.OperatorListenAddr)
+	go o.routineAcceptOperators()
+
 	return nil
 }
 
-// routineAccept accepts new clients (handshake already done by transport layer).
-func (o *Operator) routineAccept() {
+// routineAcceptClients accepts new clients (handshake already done by transport layer).
+func (o *Operator) routineAcceptClients() {
 	for {
-		conn, result, err := o.cfg.Listener.Accept()
+		conn, result, err := o.cfg.ClientListener.Accept()
 		if err != nil {
 			select {
 			case <-o.ctx.Done():
 				return
 			default:
-				log.Errorf("Accept failed: %v", err)
+				log.Errorf("Client accept failed: %v", err)
 				continue
 			}
 		}
-
-		pc := &peerConn{
-			conn:     conn,
-			clientID: result.ClientID,
-			ip:       result.Config.IPPrefix,
+		if conn == nil || result == nil {
+			return
 		}
 
-		addr := result.Config.IPPrefix.Addr()
-		o.mu.Lock()
-		o.peers[addr] = pc
-		o.mu.Unlock()
+		cp := &ClientPeer{
+			Conn:       conn,
+			SessionID:  result.ClientID,
+			IP:         result.Config.IPPrefix,
+			AllowedIPs: result.Config.AllowedRanges,
+		}
+
+		o.clients.Add(cp)
 
 		log.Infof("Client %x connected, assigned %s from %s",
 			result.ClientID, result.Config.IPPrefix, conn.RemoteAddr())
 
-		// Start reading packets from this client
-		go o.routineReadFromClient(pc)
+		go o.routineReadFromClient(cp)
 	}
 }
 
-// routineReadFromClient reads packets from a client and routes them to the destination client.
-func (o *Operator) routineReadFromClient(pc *peerConn) {
+// routineAcceptOperators accepts incoming TCP connections from peer operators.
+func (o *Operator) routineAcceptOperators() {
+	for {
+		conn, err := o.opListener.Accept()
+		if err != nil {
+			select {
+			case <-o.ctx.Done():
+				return
+			default:
+				log.Errorf("Operator accept failed: %v", err)
+				continue
+			}
+		}
+
+		// UUID is unknown until Register frame arrives
+		peer := NewOperatorPeer(OperatorUUIDType{}, conn)
+		log.Infof("Operator peer connected from %s", conn.RemoteAddr())
+
+		go o.routineHandleOperator(peer)
+	}
+}
+
+// routineHandleOperator handles frames from a peer operator.
+func (o *Operator) routineHandleOperator(peer *OperatorPeer) {
+	defer peer.Close()
+
+	for {
+		select {
+		case <-o.ctx.Done():
+			return
+		default:
+		}
+
+		frame, err := peer.Recv()
+		if err != nil {
+			log.Errorf("Operator peer %s read error: %v", peer.RemoteAddr(), err)
+			return
+		}
+
+		switch frame.Type {
+		case MsgData:
+			o.handleOperatorData(frame)
+		case MsgControl:
+			o.handleOperatorControl(peer, frame)
+		default:
+			log.Debugf("Unknown frame type %d from operator %s", frame.Type, peer.RemoteAddr())
+		}
+	}
+}
+
+// handleOperatorData processes a data frame forwarded from a peer operator.
+func (o *Operator) handleOperatorData(frame *Frame) {
+	df, err := ParseDataFrame(frame.Content)
+	if err != nil {
+		log.Debugf("Dropping malformed data frame: %v", err)
+		return
+	}
+
+	dstIP, err := packetDstIP(df.Packet)
+	if err != nil {
+		log.Debugf("Dropping data frame with bad packet: %v", err)
+		return
+	}
+
+	dstAddr, ok := netip.AddrFromSlice(dstIP)
+	if !ok {
+		return
+	}
+
+	target := o.clients.LookupByIP(dstAddr)
+	if target == nil {
+		log.Debugf("No local client for %s (vnet %x)", dstAddr, df.VNetID)
+		return
+	}
+
+	if err := target.Conn.WritePacket(df.Packet); err != nil {
+		log.Errorf("Write to client %x: %v", target.SessionID, err)
+	}
+}
+
+// handleOperatorControl processes a control frame from a peer operator.
+func (o *Operator) handleOperatorControl(peer *OperatorPeer, frame *Frame) {
+	cf, err := ParseControlFrame(frame.Content)
+	if err != nil {
+		log.Debugf("Dropping malformed control frame: %v", err)
+		return
+	}
+
+	switch cf.Subtype {
+	case CtrlPing:
+		peer.SendControl(CtrlPong, cf.Payload)
+	case CtrlPong:
+		o.handlePong(peer, cf.Payload)
+	case CtrlRegister:
+		o.handleRegister(peer, cf.Payload)
+	case CtrlRegisterAck:
+		o.handleRegisterAck(peer, cf.Payload)
+	case CtrlSessionSync:
+		// TODO: update client session in Registry
+	case CtrlSessionRevoke:
+		// TODO: remove client session from Registry
+	default:
+		log.Debugf("Unknown control subtype %d from %s", cf.Subtype, peer.RemoteAddr())
+	}
+}
+
+// routineReadFromClient reads packets from a client and routes them.
+func (o *Operator) routineReadFromClient(cp *ClientPeer) {
 	defer func() {
-		o.removeClient(pc)
-		log.Infof("Client %x disconnected", pc.clientID)
+		o.clients.Remove(cp)
+		cp.Conn.Close()
+		log.Infof("Client %x disconnected", cp.SessionID)
 	}()
 
 	for {
@@ -114,79 +233,174 @@ func (o *Operator) routineReadFromClient(pc *peerConn) {
 		default:
 		}
 
-		data, err := pc.conn.ReadPacket()
+		data, err := cp.Conn.ReadPacket()
 		if err != nil {
-			log.Errorf("Read from client %x: %v", pc.clientID, err)
+			log.Errorf("Read from client %x: %v", cp.SessionID, err)
 			return
 		}
 		if len(data) == 0 {
 			continue
 		}
 
-		// Extract destination IP from the IP packet
 		dstIP, err := packetDstIP(data)
 		if err != nil {
-			log.Debugf("Dropping malformed packet from %x: %v", pc.clientID, err)
+			log.Debugf("Dropping malformed packet from %x: %v", cp.SessionID, err)
 			continue
 		}
 
-		// Find the target client by destination IP
-		o.mu.RLock()
-		target := o.findPeerByIP(dstIP)
-		o.mu.RUnlock()
-
-		if target == nil {
-			log.Debugf("No route for %s from client %x", net.IP(dstIP), pc.clientID)
+		dstAddr, ok := netip.AddrFromSlice(dstIP)
+		if !ok {
+			log.Debugf("Invalid dst IP from %x", cp.SessionID)
 			continue
 		}
 
-		// Forward packet to the destination client
-		if err := target.conn.WritePacket(data); err != nil {
-			log.Errorf("Write to client %x: %v", target.clientID, err)
+		// Try local client first
+		target := o.clients.LookupByIP(dstAddr)
+		if target != nil {
+			if err := target.Conn.WritePacket(data); err != nil {
+				log.Errorf("Write to client %x: %v", target.SessionID, err)
+			}
+			continue
 		}
+
+		// TODO: lookup Registry to find which remote operator owns this IP,
+		// then forward via the corresponding OperatorPeer.
+		log.Debugf("No route for %s from client %x", net.IP(dstIP), cp.SessionID)
 	}
 }
 
-// findPeerByIP looks up a connected client by destination IP.
-func (o *Operator) findPeerByIP(dstIP []byte) *peerConn {
-	addr, ok := netip.AddrFromSlice(dstIP)
+// DialOperator connects to a remote operator and performs mutual registration.
+func (o *Operator) DialOperator(addr string) error {
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("dial operator %s: %w", addr, err)
+	}
+
+	peer := NewOperatorPeer(OperatorUUIDType{}, conn)
+
+	// Send our UUID as Register
+	if err := peer.SendControl(CtrlRegister, o.cfg.UUID[:]); err != nil {
+		peer.Close()
+		return fmt.Errorf("send register to %s: %w", addr, err)
+	}
+
+	// Read RegisterAck to get remote UUID
+	frame, err := peer.Recv()
+	if err != nil {
+		peer.Close()
+		return fmt.Errorf("recv register ack from %s: %w", addr, err)
+	}
+
+	if frame.Type != MsgControl {
+		peer.Close()
+		return fmt.Errorf("unexpected frame type %d from %s", frame.Type, addr)
+	}
+	cf, err := ParseControlFrame(frame.Content)
+	if err != nil {
+		peer.Close()
+		return fmt.Errorf("parse control from %s: %w", addr, err)
+	}
+	if cf.Subtype != CtrlRegisterAck {
+		peer.Close()
+		return fmt.Errorf("expected RegisterAck, got subtype %d from %s", cf.Subtype, addr)
+	}
+
+	copy(peer.UUID[:], cf.Payload)
+
+	o.operators.Add(peer)
+	o.Registry.SetOperator(peer.UUID, &OperatorEntry{Addr: addr})
+	log.Infof("Registered with operator %x at %s", peer.UUID, addr)
+
+	go o.routineHandleOperator(peer)
+	return nil
+}
+
+// handleRegister processes an incoming CtrlRegister from a peer operator.
+func (o *Operator) handleRegister(peer *OperatorPeer, payload []byte) {
+	if len(payload) < 16 {
+		log.Debugf("Register payload too short from %s", peer.RemoteAddr())
+		return
+	}
+
+	copy(peer.UUID[:], payload)
+
+	// Reply with our UUID
+	peer.SendControl(CtrlRegisterAck, o.cfg.UUID[:])
+
+	o.operators.Add(peer)
+	o.Registry.SetOperator(peer.UUID, &OperatorEntry{Addr: peer.RemoteAddr()})
+	log.Infof("Operator %x registered from %s", peer.UUID, peer.RemoteAddr())
+}
+
+// handleRegisterAck processes an incoming CtrlRegisterAck from a peer operator.
+func (o *Operator) handleRegisterAck(peer *OperatorPeer, payload []byte) {
+	if len(payload) < 16 {
+		log.Debugf("RegisterAck payload too short from %s", peer.RemoteAddr())
+		return
+	}
+
+	copy(peer.UUID[:], payload)
+
+	o.operators.Add(peer)
+	o.Registry.SetOperator(peer.UUID, &OperatorEntry{Addr: peer.RemoteAddr()})
+	log.Infof("Operator %x acked from %s", peer.UUID, peer.RemoteAddr())
+}
+
+// handlePong processes a Pong response and updates PingCost in Registry.
+func (o *Operator) handlePong(peer *OperatorPeer, payload []byte) {
+	sentNano, err := DecodePingPayload(payload)
+	if err != nil {
+		log.Debugf("Bad pong payload from %s: %v", peer.RemoteAddr(), err)
+		return
+	}
+
+	rtt := time.Duration(time.Now().UnixNano() - sentNano)
+
+	entry, ok := o.Registry.GetOperator(peer.UUID)
 	if !ok {
-		return nil
+		log.Warnf("handlePong: operator %x not in registry", peer.UUID)
+		return
 	}
-	return o.peers[addr]
+	entry.PingCost = rtt
+	entry.LastPing = time.Now()
+	o.Registry.SetOperator(peer.UUID, entry)
+
+	log.Infof("Pong from %x: RTT=%v", peer.UUID, rtt)
 }
 
-func (o *Operator) removeClient(pc *peerConn) {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-
-	addr := pc.ip.Addr()
-	if existing, ok := o.peers[addr]; ok && existing == pc {
-		delete(o.peers, addr)
+// PingOperator sends a Ping to a remote operator by UUID.
+func (o *Operator) PingOperator(uuid OperatorUUIDType) error {
+	peer, ok := o.operators.Get(uuid)
+	if !ok {
+		return fmt.Errorf("operator %x not found", uuid)
 	}
-	pc.conn.Close()
+	return peer.SendControl(CtrlPing, EncodePingPayload(time.Now().UnixNano()))
 }
 
 func (o *Operator) Close() error {
 	o.cancel()
-	if o.cfg.Listener != nil {
-		o.cfg.Listener.Close()
+
+	if o.cfg.ClientListener != nil {
+		o.cfg.ClientListener.Close()
+	}
+	if o.opListener != nil {
+		o.opListener.Close()
 	}
 
-	o.mu.Lock()
-	for _, pc := range o.peers {
-		pc.conn.Close()
-	}
-	o.mu.Unlock()
+	o.clients.CloseAll()
+	o.operators.CloseAll()
 
 	return nil
 }
 
 // ConnectedClients returns the number of currently connected clients.
 func (o *Operator) ConnectedClients() int {
-	o.mu.RLock()
-	defer o.mu.RUnlock()
-	return len(o.peers)
+	return o.clients.Len()
+}
+
+// ConnectedOperators returns the number of connected peer operators.
+func (o *Operator) ConnectedOperators() int {
+	return o.operators.Len()
 }
 
 // packetDstIP extracts the destination IP from an IP packet.
@@ -200,12 +414,12 @@ func packetDstIP(data []byte) ([]byte, error) {
 		if len(data) < ipv4.HeaderLen {
 			return nil, fmt.Errorf("short IPv4 packet: %d", len(data))
 		}
-		return data[16:20], nil // IPv4 dst offset
+		return data[16:20], nil
 	case 6:
 		if len(data) < ipv6.HeaderLen {
 			return nil, fmt.Errorf("short IPv6 packet: %d", len(data))
 		}
-		return data[24:40], nil // IPv6 dst offset
+		return data[24:40], nil
 	default:
 		return nil, fmt.Errorf("unknown IP version: %d", version)
 	}

@@ -16,6 +16,7 @@ import (
 	"github.com/jabberwocky238/gasoline/client"
 	"github.com/jabberwocky238/gasoline/operator"
 	"github.com/jabberwocky238/gasoline/protocol"
+	"github.com/jabberwocky238/gasoline/transport"
 	"github.com/jabberwocky238/gasoline/transport/tcp"
 	"github.com/jabberwocky238/gasoline/transport/udp"
 )
@@ -41,7 +42,8 @@ func usage() {
   gasoline client   [flags]
 
 Operator flags:
-  --listen      Listen address (e.g. 0.0.0.0:443)
+  --listen      Client listen address (e.g. 0.0.0.0:443)
+  --op-listen   Operator listen address (e.g. 0.0.0.0:6677)
   --transport   Transport type: tcp, udp (default: tcp)
   --auth        Auth type: noauth, hmac, userpass (default: noauth)
   --network     Internal network CIDR (e.g. 10.0.0.0/24)
@@ -51,7 +53,8 @@ Client flags:
   --endpoint    Server address (e.g. 1.2.3.4:443)
   --transport   Transport type: tcp, udp (default: tcp)
   --auth        Auth type: noauth, hmac, userpass (default: noauth)
-  --id          Client ID in hex (max 32 hex chars = 16 bytes)
+  --session     Session ID in hex (max 32 hex chars = 16 bytes)
+  --vnet        VNet ID in hex (max 32 hex chars = 16 bytes)
   --secret      Shared secret for HMAC auth
   --username    Username for userpass auth
   --password    Password for userpass auth
@@ -63,7 +66,8 @@ Client flags:
 
 func runOperator(args []string) {
 	fs := flag.NewFlagSet("operator", flag.ExitOnError)
-	listenAddr := fs.String("listen", "0.0.0.0:443", "listen address")
+	listenAddr := fs.String("listen", "0.0.0.0:443", "client listen address")
+	opListenAddr := fs.String("op-listen", "0.0.0.0:6677", "operator listen address")
 	transportType := fs.String("transport", "tcp", "transport type: tcp, udp")
 	authType := fs.String("auth", "noauth", "auth type: noauth, hmac, userpass")
 	network := fs.String("network", "10.0.0.0/24", "internal network CIDR")
@@ -93,7 +97,7 @@ func runOperator(args []string) {
 	// Auth
 	serverAuth := makeServerAuth(*authType, *secret)
 
-	// ConfigFunc: allocate IP + generate client WG key
+	// ConfigFunc: allocate IP + generate client WG key + assign session ID
 	configFn := func(clientID [16]byte) (*protocol.SessionConfig, error) {
 		seq := ipCounter.Add(1) - 1
 		clientIP := addToAddr(baseAddr, seq)
@@ -106,7 +110,14 @@ func runOperator(args []string) {
 			return nil, err
 		}
 
+		// Get session ID from NoAuth server if applicable
+		var sessionID [16]byte
+		if noauth, ok := serverAuth.(*protocol.NoAuthServer); ok {
+			sessionID = noauth.LastSessionID
+		}
+
 		return &protocol.SessionConfig{
+			SessionID:        sessionID,
 			ClientPrivateKey: clientPriv,
 			ServerPublicKey:  serverPub,
 			IPPrefix:         netip.PrefixFrom(clientIP, 32),
@@ -114,37 +125,37 @@ func runOperator(args []string) {
 		}, nil
 	}
 
-	// Create listener
-	var op *operator.Operator
+	// Create client listener
+	var clientListener transport.Listener
 	switch *transportType {
 	case "tcp":
 		l, err := tcp.NewListener(*listenAddr, serverAuth, configFn)
 		if err != nil {
 			log.Fatalf("TCP listen: %v", err)
 		}
-		op = operator.New(&operator.Config{
-			Auth:     serverAuth,
-			ConfigFn: configFn,
-			Listener: l,
-		})
+		clientListener = l
 	case "udp":
 		l, err := udp.NewListener(*listenAddr, serverAuth, configFn)
 		if err != nil {
 			log.Fatalf("UDP listen: %v", err)
 		}
-		op = operator.New(&operator.Config{
-			Auth:     serverAuth,
-			ConfigFn: configFn,
-			Listener: l,
-		})
+		clientListener = l
 	default:
 		log.Fatalf("Unknown transport: %s", *transportType)
 	}
 
+	op := operator.New(&operator.Config{
+		Auth:               serverAuth,
+		ConfigFn:           configFn,
+		ClientListener:     clientListener,
+		OperatorListenAddr: *opListenAddr,
+	})
+
 	if err := op.Start(); err != nil {
 		log.Fatalf("Operator start: %v", err)
 	}
-	log.Infof("Operator started on %s (%s, %s, network %s)", *listenAddr, *transportType, *authType, *network)
+	log.Infof("Operator started: client=%s (%s, %s), operator=%s, network=%s",
+		*listenAddr, *transportType, *authType, *opListenAddr, *network)
 	waitForSignal()
 	op.Close()
 }
@@ -156,7 +167,8 @@ func runClient(args []string) {
 	endpoint := fs.String("endpoint", "", "server address (required)")
 	transportType := fs.String("transport", "tcp", "transport type: tcp, udp")
 	authType := fs.String("auth", "noauth", "auth type: noauth, hmac, userpass")
-	clientIDHex := fs.String("id", "", "client ID in hex (max 32 hex chars)")
+	sessionIDHex := fs.String("session", "", "session ID in hex (max 32 hex chars)")
+	vnetIDHex := fs.String("vnet", "", "vnet ID in hex (max 32 hex chars)")
 	secret := fs.String("secret", "", "shared secret for HMAC auth")
 	username := fs.String("username", "", "username for userpass auth")
 	password := fs.String("password", "", "password for userpass auth")
@@ -166,33 +178,51 @@ func runClient(args []string) {
 		log.Fatal("--endpoint is required")
 	}
 
-	// Parse client ID
-	var clientID [16]byte
-	if *clientIDHex != "" {
-		b, err := hex.DecodeString(*clientIDHex)
+	// Parse session ID and vnet ID
+	var sessionID [16]byte
+	if *sessionIDHex != "" {
+		b, err := hex.DecodeString(*sessionIDHex)
 		if err != nil {
-			log.Fatalf("Invalid client ID hex: %v", err)
+			log.Fatalf("Invalid session ID hex: %v", err)
 		}
-		copy(clientID[:], b)
+		copy(sessionID[:], b)
+	}
+	var vnetID [16]byte
+	if *vnetIDHex != "" {
+		b, err := hex.DecodeString(*vnetIDHex)
+		if err != nil {
+			log.Fatalf("Invalid vnet ID hex: %v", err)
+		}
+		copy(vnetID[:], b)
 	}
 
 	// Auth
-	clientAuth := makeClientAuth(*authType, *secret, *username, *password)
+	var clientAuth protocol.ClientAuthenticator
+	if *authType == "noauth" {
+		clientAuth = &protocol.NoAuthClient{
+			VNetID:      vnetID,
+			Fingerprint: []byte("default-fingerprint"), // TODO: real device fingerprint
+		}
+	} else {
+		clientAuth = makeClientAuth(*authType, *secret, *username, *password)
+	}
 
 	// Dialer
 	var cfg *client.Config
 	switch *transportType {
 	case "tcp":
 		cfg = &client.Config{
-			Endpoint: *endpoint,
-			ClientID: clientID,
-			Dialer:   tcp.NewDialer(clientID, clientAuth),
+			Endpoint:  *endpoint,
+			SessionID: sessionID,
+			VNetID:    vnetID,
+			Dialer:    tcp.NewDialer(sessionID, clientAuth),
 		}
 	case "udp":
 		cfg = &client.Config{
-			Endpoint: *endpoint,
-			ClientID: clientID,
-			Dialer:   udp.NewDialer(clientID, clientAuth),
+			Endpoint:  *endpoint,
+			SessionID: sessionID,
+			VNetID:    vnetID,
+			Dialer:    udp.NewDialer(sessionID, clientAuth),
 		}
 	default:
 		log.Fatalf("Unknown transport: %s", *transportType)

@@ -7,7 +7,7 @@ import (
 
 	log "github.com/sirupsen/logrus"
 
-	"github.com/jabberwocky238/gasoline/device"
+	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/transport"
 	tunPkg "github.com/jabberwocky238/gasoline/tun"
 )
@@ -15,8 +15,10 @@ import (
 type Config struct {
 	// Server endpoint to dial, e.g. "1.2.3.4:443"
 	Endpoint string
-	// Client identity
-	ClientID [16]byte
+	// VNetID is the virtual network this client belongs to
+	VNetID [16]byte
+	// SessionID is this client's unique session identifier
+	SessionID [16]byte
 	// Dialer creates the transport connection (TCP/UDP/QUIC)
 	// Auth and handshake are handled internally by the Dialer.
 	Dialer transport.Dialer
@@ -30,8 +32,6 @@ type Client struct {
 	cfg  *Config
 	tun  *tunPkg.Tun
 	conn transport.Conn
-
-	pools *device.Pools
 }
 
 func New(cfg *Config) *Client {
@@ -40,7 +40,6 @@ func New(cfg *Config) *Client {
 		cfg:    cfg,
 		ctx:    ctx,
 		cancel: cancel,
-		pools:  device.NewPool(),
 	}
 }
 
@@ -85,7 +84,6 @@ func (c *Client) routineTUNToConn() {
 	defer log.Debugf("Routine: TUN→Conn stopped")
 	log.Debugf("Routine: TUN→Conn started")
 
-	buf := make([]byte, device.MaxMtu)
 	for {
 		select {
 		case <-c.ctx.Done():
@@ -93,20 +91,25 @@ func (c *Client) routineTUNToConn() {
 		default:
 		}
 
-		n, err := c.tun.Read(buf)
+		buf := common.GetBuffer()
+		n, err := c.tun.Read(*buf)
 		if err != nil {
+			common.PutBuffer(buf)
 			log.Errorf("TUN read: %v", err)
 			return
 		}
 		if n < 1 {
+			common.PutBuffer(buf)
 			continue
 		}
 
 		// Send packet to server
-		if err := c.conn.WritePacket(buf[:n]); err != nil {
+		if err := c.conn.WritePacket((*buf)[:n]); err != nil {
+			common.PutBuffer(buf)
 			log.Errorf("Conn write: %v", err)
 			return
 		}
+		common.PutBuffer(buf)
 	}
 }
 

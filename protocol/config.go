@@ -16,6 +16,7 @@ import (
 //
 // Fixed part = 81 bytes, each range = 17 bytes.
 type SessionConfig struct {
+	SessionID        [16]byte       // Session ID assigned by server
 	ClientPrivateKey PrivateKey     // WG private key assigned to client
 	ServerPublicKey  PublicKey      // Server's WG public key
 	IPPrefix         netip.Prefix   // Client's assigned IP (e.g. 10.0.0.2/24)
@@ -23,8 +24,8 @@ type SessionConfig struct {
 }
 
 const (
-	configFixedSize = 32 + 32 + 16 + 1 // 81
-	prefixEntrySize = 16 + 1            // 17 per prefix
+	configFixedSize = 16 + 32 + 32 + 16 + 1 // 97
+	prefixEntrySize = 16 + 1                 // 17 per prefix
 )
 
 func (c *SessionConfig) Marshal() []byte {
@@ -32,18 +33,21 @@ func (c *SessionConfig) Marshal() []byte {
 	totalSize := configFixedSize + 2 + rangeCount*prefixEntrySize
 	buf := make([]byte, totalSize)
 
+	// SessionID
+	copy(buf[0:16], c.SessionID[:])
+
 	// Keys
-	copy(buf[0:32], c.ClientPrivateKey[:])
-	copy(buf[32:64], c.ServerPublicKey[:])
+	copy(buf[16:48], c.ClientPrivateKey[:])
+	copy(buf[48:80], c.ServerPublicKey[:])
 
 	// Client IP prefix (always stored as 16-byte addr)
 	addr16 := c.IPPrefix.Addr().As16()
-	copy(buf[64:80], addr16[:])
-	buf[80] = byte(c.IPPrefix.Bits())
+	copy(buf[80:96], addr16[:])
+	buf[96] = byte(c.IPPrefix.Bits())
 
 	// Allowed ranges
-	binary.BigEndian.PutUint16(buf[81:83], uint16(rangeCount))
-	offset := 83
+	binary.BigEndian.PutUint16(buf[97:99], uint16(rangeCount))
+	offset := 99
 	for _, r := range c.AllowedRanges {
 		a16 := r.Addr().As16()
 		copy(buf[offset:offset+16], a16[:])
@@ -59,14 +63,17 @@ func (c *SessionConfig) Unmarshal(data []byte) error {
 		return fmt.Errorf("session config too short: %d bytes", len(data))
 	}
 
+	// SessionID
+	copy(c.SessionID[:], data[0:16])
+
 	// Keys
-	copy(c.ClientPrivateKey[:], data[0:32])
-	copy(c.ServerPublicKey[:], data[32:64])
+	copy(c.ClientPrivateKey[:], data[16:48])
+	copy(c.ServerPublicKey[:], data[48:80])
 
 	// Client IP prefix
 	var a16 [16]byte
-	copy(a16[:], data[64:80])
-	bits := int(data[80])
+	copy(a16[:], data[80:96])
+	bits := int(data[96])
 	addr := netip.AddrFrom16(a16)
 	if addr.Is4In6() {
 		addr = addr.Unmap()
@@ -74,7 +81,7 @@ func (c *SessionConfig) Unmarshal(data []byte) error {
 	c.IPPrefix = netip.PrefixFrom(addr, bits)
 
 	// Allowed ranges
-	rangeCount := int(binary.BigEndian.Uint16(data[81:83]))
+	rangeCount := int(binary.BigEndian.Uint16(data[97:99]))
 	expectedLen := configFixedSize + 2 + rangeCount*prefixEntrySize
 	if len(data) < expectedLen {
 		return fmt.Errorf("session config too short for %d ranges: need %d, got %d",
@@ -82,7 +89,7 @@ func (c *SessionConfig) Unmarshal(data []byte) error {
 	}
 
 	c.AllowedRanges = make([]netip.Prefix, rangeCount)
-	offset := 83
+	offset := 99
 	for i := 0; i < rangeCount; i++ {
 		var ra [16]byte
 		copy(ra[:], data[offset:offset+16])

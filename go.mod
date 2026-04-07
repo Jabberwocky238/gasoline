@@ -3,8 +3,8 @@ module github.com/jabberwocky238/gasoline
 go 1.25.7
 
 require (
-	github.com/google/gopacket v1.1.19
 	github.com/metacubex/sing v0.5.6
+	github.com/quic-go/quic-go v0.59.0
 	github.com/sagernet/sing-tun v0.8.6
 	golang.org/x/net v0.50.0
 )

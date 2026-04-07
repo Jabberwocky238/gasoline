@@ -2,7 +2,9 @@ package tun
 
 import (
 	"fmt"
+	"math/rand"
 	"net/netip"
+	"runtime"
 
 	"github.com/jabberwocky238/gasoline/tun/common/log"
 
@@ -16,11 +18,22 @@ type Tun struct {
 }
 
 func New(name string, address string) (*Tun, error) {
+	if name == "" {
+		name = defaultTUNName()
+	}
 	tunIf, err := newSingTun(name, address)
 	if err != nil {
 		return nil, err
 	}
 	return &Tun{tunIf: tunIf}, nil
+}
+
+func defaultTUNName() string {
+	n := rand.Intn(10000)
+	if runtime.GOOS == "darwin" {
+		return fmt.Sprintf("utun%04d", n)
+	}
+	return fmt.Sprintf("gatun%04d", n)
 }
 
 func (t *Tun) Read(buf []byte) (int, error) {

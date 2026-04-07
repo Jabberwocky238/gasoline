@@ -1,16 +1,5 @@
 package quic
 
-// QUIC transport requires github.com/quic-go/quic-go dependency.
-// Add to go.mod: go get github.com/quic-go/quic-go
-//
-// Example usage:
-//
-//	dialer := quic.NewDialer(clientID, auth, tlsConf)
-//	conn, result, err := dialer.Dial("server:443")
-
-// TODO: Uncomment when quic-go is added as a dependency.
-
-/*
 import (
 	"context"
 	"crypto/tls"
@@ -42,7 +31,6 @@ func (d *Dialer) Dial(endpoint string) (transport.Conn, *protocol.HandshakeResul
 		return nil, nil, err
 	}
 
-	// Handshake over QUIC stream (implements io.ReadWriter)
 	result, err := protocol.ClientHandshake(stream, d.clientID, d.auth)
 	if err != nil {
 		conn.CloseWithError(0, "handshake failed")
@@ -51,4 +39,3 @@ func (d *Dialer) Dial(endpoint string) (transport.Conn, *protocol.HandshakeResul
 
 	return newConn(stream, result.Keypair, conn.RemoteAddr().String()), result, nil
 }
-*/

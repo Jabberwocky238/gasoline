@@ -8,9 +8,6 @@ package quic
 //	ln, _ := quic.NewListener("0.0.0.0:443", auth, configFn, tlsConf)
 //	conn, result, err := ln.Accept()
 
-// TODO: Uncomment when quic-go is added as a dependency.
-
-/*
 import (
 	"context"
 	"crypto/tls"
@@ -57,4 +54,3 @@ func (l *Listener) Accept() (transport.Conn, *protocol.HandshakeResult, error) {
 
 func (l *Listener) Close() error { return l.inner.Close() }
 func (l *Listener) Addr() string { return l.inner.Addr().String() }
-*/

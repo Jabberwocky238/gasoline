@@ -203,9 +203,7 @@ func createListener(transportType, addr string, auth protocol.ServerAuthenticato
 		if err != nil {
 			return nil, err
 		}
-		_ = tlsConf // TODO: uncomment when quic-go is added
-		return nil, fmt.Errorf("QUIC transport not yet available (quic-go dependency needed)")
-		// return quic.NewListener(addr, auth, configFn, tlsConf)
+		return quic.NewListener(addr, auth, configFn, tlsConf)
 	default:
 		return nil, fmt.Errorf("unknown transport: %s", transportType)
 	}
@@ -218,9 +216,7 @@ func createDialer(transportType string, sessionID [16]byte, auth protocol.Client
 	case "udp":
 		return udp.NewDialer(sessionID, auth), nil
 	case "quic":
-		_ = quic.InsecureClientTLS() // TODO: uncomment when quic-go is added
-		return nil, fmt.Errorf("QUIC transport not yet available (quic-go dependency needed)")
-		// return quic.NewDialer(sessionID, auth, quic.InsecureClientTLS()), nil
+		return quic.NewDialer(sessionID, auth, quic.InsecureClientTLS()), nil
 	default:
 		return nil, fmt.Errorf("unknown transport: %s", transportType)
 	}

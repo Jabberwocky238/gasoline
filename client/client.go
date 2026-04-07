@@ -19,6 +19,8 @@ type Config struct {
 	VNetID [16]byte
 	// SessionID is this client's unique session identifier
 	SessionID [16]byte
+	// TUNName is the name of the TUN device (default: gtun-XXXX)
+	TUNName string
 	// Dialer creates the transport connection (TCP/UDP/QUIC)
 	// Auth and handshake are handled internally by the Dialer.
 	Dialer transport.Dialer
@@ -59,7 +61,7 @@ func (c *Client) Start() error {
 	log.Infof("Handshake OK: assigned IP %s", cfg.IPPrefix.String())
 
 	// 2. Create TUN with assigned IP
-	tun, err := tunPkg.New("gasoline-tun", cfg.IPPrefix.String())
+	tun, err := tunPkg.New(c.cfg.TUNName, cfg.IPPrefix.String())
 	if err != nil {
 		conn.Close()
 		return fmt.Errorf("create TUN: %w", err)

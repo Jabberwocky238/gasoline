@@ -21,39 +21,26 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// ControlMessage is the top-level envelope for all inter-operator control messages.
-// Replaces the raw [subtype:1][payload:N] encoding.
-type ControlMessage struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// Types that are valid to be assigned to Payload:
-	//
-	//	*ControlMessage_Ping
-	//	*ControlMessage_Pong
-	//	*ControlMessage_Register
-	//	*ControlMessage_RegisterAck
-	//	*ControlMessage_SessionSync
-	//	*ControlMessage_SessionRevoke
-	//	*ControlMessage_DiscoverReq
-	//	*ControlMessage_DiscoverResp
-	Payload       isControlMessage_Payload `protobuf_oneof:"payload"`
+type Ack struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *ControlMessage) Reset() {
-	*x = ControlMessage{}
+func (x *Ack) Reset() {
+	*x = Ack{}
 	mi := &file_operator_ctrl_control_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *ControlMessage) String() string {
+func (x *Ack) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*ControlMessage) ProtoMessage() {}
+func (*Ack) ProtoMessage() {}
 
-func (x *ControlMessage) ProtoReflect() protoreflect.Message {
+func (x *Ack) ProtoReflect() protoreflect.Message {
 	mi := &file_operator_ctrl_control_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -65,256 +52,34 @@ func (x *ControlMessage) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use ControlMessage.ProtoReflect.Descriptor instead.
-func (*ControlMessage) Descriptor() ([]byte, []int) {
+// Deprecated: Use Ack.ProtoReflect.Descriptor instead.
+func (*Ack) Descriptor() ([]byte, []int) {
 	return file_operator_ctrl_control_proto_rawDescGZIP(), []int{0}
 }
 
-func (x *ControlMessage) GetPayload() isControlMessage_Payload {
-	if x != nil {
-		return x.Payload
-	}
-	return nil
-}
-
-func (x *ControlMessage) GetPing() *Ping {
-	if x != nil {
-		if x, ok := x.Payload.(*ControlMessage_Ping); ok {
-			return x.Ping
-		}
-	}
-	return nil
-}
-
-func (x *ControlMessage) GetPong() *Pong {
-	if x != nil {
-		if x, ok := x.Payload.(*ControlMessage_Pong); ok {
-			return x.Pong
-		}
-	}
-	return nil
-}
-
-func (x *ControlMessage) GetRegister() *Register {
-	if x != nil {
-		if x, ok := x.Payload.(*ControlMessage_Register); ok {
-			return x.Register
-		}
-	}
-	return nil
-}
-
-func (x *ControlMessage) GetRegisterAck() *RegisterAck {
-	if x != nil {
-		if x, ok := x.Payload.(*ControlMessage_RegisterAck); ok {
-			return x.RegisterAck
-		}
-	}
-	return nil
-}
-
-func (x *ControlMessage) GetSessionSync() *SessionSync {
-	if x != nil {
-		if x, ok := x.Payload.(*ControlMessage_SessionSync); ok {
-			return x.SessionSync
-		}
-	}
-	return nil
-}
-
-func (x *ControlMessage) GetSessionRevoke() *SessionRevoke {
-	if x != nil {
-		if x, ok := x.Payload.(*ControlMessage_SessionRevoke); ok {
-			return x.SessionRevoke
-		}
-	}
-	return nil
-}
-
-func (x *ControlMessage) GetDiscoverReq() *DiscoverReq {
-	if x != nil {
-		if x, ok := x.Payload.(*ControlMessage_DiscoverReq); ok {
-			return x.DiscoverReq
-		}
-	}
-	return nil
-}
-
-func (x *ControlMessage) GetDiscoverResp() *DiscoverResp {
-	if x != nil {
-		if x, ok := x.Payload.(*ControlMessage_DiscoverResp); ok {
-			return x.DiscoverResp
-		}
-	}
-	return nil
-}
-
-type isControlMessage_Payload interface {
-	isControlMessage_Payload()
-}
-
-type ControlMessage_Ping struct {
-	Ping *Ping `protobuf:"bytes,1,opt,name=ping,proto3,oneof"`
-}
-
-type ControlMessage_Pong struct {
-	Pong *Pong `protobuf:"bytes,2,opt,name=pong,proto3,oneof"`
-}
-
-type ControlMessage_Register struct {
-	Register *Register `protobuf:"bytes,3,opt,name=register,proto3,oneof"`
-}
-
-type ControlMessage_RegisterAck struct {
-	RegisterAck *RegisterAck `protobuf:"bytes,4,opt,name=register_ack,json=registerAck,proto3,oneof"`
-}
-
-type ControlMessage_SessionSync struct {
-	SessionSync *SessionSync `protobuf:"bytes,5,opt,name=session_sync,json=sessionSync,proto3,oneof"`
-}
-
-type ControlMessage_SessionRevoke struct {
-	SessionRevoke *SessionRevoke `protobuf:"bytes,6,opt,name=session_revoke,json=sessionRevoke,proto3,oneof"`
-}
-
-type ControlMessage_DiscoverReq struct {
-	DiscoverReq *DiscoverReq `protobuf:"bytes,7,opt,name=discover_req,json=discoverReq,proto3,oneof"`
-}
-
-type ControlMessage_DiscoverResp struct {
-	DiscoverResp *DiscoverResp `protobuf:"bytes,8,opt,name=discover_resp,json=discoverResp,proto3,oneof"`
-}
-
-func (*ControlMessage_Ping) isControlMessage_Payload() {}
-
-func (*ControlMessage_Pong) isControlMessage_Payload() {}
-
-func (*ControlMessage_Register) isControlMessage_Payload() {}
-
-func (*ControlMessage_RegisterAck) isControlMessage_Payload() {}
-
-func (*ControlMessage_SessionSync) isControlMessage_Payload() {}
-
-func (*ControlMessage_SessionRevoke) isControlMessage_Payload() {}
-
-func (*ControlMessage_DiscoverReq) isControlMessage_Payload() {}
-
-func (*ControlMessage_DiscoverResp) isControlMessage_Payload() {}
-
-// Ping carries a timestamp for RTT measurement.
-type Ping struct {
+type RegisterReq struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	UnixNano      int64                  `protobuf:"varint,1,opt,name=unix_nano,json=unixNano,proto3" json:"unix_nano,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *Ping) Reset() {
-	*x = Ping{}
-	mi := &file_operator_ctrl_control_proto_msgTypes[1]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *Ping) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*Ping) ProtoMessage() {}
-
-func (x *Ping) ProtoReflect() protoreflect.Message {
-	mi := &file_operator_ctrl_control_proto_msgTypes[1]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use Ping.ProtoReflect.Descriptor instead.
-func (*Ping) Descriptor() ([]byte, []int) {
-	return file_operator_ctrl_control_proto_rawDescGZIP(), []int{1}
-}
-
-func (x *Ping) GetUnixNano() int64 {
-	if x != nil {
-		return x.UnixNano
-	}
-	return 0
-}
-
-// Pong echoes the Ping timestamp.
-type Pong struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	UnixNano      int64                  `protobuf:"varint,1,opt,name=unix_nano,json=unixNano,proto3" json:"unix_nano,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *Pong) Reset() {
-	*x = Pong{}
-	mi := &file_operator_ctrl_control_proto_msgTypes[2]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *Pong) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*Pong) ProtoMessage() {}
-
-func (x *Pong) ProtoReflect() protoreflect.Message {
-	mi := &file_operator_ctrl_control_proto_msgTypes[2]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use Pong.ProtoReflect.Descriptor instead.
-func (*Pong) Descriptor() ([]byte, []int) {
-	return file_operator_ctrl_control_proto_rawDescGZIP(), []int{2}
-}
-
-func (x *Pong) GetUnixNano() int64 {
-	if x != nil {
-		return x.UnixNano
-	}
-	return 0
-}
-
-// Register announces this operator to a peer.
-type Register struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Uuid          []byte                 `protobuf:"bytes,1,opt,name=uuid,proto3" json:"uuid,omitempty"`                                     // 16 bytes, operator UUID
+	Uuid          []byte                 `protobuf:"bytes,1,opt,name=uuid,proto3" json:"uuid,omitempty"`                                     // 16 bytes, caller's operator UUID
 	ExternalAddr  string                 `protobuf:"bytes,2,opt,name=external_addr,json=externalAddr,proto3" json:"external_addr,omitempty"` // address others should use to reach us
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *Register) Reset() {
-	*x = Register{}
-	mi := &file_operator_ctrl_control_proto_msgTypes[3]
+func (x *RegisterReq) Reset() {
+	*x = RegisterReq{}
+	mi := &file_operator_ctrl_control_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *Register) String() string {
+func (x *RegisterReq) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*Register) ProtoMessage() {}
+func (*RegisterReq) ProtoMessage() {}
 
-func (x *Register) ProtoReflect() protoreflect.Message {
-	mi := &file_operator_ctrl_control_proto_msgTypes[3]
+func (x *RegisterReq) ProtoReflect() protoreflect.Message {
+	mi := &file_operator_ctrl_control_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -325,48 +90,142 @@ func (x *Register) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use Register.ProtoReflect.Descriptor instead.
-func (*Register) Descriptor() ([]byte, []int) {
-	return file_operator_ctrl_control_proto_rawDescGZIP(), []int{3}
+// Deprecated: Use RegisterReq.ProtoReflect.Descriptor instead.
+func (*RegisterReq) Descriptor() ([]byte, []int) {
+	return file_operator_ctrl_control_proto_rawDescGZIP(), []int{1}
 }
 
-func (x *Register) GetUuid() []byte {
+func (x *RegisterReq) GetUuid() []byte {
 	if x != nil {
 		return x.Uuid
 	}
 	return nil
 }
 
-func (x *Register) GetExternalAddr() string {
+func (x *RegisterReq) GetExternalAddr() string {
 	if x != nil {
 		return x.ExternalAddr
 	}
 	return ""
 }
 
-// RegisterAck is the reply to Register.
-type RegisterAck struct {
+type RegisterResp struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Uuid          []byte                 `protobuf:"bytes,1,opt,name=uuid,proto3" json:"uuid,omitempty"` // 16 bytes
+	Uuid          []byte                 `protobuf:"bytes,1,opt,name=uuid,proto3" json:"uuid,omitempty"` // 16 bytes, responder's operator UUID
 	ExternalAddr  string                 `protobuf:"bytes,2,opt,name=external_addr,json=externalAddr,proto3" json:"external_addr,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *RegisterAck) Reset() {
-	*x = RegisterAck{}
+func (x *RegisterResp) Reset() {
+	*x = RegisterResp{}
+	mi := &file_operator_ctrl_control_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RegisterResp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RegisterResp) ProtoMessage() {}
+
+func (x *RegisterResp) ProtoReflect() protoreflect.Message {
+	mi := &file_operator_ctrl_control_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RegisterResp.ProtoReflect.Descriptor instead.
+func (*RegisterResp) Descriptor() ([]byte, []int) {
+	return file_operator_ctrl_control_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *RegisterResp) GetUuid() []byte {
+	if x != nil {
+		return x.Uuid
+	}
+	return nil
+}
+
+func (x *RegisterResp) GetExternalAddr() string {
+	if x != nil {
+		return x.ExternalAddr
+	}
+	return ""
+}
+
+type PingReq struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	UnixNano      int64                  `protobuf:"varint,1,opt,name=unix_nano,json=unixNano,proto3" json:"unix_nano,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PingReq) Reset() {
+	*x = PingReq{}
+	mi := &file_operator_ctrl_control_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PingReq) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PingReq) ProtoMessage() {}
+
+func (x *PingReq) ProtoReflect() protoreflect.Message {
+	mi := &file_operator_ctrl_control_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PingReq.ProtoReflect.Descriptor instead.
+func (*PingReq) Descriptor() ([]byte, []int) {
+	return file_operator_ctrl_control_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *PingReq) GetUnixNano() int64 {
+	if x != nil {
+		return x.UnixNano
+	}
+	return 0
+}
+
+type PingResp struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	UnixNano      int64                  `protobuf:"varint,1,opt,name=unix_nano,json=unixNano,proto3" json:"unix_nano,omitempty"` // echo back
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PingResp) Reset() {
+	*x = PingResp{}
 	mi := &file_operator_ctrl_control_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *RegisterAck) String() string {
+func (x *PingResp) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*RegisterAck) ProtoMessage() {}
+func (*PingResp) ProtoMessage() {}
 
-func (x *RegisterAck) ProtoReflect() protoreflect.Message {
+func (x *PingResp) ProtoReflect() protoreflect.Message {
 	mi := &file_operator_ctrl_control_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -378,40 +237,246 @@ func (x *RegisterAck) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use RegisterAck.ProtoReflect.Descriptor instead.
-func (*RegisterAck) Descriptor() ([]byte, []int) {
+// Deprecated: Use PingResp.ProtoReflect.Descriptor instead.
+func (*PingResp) Descriptor() ([]byte, []int) {
 	return file_operator_ctrl_control_proto_rawDescGZIP(), []int{4}
 }
 
-func (x *RegisterAck) GetUuid() []byte {
+func (x *PingResp) GetUnixNano() int64 {
+	if x != nil {
+		return x.UnixNano
+	}
+	return 0
+}
+
+type DiscoverReq struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DiscoverReq) Reset() {
+	*x = DiscoverReq{}
+	mi := &file_operator_ctrl_control_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DiscoverReq) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DiscoverReq) ProtoMessage() {}
+
+func (x *DiscoverReq) ProtoReflect() protoreflect.Message {
+	mi := &file_operator_ctrl_control_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DiscoverReq.ProtoReflect.Descriptor instead.
+func (*DiscoverReq) Descriptor() ([]byte, []int) {
+	return file_operator_ctrl_control_proto_rawDescGZIP(), []int{5}
+}
+
+type DiscoverResp struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Operators     []*OperatorEntry       `protobuf:"bytes,1,rep,name=operators,proto3" json:"operators,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DiscoverResp) Reset() {
+	*x = DiscoverResp{}
+	mi := &file_operator_ctrl_control_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DiscoverResp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DiscoverResp) ProtoMessage() {}
+
+func (x *DiscoverResp) ProtoReflect() protoreflect.Message {
+	mi := &file_operator_ctrl_control_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DiscoverResp.ProtoReflect.Descriptor instead.
+func (*DiscoverResp) Descriptor() ([]byte, []int) {
+	return file_operator_ctrl_control_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *DiscoverResp) GetOperators() []*OperatorEntry {
+	if x != nil {
+		return x.Operators
+	}
+	return nil
+}
+
+type OperatorEntry struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Uuid          []byte                 `protobuf:"bytes,1,opt,name=uuid,proto3" json:"uuid,omitempty"` // 16 bytes
+	Addr          string                 `protobuf:"bytes,2,opt,name=addr,proto3" json:"addr,omitempty"` // external address
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *OperatorEntry) Reset() {
+	*x = OperatorEntry{}
+	mi := &file_operator_ctrl_control_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *OperatorEntry) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*OperatorEntry) ProtoMessage() {}
+
+func (x *OperatorEntry) ProtoReflect() protoreflect.Message {
+	mi := &file_operator_ctrl_control_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use OperatorEntry.ProtoReflect.Descriptor instead.
+func (*OperatorEntry) Descriptor() ([]byte, []int) {
+	return file_operator_ctrl_control_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *OperatorEntry) GetUuid() []byte {
 	if x != nil {
 		return x.Uuid
 	}
 	return nil
 }
 
-func (x *RegisterAck) GetExternalAddr() string {
+func (x *OperatorEntry) GetAddr() string {
 	if x != nil {
-		return x.ExternalAddr
+		return x.Addr
 	}
 	return ""
 }
 
-// SessionSync notifies peers about a new client session.
+type SessionEvent struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Event:
+	//
+	//	*SessionEvent_Sync
+	//	*SessionEvent_Revoke
+	Event         isSessionEvent_Event `protobuf_oneof:"event"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SessionEvent) Reset() {
+	*x = SessionEvent{}
+	mi := &file_operator_ctrl_control_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SessionEvent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SessionEvent) ProtoMessage() {}
+
+func (x *SessionEvent) ProtoReflect() protoreflect.Message {
+	mi := &file_operator_ctrl_control_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SessionEvent.ProtoReflect.Descriptor instead.
+func (*SessionEvent) Descriptor() ([]byte, []int) {
+	return file_operator_ctrl_control_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *SessionEvent) GetEvent() isSessionEvent_Event {
+	if x != nil {
+		return x.Event
+	}
+	return nil
+}
+
+func (x *SessionEvent) GetSync() *SessionSync {
+	if x != nil {
+		if x, ok := x.Event.(*SessionEvent_Sync); ok {
+			return x.Sync
+		}
+	}
+	return nil
+}
+
+func (x *SessionEvent) GetRevoke() *SessionRevoke {
+	if x != nil {
+		if x, ok := x.Event.(*SessionEvent_Revoke); ok {
+			return x.Revoke
+		}
+	}
+	return nil
+}
+
+type isSessionEvent_Event interface {
+	isSessionEvent_Event()
+}
+
+type SessionEvent_Sync struct {
+	Sync *SessionSync `protobuf:"bytes,1,opt,name=sync,proto3,oneof"`
+}
+
+type SessionEvent_Revoke struct {
+	Revoke *SessionRevoke `protobuf:"bytes,2,opt,name=revoke,proto3,oneof"`
+}
+
+func (*SessionEvent_Sync) isSessionEvent_Event() {}
+
+func (*SessionEvent_Revoke) isSessionEvent_Event() {}
+
 type SessionSync struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	SessionId     []byte                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`          // 16 bytes
 	VnetId        []byte                 `protobuf:"bytes,2,opt,name=vnet_id,json=vnetId,proto3" json:"vnet_id,omitempty"`                   // 16 bytes
-	OperatorUuid  []byte                 `protobuf:"bytes,3,opt,name=operator_uuid,json=operatorUuid,proto3" json:"operator_uuid,omitempty"` // 16 bytes, which operator owns this session
+	OperatorUuid  []byte                 `protobuf:"bytes,3,opt,name=operator_uuid,json=operatorUuid,proto3" json:"operator_uuid,omitempty"` // 16 bytes
 	IpAddr        []byte                 `protobuf:"bytes,4,opt,name=ip_addr,json=ipAddr,proto3" json:"ip_addr,omitempty"`                   // 4 bytes (IPv4) or 16 bytes (IPv6)
-	PrefixBits    uint32                 `protobuf:"varint,5,opt,name=prefix_bits,json=prefixBits,proto3" json:"prefix_bits,omitempty"`      // CIDR prefix length (e.g. 32)
+	PrefixBits    uint32                 `protobuf:"varint,5,opt,name=prefix_bits,json=prefixBits,proto3" json:"prefix_bits,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *SessionSync) Reset() {
 	*x = SessionSync{}
-	mi := &file_operator_ctrl_control_proto_msgTypes[5]
+	mi := &file_operator_ctrl_control_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -423,7 +488,7 @@ func (x *SessionSync) String() string {
 func (*SessionSync) ProtoMessage() {}
 
 func (x *SessionSync) ProtoReflect() protoreflect.Message {
-	mi := &file_operator_ctrl_control_proto_msgTypes[5]
+	mi := &file_operator_ctrl_control_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -436,7 +501,7 @@ func (x *SessionSync) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SessionSync.ProtoReflect.Descriptor instead.
 func (*SessionSync) Descriptor() ([]byte, []int) {
-	return file_operator_ctrl_control_proto_rawDescGZIP(), []int{5}
+	return file_operator_ctrl_control_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *SessionSync) GetSessionId() []byte {
@@ -474,7 +539,6 @@ func (x *SessionSync) GetPrefixBits() uint32 {
 	return 0
 }
 
-// SessionRevoke notifies peers that a client disconnected.
 type SessionRevoke struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	SessionId     []byte                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"` // 16 bytes
@@ -485,7 +549,7 @@ type SessionRevoke struct {
 
 func (x *SessionRevoke) Reset() {
 	*x = SessionRevoke{}
-	mi := &file_operator_ctrl_control_proto_msgTypes[6]
+	mi := &file_operator_ctrl_control_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -497,7 +561,7 @@ func (x *SessionRevoke) String() string {
 func (*SessionRevoke) ProtoMessage() {}
 
 func (x *SessionRevoke) ProtoReflect() protoreflect.Message {
-	mi := &file_operator_ctrl_control_proto_msgTypes[6]
+	mi := &file_operator_ctrl_control_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -510,7 +574,7 @@ func (x *SessionRevoke) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SessionRevoke.ProtoReflect.Descriptor instead.
 func (*SessionRevoke) Descriptor() ([]byte, []int) {
-	return file_operator_ctrl_control_proto_rawDescGZIP(), []int{6}
+	return file_operator_ctrl_control_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *SessionRevoke) GetSessionId() []byte {
@@ -527,168 +591,32 @@ func (x *SessionRevoke) GetVnetId() []byte {
 	return nil
 }
 
-// DiscoverReq requests the peer's known operator list. No fields needed.
-type DiscoverReq struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *DiscoverReq) Reset() {
-	*x = DiscoverReq{}
-	mi := &file_operator_ctrl_control_proto_msgTypes[7]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *DiscoverReq) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*DiscoverReq) ProtoMessage() {}
-
-func (x *DiscoverReq) ProtoReflect() protoreflect.Message {
-	mi := &file_operator_ctrl_control_proto_msgTypes[7]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use DiscoverReq.ProtoReflect.Descriptor instead.
-func (*DiscoverReq) Descriptor() ([]byte, []int) {
-	return file_operator_ctrl_control_proto_rawDescGZIP(), []int{7}
-}
-
-// DiscoverResp returns a list of known operators.
-type DiscoverResp struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Operators     []*OperatorEntry       `protobuf:"bytes,1,rep,name=operators,proto3" json:"operators,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *DiscoverResp) Reset() {
-	*x = DiscoverResp{}
-	mi := &file_operator_ctrl_control_proto_msgTypes[8]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *DiscoverResp) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*DiscoverResp) ProtoMessage() {}
-
-func (x *DiscoverResp) ProtoReflect() protoreflect.Message {
-	mi := &file_operator_ctrl_control_proto_msgTypes[8]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use DiscoverResp.ProtoReflect.Descriptor instead.
-func (*DiscoverResp) Descriptor() ([]byte, []int) {
-	return file_operator_ctrl_control_proto_rawDescGZIP(), []int{8}
-}
-
-func (x *DiscoverResp) GetOperators() []*OperatorEntry {
-	if x != nil {
-		return x.Operators
-	}
-	return nil
-}
-
-// OperatorEntry is one operator in a DiscoverResp.
-type OperatorEntry struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Uuid          []byte                 `protobuf:"bytes,1,opt,name=uuid,proto3" json:"uuid,omitempty"` // 16 bytes
-	Addr          string                 `protobuf:"bytes,2,opt,name=addr,proto3" json:"addr,omitempty"` // external address
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *OperatorEntry) Reset() {
-	*x = OperatorEntry{}
-	mi := &file_operator_ctrl_control_proto_msgTypes[9]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *OperatorEntry) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*OperatorEntry) ProtoMessage() {}
-
-func (x *OperatorEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_operator_ctrl_control_proto_msgTypes[9]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use OperatorEntry.ProtoReflect.Descriptor instead.
-func (*OperatorEntry) Descriptor() ([]byte, []int) {
-	return file_operator_ctrl_control_proto_rawDescGZIP(), []int{9}
-}
-
-func (x *OperatorEntry) GetUuid() []byte {
-	if x != nil {
-		return x.Uuid
-	}
-	return nil
-}
-
-func (x *OperatorEntry) GetAddr() string {
-	if x != nil {
-		return x.Addr
-	}
-	return ""
-}
-
 var File_operator_ctrl_control_proto protoreflect.FileDescriptor
 
 const file_operator_ctrl_control_proto_rawDesc = "" +
 	"\n" +
-	"\x1boperator/ctrl/control.proto\x12\x04ctrl\"\xae\x03\n" +
-	"\x0eControlMessage\x12 \n" +
-	"\x04ping\x18\x01 \x01(\v2\n" +
-	".ctrl.PingH\x00R\x04ping\x12 \n" +
-	"\x04pong\x18\x02 \x01(\v2\n" +
-	".ctrl.PongH\x00R\x04pong\x12,\n" +
-	"\bregister\x18\x03 \x01(\v2\x0e.ctrl.RegisterH\x00R\bregister\x126\n" +
-	"\fregister_ack\x18\x04 \x01(\v2\x11.ctrl.RegisterAckH\x00R\vregisterAck\x126\n" +
-	"\fsession_sync\x18\x05 \x01(\v2\x11.ctrl.SessionSyncH\x00R\vsessionSync\x12<\n" +
-	"\x0esession_revoke\x18\x06 \x01(\v2\x13.ctrl.SessionRevokeH\x00R\rsessionRevoke\x126\n" +
-	"\fdiscover_req\x18\a \x01(\v2\x11.ctrl.DiscoverReqH\x00R\vdiscoverReq\x129\n" +
-	"\rdiscover_resp\x18\b \x01(\v2\x12.ctrl.DiscoverRespH\x00R\fdiscoverRespB\t\n" +
-	"\apayload\"#\n" +
-	"\x04Ping\x12\x1b\n" +
-	"\tunix_nano\x18\x01 \x01(\x03R\bunixNano\"#\n" +
-	"\x04Pong\x12\x1b\n" +
-	"\tunix_nano\x18\x01 \x01(\x03R\bunixNano\"C\n" +
-	"\bRegister\x12\x12\n" +
+	"\x1boperator/ctrl/control.proto\x12\x04ctrl\"\x05\n" +
+	"\x03Ack\"F\n" +
+	"\vRegisterReq\x12\x12\n" +
 	"\x04uuid\x18\x01 \x01(\fR\x04uuid\x12#\n" +
-	"\rexternal_addr\x18\x02 \x01(\tR\fexternalAddr\"F\n" +
-	"\vRegisterAck\x12\x12\n" +
+	"\rexternal_addr\x18\x02 \x01(\tR\fexternalAddr\"G\n" +
+	"\fRegisterResp\x12\x12\n" +
 	"\x04uuid\x18\x01 \x01(\fR\x04uuid\x12#\n" +
-	"\rexternal_addr\x18\x02 \x01(\tR\fexternalAddr\"\xa4\x01\n" +
+	"\rexternal_addr\x18\x02 \x01(\tR\fexternalAddr\"&\n" +
+	"\aPingReq\x12\x1b\n" +
+	"\tunix_nano\x18\x01 \x01(\x03R\bunixNano\"'\n" +
+	"\bPingResp\x12\x1b\n" +
+	"\tunix_nano\x18\x01 \x01(\x03R\bunixNano\"\r\n" +
+	"\vDiscoverReq\"A\n" +
+	"\fDiscoverResp\x121\n" +
+	"\toperators\x18\x01 \x03(\v2\x13.ctrl.OperatorEntryR\toperators\"7\n" +
+	"\rOperatorEntry\x12\x12\n" +
+	"\x04uuid\x18\x01 \x01(\fR\x04uuid\x12\x12\n" +
+	"\x04addr\x18\x02 \x01(\tR\x04addr\"o\n" +
+	"\fSessionEvent\x12'\n" +
+	"\x04sync\x18\x01 \x01(\v2\x11.ctrl.SessionSyncH\x00R\x04sync\x12-\n" +
+	"\x06revoke\x18\x02 \x01(\v2\x13.ctrl.SessionRevokeH\x00R\x06revokeB\a\n" +
+	"\x05event\"\xa4\x01\n" +
 	"\vSessionSync\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\fR\tsessionId\x12\x17\n" +
@@ -700,13 +628,12 @@ const file_operator_ctrl_control_proto_rawDesc = "" +
 	"\rSessionRevoke\x12\x1d\n" +
 	"\n" +
 	"session_id\x18\x01 \x01(\fR\tsessionId\x12\x17\n" +
-	"\avnet_id\x18\x02 \x01(\fR\x06vnetId\"\r\n" +
-	"\vDiscoverReq\"A\n" +
-	"\fDiscoverResp\x121\n" +
-	"\toperators\x18\x01 \x03(\v2\x13.ctrl.OperatorEntryR\toperators\"7\n" +
-	"\rOperatorEntry\x12\x12\n" +
-	"\x04uuid\x18\x01 \x01(\fR\x04uuid\x12\x12\n" +
-	"\x04addr\x18\x02 \x01(\tR\x04addrB2Z0github.com/jabberwocky238/gasoline/operator/ctrlb\x06proto3"
+	"\avnet_id\x18\x02 \x01(\fR\x06vnetId2\xce\x01\n" +
+	"\x0fOperatorService\x121\n" +
+	"\bRegister\x12\x11.ctrl.RegisterReq\x1a\x12.ctrl.RegisterResp\x12%\n" +
+	"\x04Ping\x12\r.ctrl.PingReq\x1a\x0e.ctrl.PingResp\x121\n" +
+	"\bDiscover\x12\x11.ctrl.DiscoverReq\x1a\x12.ctrl.DiscoverResp\x12.\n" +
+	"\rNotifySession\x12\x12.ctrl.SessionEvent\x1a\t.ctrl.AckB2Z0github.com/jabberwocky238/gasoline/operator/ctrlb\x06proto3"
 
 var (
 	file_operator_ctrl_control_proto_rawDescOnce sync.Once
@@ -720,34 +647,37 @@ func file_operator_ctrl_control_proto_rawDescGZIP() []byte {
 	return file_operator_ctrl_control_proto_rawDescData
 }
 
-var file_operator_ctrl_control_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_operator_ctrl_control_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_operator_ctrl_control_proto_goTypes = []any{
-	(*ControlMessage)(nil), // 0: ctrl.ControlMessage
-	(*Ping)(nil),           // 1: ctrl.Ping
-	(*Pong)(nil),           // 2: ctrl.Pong
-	(*Register)(nil),       // 3: ctrl.Register
-	(*RegisterAck)(nil),    // 4: ctrl.RegisterAck
-	(*SessionSync)(nil),    // 5: ctrl.SessionSync
-	(*SessionRevoke)(nil),  // 6: ctrl.SessionRevoke
-	(*DiscoverReq)(nil),    // 7: ctrl.DiscoverReq
-	(*DiscoverResp)(nil),   // 8: ctrl.DiscoverResp
-	(*OperatorEntry)(nil),  // 9: ctrl.OperatorEntry
+	(*Ack)(nil),           // 0: ctrl.Ack
+	(*RegisterReq)(nil),   // 1: ctrl.RegisterReq
+	(*RegisterResp)(nil),  // 2: ctrl.RegisterResp
+	(*PingReq)(nil),       // 3: ctrl.PingReq
+	(*PingResp)(nil),      // 4: ctrl.PingResp
+	(*DiscoverReq)(nil),   // 5: ctrl.DiscoverReq
+	(*DiscoverResp)(nil),  // 6: ctrl.DiscoverResp
+	(*OperatorEntry)(nil), // 7: ctrl.OperatorEntry
+	(*SessionEvent)(nil),  // 8: ctrl.SessionEvent
+	(*SessionSync)(nil),   // 9: ctrl.SessionSync
+	(*SessionRevoke)(nil), // 10: ctrl.SessionRevoke
 }
 var file_operator_ctrl_control_proto_depIdxs = []int32{
-	1, // 0: ctrl.ControlMessage.ping:type_name -> ctrl.Ping
-	2, // 1: ctrl.ControlMessage.pong:type_name -> ctrl.Pong
-	3, // 2: ctrl.ControlMessage.register:type_name -> ctrl.Register
-	4, // 3: ctrl.ControlMessage.register_ack:type_name -> ctrl.RegisterAck
-	5, // 4: ctrl.ControlMessage.session_sync:type_name -> ctrl.SessionSync
-	6, // 5: ctrl.ControlMessage.session_revoke:type_name -> ctrl.SessionRevoke
-	7, // 6: ctrl.ControlMessage.discover_req:type_name -> ctrl.DiscoverReq
-	8, // 7: ctrl.ControlMessage.discover_resp:type_name -> ctrl.DiscoverResp
-	9, // 8: ctrl.DiscoverResp.operators:type_name -> ctrl.OperatorEntry
-	9, // [9:9] is the sub-list for method output_type
-	9, // [9:9] is the sub-list for method input_type
-	9, // [9:9] is the sub-list for extension type_name
-	9, // [9:9] is the sub-list for extension extendee
-	0, // [0:9] is the sub-list for field type_name
+	7,  // 0: ctrl.DiscoverResp.operators:type_name -> ctrl.OperatorEntry
+	9,  // 1: ctrl.SessionEvent.sync:type_name -> ctrl.SessionSync
+	10, // 2: ctrl.SessionEvent.revoke:type_name -> ctrl.SessionRevoke
+	1,  // 3: ctrl.OperatorService.Register:input_type -> ctrl.RegisterReq
+	3,  // 4: ctrl.OperatorService.Ping:input_type -> ctrl.PingReq
+	5,  // 5: ctrl.OperatorService.Discover:input_type -> ctrl.DiscoverReq
+	8,  // 6: ctrl.OperatorService.NotifySession:input_type -> ctrl.SessionEvent
+	2,  // 7: ctrl.OperatorService.Register:output_type -> ctrl.RegisterResp
+	4,  // 8: ctrl.OperatorService.Ping:output_type -> ctrl.PingResp
+	6,  // 9: ctrl.OperatorService.Discover:output_type -> ctrl.DiscoverResp
+	0,  // 10: ctrl.OperatorService.NotifySession:output_type -> ctrl.Ack
+	7,  // [7:11] is the sub-list for method output_type
+	3,  // [3:7] is the sub-list for method input_type
+	3,  // [3:3] is the sub-list for extension type_name
+	3,  // [3:3] is the sub-list for extension extendee
+	0,  // [0:3] is the sub-list for field type_name
 }
 
 func init() { file_operator_ctrl_control_proto_init() }
@@ -755,15 +685,9 @@ func file_operator_ctrl_control_proto_init() {
 	if File_operator_ctrl_control_proto != nil {
 		return
 	}
-	file_operator_ctrl_control_proto_msgTypes[0].OneofWrappers = []any{
-		(*ControlMessage_Ping)(nil),
-		(*ControlMessage_Pong)(nil),
-		(*ControlMessage_Register)(nil),
-		(*ControlMessage_RegisterAck)(nil),
-		(*ControlMessage_SessionSync)(nil),
-		(*ControlMessage_SessionRevoke)(nil),
-		(*ControlMessage_DiscoverReq)(nil),
-		(*ControlMessage_DiscoverResp)(nil),
+	file_operator_ctrl_control_proto_msgTypes[8].OneofWrappers = []any{
+		(*SessionEvent_Sync)(nil),
+		(*SessionEvent_Revoke)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -771,9 +695,9 @@ func file_operator_ctrl_control_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_operator_ctrl_control_proto_rawDesc), len(file_operator_ctrl_control_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   10,
+			NumMessages:   11,
 			NumExtensions: 0,
-			NumServices:   0,
+			NumServices:   1,
 		},
 		GoTypes:           file_operator_ctrl_control_proto_goTypes,
 		DependencyIndexes: file_operator_ctrl_control_proto_depIdxs,

@@ -2,68 +2,70 @@ syntax = "proto3";
 package ctrl;
 option go_package = "github.com/jabberwocky238/gasoline/operator/ctrl";
 
-// ControlMessage is the top-level envelope for all inter-operator control messages.
-// Replaces the raw [subtype:1][payload:N] encoding.
-message ControlMessage {
-  oneof payload {
-    Ping            ping             = 1;
-    Pong            pong             = 2;
-    Register        register         = 3;
-    RegisterAck     register_ack     = 4;
-    SessionSync     session_sync     = 5;
-    SessionRevoke   session_revoke   = 6;
-    DiscoverReq     discover_req     = 7;
-    DiscoverResp    discover_resp    = 8;
-  }
+// --------------- Service ---------------
+
+service OperatorService {
+  rpc Register(RegisterReq) returns (RegisterResp);
+  rpc Ping(PingReq) returns (PingResp);
+  rpc Discover(DiscoverReq) returns (DiscoverResp);
+  rpc NotifySession(SessionEvent) returns (Ack);
 }
 
-// Ping carries a timestamp for RTT measurement.
-message Ping {
-  int64 unix_nano = 1;
-}
+message Ack {}
 
-// Pong echoes the Ping timestamp.
-message Pong {
-  int64 unix_nano = 1;
-}
+// --------------- Register ---------------
 
-// Register announces this operator to a peer.
-message Register {
-  bytes  uuid          = 1; // 16 bytes, operator UUID
+message RegisterReq {
+  bytes  uuid          = 1; // 16 bytes, caller's operator UUID
   string external_addr = 2; // address others should use to reach us
 }
 
-// RegisterAck is the reply to Register.
-message RegisterAck {
-  bytes  uuid          = 1; // 16 bytes
+message RegisterResp {
+  bytes  uuid          = 1; // 16 bytes, responder's operator UUID
   string external_addr = 2;
 }
 
-// SessionSync notifies peers about a new client session.
-message SessionSync {
-  bytes  session_id   = 1; // 16 bytes
-  bytes  vnet_id      = 2; // 16 bytes
-  bytes  operator_uuid = 3; // 16 bytes, which operator owns this session
-  bytes  ip_addr      = 4; // 4 bytes (IPv4) or 16 bytes (IPv6)
-  uint32 prefix_bits  = 5; // CIDR prefix length (e.g. 32)
+// --------------- Ping ---------------
+
+message PingReq {
+  int64 unix_nano = 1;
 }
 
-// SessionRevoke notifies peers that a client disconnected.
-message SessionRevoke {
-  bytes session_id = 1; // 16 bytes
-  bytes vnet_id    = 2; // 16 bytes
+message PingResp {
+  int64 unix_nano = 1; // echo back
 }
 
-// DiscoverReq requests the peer's known operator list. No fields needed.
+// --------------- Discover ---------------
+
 message DiscoverReq {}
 
-// DiscoverResp returns a list of known operators.
 message DiscoverResp {
   repeated OperatorEntry operators = 1;
 }
 
-// OperatorEntry is one operator in a DiscoverResp.
 message OperatorEntry {
   bytes  uuid = 1; // 16 bytes
   string addr = 2; // external address
+}
+
+// --------------- Session ---------------
+
+message SessionEvent {
+  oneof event {
+    SessionSync   sync   = 1;
+    SessionRevoke revoke = 2;
+  }
+}
+
+message SessionSync {
+  bytes  session_id    = 1; // 16 bytes
+  bytes  vnet_id       = 2; // 16 bytes
+  bytes  operator_uuid = 3; // 16 bytes
+  bytes  ip_addr       = 4; // 4 bytes (IPv4) or 16 bytes (IPv6)
+  uint32 prefix_bits   = 5;
+}
+
+message SessionRevoke {
+  bytes session_id = 1; // 16 bytes
+  bytes vnet_id    = 2; // 16 bytes
 }

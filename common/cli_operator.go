@@ -8,21 +8,9 @@ import (
 	"strings"
 )
 
-// OperatorArgs holds the resolved configuration for running an operator.
-type OperatorArgs struct {
-	ListenAddr  string
-	OpListen    string              // "bind;external"
-	Transport   string
-	AuthStr     string              // global default auth string
-	Network     string              // "vnetID:CIDR;..."
-	StatsAddr   string
-	Discover    string              // comma-separated seed addresses
-	NetworkAuth map[[16]byte]string // per-VNet auth overrides: vnetID -> auth string
-}
-
 // RegisterOperatorFlags registers all operator CLI flags on the given FlagSet.
-// Returns a function that resolves flags + config file into OperatorArgs.
-func RegisterOperatorFlags(fs *flag.FlagSet) func() *OperatorArgs {
+// Returns a function that resolves flags + config file into OperatorConfig.
+func RegisterOperatorFlags(fs *flag.FlagSet) func() *OperatorConfig {
 	configFile := fs.String("c", "", "config file path (YAML)")
 	listenAddr := fs.String("listen", "0.0.0.0:8443", "client listen address")
 	opListen := fs.String("op-listen", "0.0.0.0:6677", "operator listen: <bind>;[external]")
@@ -32,8 +20,8 @@ func RegisterOperatorFlags(fs *flag.FlagSet) func() *OperatorArgs {
 	statsAddr := fs.String("stats", "127.0.0.1:9090", "stats API listen address")
 	discover := fs.String("discover", "", "seed operator addresses for discovery (comma-separated)")
 
-	return func() *OperatorArgs {
-		result := &OperatorArgs{
+	return func() *OperatorConfig {
+		result := &OperatorConfig{
 			NetworkAuth: make(map[[16]byte]string),
 		}
 
@@ -70,20 +58,23 @@ func RegisterOperatorFlags(fs *flag.FlagSet) func() *OperatorArgs {
 			}
 		}
 
+		// Parse op-listen: "bind;external"
+		opListenAddr, opExternalAddr := parseOpListen(*opListen)
+
 		result.ListenAddr = *listenAddr
-		result.OpListen = *opListen
+		result.OpListenAddr = opListenAddr
+		result.OpExternalAddr = opExternalAddr
 		result.Transport = *transportType
 		result.AuthStr = *authStr
 		result.Network = *network
 		result.StatsAddr = *statsAddr
-		result.Discover = *discover
+		result.DiscoverAddrs = parseDiscoverAddrs(*discover)
 		return result
 	}
 }
 
-// OpListenAddrs splits "bind;external" into two addresses.
-func (a *OperatorArgs) OpListenAddrs() (bind, external string) {
-	parts := strings.SplitN(a.OpListen, ";", 2)
+func parseOpListen(s string) (bind, external string) {
+	parts := strings.SplitN(s, ";", 2)
 	bind = strings.TrimSpace(parts[0])
 	if len(parts) == 2 {
 		external = strings.TrimSpace(parts[1])
@@ -91,13 +82,12 @@ func (a *OperatorArgs) OpListenAddrs() (bind, external string) {
 	return
 }
 
-// DiscoverAddrs returns parsed discover seed addresses.
-func (a *OperatorArgs) DiscoverAddrs() []string {
-	if a.Discover == "" {
+func parseDiscoverAddrs(s string) []string {
+	if s == "" {
 		return nil
 	}
 	var addrs []string
-	for _, addr := range strings.Split(a.Discover, ",") {
+	for _, addr := range strings.Split(s, ",") {
 		addr = strings.TrimSpace(addr)
 		if addr != "" {
 			addrs = append(addrs, addr)

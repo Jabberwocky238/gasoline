@@ -66,8 +66,8 @@ func (o *Operator) handleDiscoverReq(peer *OperatorPeer) {
 
 	// Add self
 	entries = append(entries, discoverEntry{
-		UUID: OperatorUUIDType(o.cfg.UUID),
-		Addr: o.cfg.OperatorExternalAddr,
+		UUID: o.uuid,
+		Addr: o.cfg.OpExternalAddr,
 	})
 
 	// Add all known operators from Registry
@@ -90,7 +90,7 @@ func (o *Operator) handleDiscoverResp(payload []byte) {
 
 	for _, e := range entries {
 		// Skip self
-		if e.UUID == OperatorUUIDType(o.cfg.UUID) {
+		if e.UUID == o.uuid {
 			continue
 		}
 		// Skip already connected

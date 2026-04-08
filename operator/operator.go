@@ -2,7 +2,11 @@ package operator
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
+	"math/big"
 	"net"
 	"net/netip"
 	"time"
@@ -14,6 +18,9 @@ import (
 	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/stats"
 	"github.com/jabberwocky238/gasoline/transport"
+	"github.com/jabberwocky238/gasoline/transport/quic"
+	"github.com/jabberwocky238/gasoline/transport/tcp"
+	"github.com/jabberwocky238/gasoline/transport/udp"
 
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
@@ -23,24 +30,6 @@ type SessionIDType [common.SessionIDLen]byte
 type OperatorUUIDType [common.OperatorUUIDLen]byte
 type VNetIDType [common.VNetIDLen]byte
 
-type Config struct {
-	// UUID is this operator's unique identifier
-	UUID OperatorUUIDType
-	// Auth resolver for per-VNet auth
-	Auth auth.AuthResolver
-	// ConfigFunc generates SessionConfig for each client after auth
-	ConfigFn protocol.ConfigFunc
-	// ClientListener accepts client transport connections
-	ClientListener transport.Listener
-	// OperatorListenAddr is the local TCP address to bind for inter-operator connections
-	OperatorListenAddr string
-	// OperatorExternalAddr is the address other operators should use to reach us
-	OperatorExternalAddr string
-	// StatsAddr is the HTTP address for the stats API (empty = disabled)
-	StatsAddr string
-	// DiscoverAddrs is a list of seed operator addresses for bootstrap discovery
-	DiscoverAddrs []string
-}
 
 // Operator accepts client connections, decrypts packets, and routes them
 // to the correct client by destination IP.
@@ -48,57 +37,152 @@ type Operator struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	cfg *Config
+	cfg *common.OperatorConfig
 
-	clients   *ClientTable
-	operators *OperatorTable
-	Registry  *Registry
-	Stats     *stats.Engine
-	VNetPools *VNetPoolMap
+	uuid      OperatorUUIDType
+	serverPub protocol.PublicKey
+	resolver  auth.AuthResolver
 
-	// TCP listener for inter-operator connections
+	clientListener transport.Listener
+	clients        *ClientTable
+	operators      *OperatorTable
+	Registry       *Registry
+	Stats          *stats.Engine
+	VNetPools      *VNetPoolMap
+
 	opListener net.Listener
 }
 
-func New(cfg *Config) *Operator {
-	ctx, cancel := context.WithCancel(context.Background())
-	return &Operator{
-		cfg:       cfg,
-		ctx:       ctx,
-		cancel:    cancel,
-		clients:   NewClientTable(),
-		operators: NewOperatorTable(),
-		Registry:  NewRegistry(),
-		Stats:     stats.New(cfg.StatsAddr),
+// New creates an Operator from declarative config.
+// Parses network pools, generates keypair, builds auth resolver and transport listener.
+func New(cfg *common.OperatorConfig) (*Operator, error) {
+	// UUID: use provided or generate random
+	var uuid OperatorUUIDType
+	if cfg.UUID != nil {
+		uuid = OperatorUUIDType(*cfg.UUID)
+	} else {
+		rand.Read(uuid[:])
 	}
+
+	var pools *VNetPoolMap
+	var serverPub protocol.PublicKey
+	var resolver *auth.MapResolver
+	var clientListener transport.Listener
+
+	// VNet pools, auth, keypair, listener — only if Network is configured
+	if cfg.Network != "" {
+		seed, _ := rand.Int(rand.Reader, big.NewInt(1<<32))
+		var err error
+		pools, err = ParseVNetPools(cfg.Network, uint32(seed.Int64()))
+		if err != nil {
+			return nil, fmt.Errorf("network: %w", err)
+		}
+		for vnetID, pool := range pools.All() {
+			log.Infof("VNet %x: %s", vnetID, pool.Prefix)
+		}
+
+		serverPriv, err := protocol.NewPrivateKey()
+		if err != nil {
+			return nil, fmt.Errorf("generate server key: %w", err)
+		}
+		serverPub = serverPriv.PublicKey()
+		log.Infof("Server public key: %s", serverPub.ToBase64())
+
+		defaultAuth, err := auth.ParseServerAuth(cfg.AuthStr)
+		if err != nil {
+			return nil, fmt.Errorf("auth: %w", err)
+		}
+		resolver = auth.NewMapResolver(defaultAuth)
+		for vnetID, authStr := range cfg.NetworkAuth {
+			vnetAuth, err := auth.ParseServerAuth(authStr)
+			if err != nil {
+				return nil, fmt.Errorf("auth for vnet %x: %w", vnetID, err)
+			}
+			resolver.Set(vnetID, vnetAuth)
+			log.Infof("VNet %x: auth=%s", vnetID, vnetAuth.Type())
+		}
+
+		configFn := func(clientID [16]byte, vnetID [16]byte) (*protocol.SessionConfig, error) {
+			pool, ok := pools.Get(VNetIDType(vnetID))
+			if !ok {
+				return nil, fmt.Errorf("unknown vnet %x", vnetID)
+			}
+			clientIP, err := pool.AllocateIP()
+			if err != nil {
+				return nil, err
+			}
+			clientPriv, err := protocol.NewPrivateKey()
+			if err != nil {
+				return nil, err
+			}
+			h := sha256.New()
+			h.Write(clientID[:])
+			var ts [8]byte
+			binary.BigEndian.PutUint64(ts[:], uint64(time.Now().UnixNano()))
+			h.Write(ts[:])
+			var sessionID [16]byte
+			copy(sessionID[:], h.Sum(nil)[:16])
+			return &protocol.SessionConfig{
+				SessionID:        sessionID,
+				VNetID:           vnetID,
+				ClientPrivateKey: clientPriv,
+				ServerPublicKey:  serverPub,
+				IPPrefix:         netip.PrefixFrom(clientIP, 32),
+				AllowedRanges:    []netip.Prefix{pool.Prefix},
+			}, nil
+		}
+
+		clientListener, err = createListener(cfg.Transport, cfg.ListenAddr, resolver, configFn)
+		if err != nil {
+			return nil, fmt.Errorf("listener: %w", err)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	op := &Operator{
+		cfg:            cfg,
+		ctx:            ctx,
+		cancel:         cancel,
+		uuid:           uuid,
+		serverPub:      serverPub,
+		resolver:       resolver,
+		clientListener: clientListener,
+		clients:        NewClientTable(),
+		operators:      NewOperatorTable(),
+		Registry:       NewRegistry(),
+		Stats:          stats.New(cfg.StatsAddr),
+		VNetPools:      pools,
+	}
+
+	log.Infof("Operator UUID: %x", uuid)
+	return op, nil
 }
+
+func (o *Operator) UUID() OperatorUUIDType { return o.uuid }
 
 // Start begins accepting client and operator connections.
 func (o *Operator) Start() error {
-	// Validate: discover requires external addr
-	if len(o.cfg.DiscoverAddrs) > 0 && o.cfg.OperatorExternalAddr == "" {
-		return fmt.Errorf("--discover requires --op-listen to include an external endpoint (e.g. 0.0.0.0:6677;1.2.3.4:6677)")
+	if len(o.cfg.DiscoverAddrs) > 0 && o.cfg.OpExternalAddr == "" {
+		return fmt.Errorf("--discover requires --op-listen to include an external endpoint")
 	}
 
-	// Client endpoint
-	log.Infof("Client endpoint listening on %s", o.cfg.ClientListener.Addr())
-	go o.routineAcceptClients()
+	if o.clientListener != nil {
+		log.Infof("Client endpoint listening on %s", o.clientListener.Addr())
+		go o.routineAcceptClients()
+	}
 
-	// Operator endpoint
-	ln, err := net.Listen("tcp", o.cfg.OperatorListenAddr)
+	ln, err := net.Listen("tcp", o.cfg.OpListenAddr)
 	if err != nil {
-		return fmt.Errorf("operator listen on %s: %w", o.cfg.OperatorListenAddr, err)
+		return fmt.Errorf("operator listen on %s: %w", o.cfg.OpListenAddr, err)
 	}
 	o.opListener = ln
-	log.Infof("Operator endpoint listening on %s", o.cfg.OperatorListenAddr)
+	log.Infof("Operator endpoint listening on %s", o.cfg.OpListenAddr)
 	go o.routineAcceptOperators()
 
-	// Stats API
 	if err := o.Stats.Start(); err != nil {
 		return fmt.Errorf("stats: %w", err)
 	}
 
-	// Bootstrap discovery
 	if len(o.cfg.DiscoverAddrs) > 0 {
 		go o.Bootstrap()
 	}
@@ -106,10 +190,9 @@ func (o *Operator) Start() error {
 	return nil
 }
 
-// routineAcceptClients accepts new clients (handshake already done by transport layer).
 func (o *Operator) routineAcceptClients() {
 	for {
-		conn, result, err := o.cfg.ClientListener.Accept()
+		conn, result, err := o.clientListener.Accept()
 		if err != nil {
 			select {
 			case <-o.ctx.Done():
@@ -127,7 +210,7 @@ func (o *Operator) routineAcceptClients() {
 			Conn:       conn,
 			SessionID:  SessionIDType(result.Config.SessionID),
 			VNetID:     VNetIDType(result.Config.VNetID),
-			OperatorID: o.cfg.UUID,
+			OperatorID: o.uuid,
 			IP:         result.Config.IPPrefix,
 			AllowedIPs: result.Config.AllowedRanges,
 		}
@@ -143,7 +226,6 @@ func (o *Operator) routineAcceptClients() {
 	}
 }
 
-// routineAcceptOperators accepts incoming TCP connections from peer operators.
 func (o *Operator) routineAcceptOperators() {
 	for {
 		conn, err := o.opListener.Accept()
@@ -156,16 +238,12 @@ func (o *Operator) routineAcceptOperators() {
 				continue
 			}
 		}
-
-		// UUID is unknown until Register frame arrives
 		peer := NewOperatorPeer(OperatorUUIDType{}, conn)
 		log.Infof("Operator peer connected from %s", conn.RemoteAddr())
-
 		go o.routineHandleOperator(peer)
 	}
 }
 
-// routineHandleOperator handles frames from a peer operator.
 func (o *Operator) routineHandleOperator(peer *OperatorPeer) {
 	defer peer.Close()
 
@@ -193,7 +271,6 @@ func (o *Operator) routineHandleOperator(peer *OperatorPeer) {
 	}
 }
 
-// handleOperatorData processes a data frame forwarded from a peer operator.
 func (o *Operator) handleOperatorData(frame *Frame) {
 	df, err := ParseDataFrame(frame.Content)
 	if err != nil {
@@ -224,7 +301,6 @@ func (o *Operator) handleOperatorData(frame *Frame) {
 	}
 }
 
-// handleOperatorControl processes a control frame from a peer operator.
 func (o *Operator) handleOperatorControl(peer *OperatorPeer, frame *Frame) {
 	cf, err := ParseControlFrame(frame.Content)
 	if err != nil {
@@ -254,7 +330,6 @@ func (o *Operator) handleOperatorControl(peer *OperatorPeer, frame *Frame) {
 	}
 }
 
-// routineReadFromClient reads packets from a client and routes them.
 func (o *Operator) routineReadFromClient(cp *ClientPeer) {
 	defer func() {
 		o.clients.Remove(cp)
@@ -280,10 +355,8 @@ func (o *Operator) routineReadFromClient(cp *ClientPeer) {
 			continue
 		}
 
-		// Record incoming traffic
 		o.Stats.Recorder.RecordRx(cp.SessionID, uint64(len(data)))
 
-		// Rate limit check (per VNet)
 		if !o.Stats.RateLimiter.Allow([16]byte(cp.VNetID), uint64(len(data))) {
 			log.Debugf("Rate limited packet from %x", cp.SessionID)
 			continue
@@ -301,7 +374,6 @@ func (o *Operator) routineReadFromClient(cp *ClientPeer) {
 			continue
 		}
 
-		// Try local client first
 		target := o.clients.LookupByIP(dstAddr)
 		if target != nil {
 			o.Stats.Recorder.RecordTx(target.SessionID, uint64(len(data)))
@@ -311,7 +383,6 @@ func (o *Operator) routineReadFromClient(cp *ClientPeer) {
 			continue
 		}
 
-		// Try remote operator
 		if o.forwardToRemoteOperator(cp, dstAddr, data) {
 			continue
 		}
@@ -329,13 +400,11 @@ func (o *Operator) DialOperator(addr string) error {
 
 	peer := NewOperatorPeer(OperatorUUIDType{}, conn)
 
-	// Send our UUID + external addr as Register
-	if err := peer.SendControl(CtrlRegister, encodeRegisterPayload(o.cfg.UUID, o.cfg.OperatorExternalAddr)); err != nil {
+	if err := peer.SendControl(CtrlRegister, encodeRegisterPayload(o.uuid, o.cfg.OpExternalAddr)); err != nil {
 		peer.Close()
 		return fmt.Errorf("send register to %s: %w", addr, err)
 	}
 
-	// Read RegisterAck to get remote UUID + external addr
 	frame, err := peer.Recv()
 	if err != nil {
 		peer.Close()
@@ -367,20 +436,17 @@ func (o *Operator) DialOperator(addr string) error {
 	return nil
 }
 
-// handleRegister processes an incoming CtrlRegister from a peer operator.
 func (o *Operator) handleRegister(peer *OperatorPeer, payload []byte) {
 	remoteUUID, remoteAddr := decodeRegisterPayload(payload)
 	copy(peer.UUID[:], remoteUUID[:])
 
-	// Reply with our UUID + external addr
-	peer.SendControl(CtrlRegisterAck, encodeRegisterPayload(o.cfg.UUID, o.cfg.OperatorExternalAddr))
+	peer.SendControl(CtrlRegisterAck, encodeRegisterPayload(o.uuid, o.cfg.OpExternalAddr))
 
 	o.operators.Add(peer)
 	o.Registry.SetOperator(peer.UUID, &OperatorEntry{Addr: remoteAddr})
 	log.Infof("Operator %x registered, external %s", peer.UUID, remoteAddr)
 }
 
-// handleRegisterAck processes an incoming CtrlRegisterAck from a peer operator.
 func (o *Operator) handleRegisterAck(peer *OperatorPeer, payload []byte) {
 	remoteUUID, remoteAddr := decodeRegisterPayload(payload)
 	copy(peer.UUID[:], remoteUUID[:])
@@ -390,7 +456,6 @@ func (o *Operator) handleRegisterAck(peer *OperatorPeer, payload []byte) {
 	log.Infof("Operator %x acked, external %s", peer.UUID, remoteAddr)
 }
 
-// encodeRegisterPayload encodes [uuid:16][addrLen:2][addr:N].
 func encodeRegisterPayload(uuid OperatorUUIDType, addr string) []byte {
 	buf := make([]byte, 16+2+len(addr))
 	copy(buf[0:16], uuid[:])
@@ -400,7 +465,6 @@ func encodeRegisterPayload(uuid OperatorUUIDType, addr string) []byte {
 	return buf
 }
 
-// decodeRegisterPayload decodes [uuid:16][addrLen:2][addr:N].
 func decodeRegisterPayload(payload []byte) (OperatorUUIDType, string) {
 	var uuid OperatorUUIDType
 	if len(payload) < 18 {
@@ -417,7 +481,6 @@ func decodeRegisterPayload(payload []byte) (OperatorUUIDType, string) {
 	return uuid, string(payload[18 : 18+addrLen])
 }
 
-// handlePong processes a Pong response and updates PingCost in Registry.
 func (o *Operator) handlePong(peer *OperatorPeer, payload []byte) {
 	sentNano, err := DecodePingPayload(payload)
 	if err != nil {
@@ -439,7 +502,6 @@ func (o *Operator) handlePong(peer *OperatorPeer, payload []byte) {
 	log.Infof("Pong from %x: RTT=%v", peer.UUID, rtt)
 }
 
-// PingOperator sends a Ping to a remote operator by UUID.
 func (o *Operator) PingOperator(uuid OperatorUUIDType) error {
 	peer, ok := o.operators.Get(uuid)
 	if !ok {
@@ -451,8 +513,8 @@ func (o *Operator) PingOperator(uuid OperatorUUIDType) error {
 func (o *Operator) Close() error {
 	o.cancel()
 
-	if o.cfg.ClientListener != nil {
-		o.cfg.ClientListener.Close()
+	if o.clientListener != nil {
+		o.clientListener.Close()
 	}
 	if o.opListener != nil {
 		o.opListener.Close()
@@ -465,17 +527,26 @@ func (o *Operator) Close() error {
 	return nil
 }
 
-// ConnectedClients returns the number of currently connected clients.
-func (o *Operator) ConnectedClients() int {
-	return o.clients.Len()
+func (o *Operator) ConnectedClients() int  { return o.clients.Len() }
+func (o *Operator) ConnectedOperators() int { return o.operators.Len() }
+
+func createListener(transportType, addr string, resolver auth.AuthResolver, configFn protocol.ConfigFunc) (transport.Listener, error) {
+	switch transportType {
+	case "tcp":
+		return tcp.NewListener(addr, resolver, configFn)
+	case "udp":
+		return udp.NewListener(addr, resolver, configFn)
+	case "quic":
+		tlsConf, err := quic.GenerateServerTLS()
+		if err != nil {
+			return nil, err
+		}
+		return quic.NewListener(addr, resolver, configFn, tlsConf)
+	default:
+		return nil, fmt.Errorf("unknown transport: %s", transportType)
+	}
 }
 
-// ConnectedOperators returns the number of connected peer operators.
-func (o *Operator) ConnectedOperators() int {
-	return o.operators.Len()
-}
-
-// packetDstIP extracts the destination IP from an IP packet.
 func packetDstIP(data []byte) ([]byte, error) {
 	if len(data) < 1 {
 		return nil, fmt.Errorf("empty packet")

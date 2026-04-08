@@ -8,22 +8,24 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// --------------- YAML file config ---------------
+
 // NetworkEntry represents a single VNet:CIDR pair in the config file, with optional per-VNet auth.
 type NetworkEntry struct {
 	VNet uint64 `yaml:"vnet"`
 	CIDR string `yaml:"cidr"`
-	Auth string `yaml:"auth,omitempty"` // per-VNet auth override (empty = use global default)
+	Auth string `yaml:"auth,omitempty"`
 }
 
-// Config holds all configuration fields shared by operator and client.
-type Config struct {
+// FileConfig holds all fields from the YAML config file.
+type FileConfig struct {
 	Mode string `yaml:"mode"` // "operator" or "client"
 
 	// Operator fields
 	Listen    string         `yaml:"listen"`
 	OpListen  string         `yaml:"op-listen"`
 	Network   []NetworkEntry `yaml:"network"`
-	StatsAddr string         `yaml:"stats"` // stats API listen address
+	StatsAddr string         `yaml:"stats"`
 
 	// Client fields
 	Endpoint string `yaml:"endpoint"`
@@ -32,27 +34,50 @@ type Config struct {
 
 	// Shared fields
 	Transport string `yaml:"transport"`
-	Auth      string `yaml:"auth"` // "noauth", "hmac:id:secret", "userpass:user:password"
+	Auth      string `yaml:"auth"`
 }
 
-// LoadConfig reads and parses a YAML config file.
-func LoadConfig(path string) (*Config, error) {
+func LoadConfig(path string) (*FileConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config %s: %w", path, err)
 	}
-	var cfg Config
+	var cfg FileConfig
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
 	return &cfg, nil
 }
 
-// NetworkString converts the Network entries to the CLI format "vnet:CIDR;vnet:CIDR".
-func (c *Config) NetworkString() string {
+func (c *FileConfig) NetworkString() string {
 	parts := make([]string, len(c.Network))
 	for i, n := range c.Network {
 		parts[i] = fmt.Sprintf("%d:%s", n.VNet, n.CIDR)
 	}
 	return strings.Join(parts, ";")
+}
+
+// --------------- Runtime configs ---------------
+
+// OperatorConfig is the declarative configuration consumed by operator.New().
+type OperatorConfig struct {
+	UUID           *[16]byte           // optional: if nil, random UUID is generated
+	ListenAddr     string              // client listen address
+	OpListenAddr   string              // inter-operator bind address
+	OpExternalAddr string              // external address other operators use to reach us
+	Transport      string              // "tcp", "udp", "quic"
+	AuthStr        string              // global default auth string
+	NetworkAuth    map[[16]byte]string  // per-VNet auth overrides
+	Network        string              // "vnetID:CIDR;..." pairs
+	StatsAddr      string              // stats HTTP API address
+	DiscoverAddrs  []string            // seed operator addresses for bootstrap
+}
+
+// ClientConfig is the declarative configuration consumed by client.New().
+type ClientConfig struct {
+	Endpoint  string   // server address
+	Transport string   // "tcp", "udp", "quic"
+	AuthStr   string   // auth config string
+	VNetID    [16]byte // virtual network ID
+	TUNName   string   // TUN device name
 }

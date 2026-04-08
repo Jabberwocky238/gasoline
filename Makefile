@@ -11,5 +11,8 @@ linux:
 windows:
 	GOOS=windows GOARCH=amd64 go build -o $(OUTPUT_DIR)/$(BINARY_NAME)-windows-amd64.exe .
 
+genproto:
+	protoc --go_out=. --go_opt=paths=source_relative operator/ctrl/control.proto
+
 clean:
 	rm -rf $(OUTPUT_DIR)/$(BINARY_NAME)-*

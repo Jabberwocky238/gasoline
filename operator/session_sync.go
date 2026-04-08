@@ -63,7 +63,7 @@ func decodeSessionRevoke(data []byte) (sessionID SessionIDType, vnetID VNetIDTyp
 
 // broadcastSessionSync notifies all peer operators about a new client session.
 func (o *Operator) broadcastSessionSync(cp *ClientPeer) {
-	payload := encodeSessionSync(cp.SessionID, cp.VNetID, OperatorUUIDType(o.cfg.UUID), cp.IP.Addr())
+	payload := encodeSessionSync(cp.SessionID, cp.VNetID, o.uuid, cp.IP.Addr())
 
 	o.operators.mu.RLock()
 	peers := make([]*OperatorPeer, 0, len(o.operators.peers))
@@ -168,7 +168,7 @@ func (o *Operator) forwardToRemoteOperator(srcPeer *ClientPeer, dstAddr netip.Ad
 	}
 
 	// Skip if the target is on this operator (shouldn't happen, local lookup already failed)
-	if targetOpUUID == OperatorUUIDType(o.cfg.UUID) {
+	if targetOpUUID == o.uuid {
 		return false
 	}
 

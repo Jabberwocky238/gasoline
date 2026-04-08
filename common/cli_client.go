@@ -8,18 +8,9 @@ import (
 	"strconv"
 )
 
-// ClientArgs holds the resolved configuration for running a client.
-type ClientArgs struct {
-	Endpoint  string
-	Transport string
-	AuthStr   string
-	VNetID    [16]byte
-	TUNName   string
-}
-
 // RegisterClientFlags registers all client CLI flags on the given FlagSet.
-// Returns a function that resolves flags + config file into ClientArgs.
-func RegisterClientFlags(fs *flag.FlagSet) func() *ClientArgs {
+// Returns a function that resolves flags + config file into ClientConfig.
+func RegisterClientFlags(fs *flag.FlagSet) func() *ClientConfig {
 	configFile := fs.String("c", "", "config file path (YAML)")
 	endpoint := fs.String("endpoint", "", "server address (required)")
 	transportType := fs.String("transport", "quic", "transport type: tcp, udp, quic")
@@ -27,7 +18,7 @@ func RegisterClientFlags(fs *flag.FlagSet) func() *ClientArgs {
 	vnetIDStr := fs.String("vnet", "", "vnet ID (decimal number, e.g. 200)")
 	tunName := fs.String("tun-name", "", "TUN device name")
 
-	return func() *ClientArgs {
+	return func() *ClientConfig {
 		if *configFile != "" {
 			cfg, err := LoadConfig(*configFile)
 			if err != nil {
@@ -66,7 +57,7 @@ func RegisterClientFlags(fs *flag.FlagSet) func() *ClientArgs {
 			binary.BigEndian.PutUint64(vnetID[8:], vnetNum)
 		}
 
-		return &ClientArgs{
+		return &ClientConfig{
 			Endpoint:  *endpoint,
 			Transport: *transportType,
 			AuthStr:   *authStr,

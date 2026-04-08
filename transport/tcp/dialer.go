@@ -4,15 +4,16 @@ import (
 	"net"
 
 	"github.com/jabberwocky238/gasoline/protocol"
+	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/transport"
 )
 
 type Dialer struct {
 	clientID [16]byte
-	auth     protocol.ClientAuthenticator
+	auth     auth.ClientAuthenticator
 }
 
-func NewDialer(clientID [16]byte, auth protocol.ClientAuthenticator) *Dialer {
+func NewDialer(clientID [16]byte, auth auth.ClientAuthenticator) *Dialer {
 	return &Dialer{clientID: clientID, auth: auth}
 }
 

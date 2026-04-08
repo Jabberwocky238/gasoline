@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"sync"
 
 	log "github.com/sirupsen/logrus"
@@ -58,10 +59,17 @@ func (c *Client) Start() error {
 	c.conn = conn
 
 	cfg := &result.Config
-	log.Infof("Handshake OK: assigned IP %s", cfg.IPPrefix.String())
+	log.Infof("Handshake OK: assigned IP %s, allowed %v", cfg.IPPrefix.String(), cfg.AllowedRanges)
 
-	// 2. Create TUN with assigned IP
-	tun, err := tunPkg.New(c.cfg.TUNName, cfg.IPPrefix.String())
+	// 2. Create TUN with assigned IP using the network prefix length from AllowedRanges
+	tunAddr := cfg.IPPrefix // e.g. 10.0.0.2/32
+	for _, r := range cfg.AllowedRanges {
+		if r.Contains(cfg.IPPrefix.Addr()) {
+			tunAddr = netip.PrefixFrom(cfg.IPPrefix.Addr(), r.Bits()) // e.g. 10.0.0.2/24
+			break
+		}
+	}
+	tun, err := tunPkg.New(c.cfg.TUNName, tunAddr.String())
 	if err != nil {
 		conn.Close()
 		return fmt.Errorf("create TUN: %w", err)

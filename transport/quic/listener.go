@@ -15,16 +15,17 @@ import (
 	"github.com/quic-go/quic-go"
 
 	"github.com/jabberwocky238/gasoline/protocol"
+	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/transport"
 )
 
 type Listener struct {
 	inner    *quic.Listener
-	auth     protocol.ServerAuthenticator
+	auth     auth.ServerAuthenticator
 	configFn protocol.ConfigFunc
 }
 
-func NewListener(addr string, auth protocol.ServerAuthenticator, configFn protocol.ConfigFunc, tlsConf *tls.Config) (*Listener, error) {
+func NewListener(addr string, auth auth.ServerAuthenticator, configFn protocol.ConfigFunc, tlsConf *tls.Config) (*Listener, error) {
 	ln, err := quic.ListenAddr(addr, tlsConf, nil)
 	if err != nil {
 		return nil, err

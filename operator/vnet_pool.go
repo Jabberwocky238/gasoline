@@ -9,6 +9,7 @@ import (
 
 	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol"
+	"github.com/jabberwocky238/gasoline/protocol/auth"
 )
 
 // VNetPool manages IP allocation for a single VNet.
@@ -147,11 +148,11 @@ func (m *VNetPoolMap) All() map[VNetIDType]*VNetPool {
 }
 
 // MakeConfigFunc creates a protocol.ConfigFunc that allocates IPs from the correct VNet pool.
-func MakeConfigFunc(pools *VNetPoolMap, serverPub protocol.PublicKey, auth protocol.ServerAuthenticator) protocol.ConfigFunc {
+func MakeConfigFunc(pools *VNetPoolMap, serverPub protocol.PublicKey, authenticator auth.ServerAuthenticator) protocol.ConfigFunc {
 	return func(clientID [16]byte) (*protocol.SessionConfig, error) {
 		var vnetID VNetIDType
 		var sessionID [16]byte
-		if noauth, ok := auth.(*protocol.NoAuthServer); ok {
+		if noauth, ok := authenticator.(*auth.NoAuthServer); ok {
 			vnetID = VNetIDType(noauth.LastVNetID)
 			sessionID = noauth.LastSessionID
 		}

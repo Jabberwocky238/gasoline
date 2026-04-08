@@ -4,57 +4,21 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+
+	"github.com/jabberwocky238/gasoline/protocol/auth"
 )
 
 const (
 	HandshakeVersion = 0x01
 )
 
-type HandshakeType byte
-
-const (
-	NoAuth       HandshakeType = iota
-	HMACAuth
-	UserPassAuth
-)
-
-func (t HandshakeType) String() string {
-	switch t {
-	case NoAuth:
-		return "NoAuth"
-	case HMACAuth:
-		return "HMAC"
-	case UserPassAuth:
-		return "UserPass"
-	default:
-		return "Unknown"
-	}
-}
-
 const (
 	HandshakeOK   byte = 0x00
 	HandshakeFail byte = 0x01
 )
 
-// --------------- Auth Interfaces ---------------
-
-// ClientAuthenticator is the client-side auth strategy.
-type ClientAuthenticator interface {
-	Type() HandshakeType
-	Respond(challenge []byte) ([]byte, error)
-}
-
-// ServerAuthenticator is the server-side auth strategy.
-type ServerAuthenticator interface {
-	Type() HandshakeType
-	GenerateChallenge() ([]byte, error)
-	VerifyResponse(clientID [16]byte, challenge, response []byte) error
-}
-
 // ConfigFunc generates a SessionConfig for a clientID after auth succeeds.
 type ConfigFunc func(clientID [16]byte) (*SessionConfig, error)
-
-// --------------- Handshake Result ---------------
 
 // HandshakeResult is returned after a successful handshake.
 type HandshakeResult struct {
@@ -67,14 +31,14 @@ type HandshakeResult struct {
 
 // ClientHandshake performs the 4-step handshake on the client side.
 //
-//	1. C→S: ClientHello  (version + clientID)
-//	2. S→C: ServerHello  (version + authType + challenge)
-//	3. C→S: ClientRequest(auth response)
-//	4. S→C: ServerResponse(status + config)
-//	5. derive AEAD keypair via ECDH
-func ClientHandshake(rw io.ReadWriter, clientID [16]byte, auth ClientAuthenticator) (*HandshakeResult, error) {
-	// 1. Send ClientHello
-	hello := &ClientHello{Version: HandshakeVersion, ClientID: clientID}
+//  1. C→S: ClientHello  (version + authType + clientID)
+//  2. S→C: ServerHello  (version + authType + challenge)
+//  3. C→S: ClientRequest(auth response)
+//  4. S→C: ServerResponse(status + config)
+//  5. derive AEAD keypair via ECDH
+func ClientHandshake(rw io.ReadWriter, clientID [16]byte, authenticator auth.ClientAuthenticator) (*HandshakeResult, error) {
+	// 1. Send ClientHello with auth type
+	hello := &ClientHello{Version: HandshakeVersion, AuthType: authenticator.Type(), ClientID: clientID}
 	if err := hello.WriteTo(rw); err != nil {
 		return nil, fmt.Errorf("send ClientHello: %w", err)
 	}
@@ -87,12 +51,12 @@ func ClientHandshake(rw io.ReadWriter, clientID [16]byte, auth ClientAuthenticat
 	if serverHello.Version != HandshakeVersion {
 		return nil, fmt.Errorf("version mismatch: got %d, want %d", serverHello.Version, HandshakeVersion)
 	}
-	if serverHello.AuthType != auth.Type() {
-		return nil, fmt.Errorf("auth type mismatch: server=%s, client=%s", serverHello.AuthType, auth.Type())
+	if serverHello.AuthType != authenticator.Type() {
+		return nil, fmt.Errorf("auth type mismatch: server=%s, client=%s", serverHello.AuthType, authenticator.Type())
 	}
 
 	// 3. Send ClientRequest
-	response, err := auth.Respond(serverHello.Payload)
+	response, err := authenticator.Respond(serverHello.Payload)
 	if err != nil {
 		return nil, fmt.Errorf("auth respond: %w", err)
 	}
@@ -116,7 +80,7 @@ func ClientHandshake(rw io.ReadWriter, clientID [16]byte, auth ClientAuthenticat
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
-	// 5. Derive AEAD keypair: client is initiator
+	// 5. Derive AEAD keypair
 	keypair, err := DeriveSessionKeypair(cfg.ClientPrivateKey, cfg.ServerPublicKey, true)
 	if err != nil {
 		return nil, fmt.Errorf("derive session keys: %w", err)
@@ -126,7 +90,7 @@ func ClientHandshake(rw io.ReadWriter, clientID [16]byte, auth ClientAuthenticat
 }
 
 // ServerHandshake performs the 4-step handshake on the server side.
-func ServerHandshake(rw io.ReadWriter, auth ServerAuthenticator, configFn ConfigFunc) (*HandshakeResult, error) {
+func ServerHandshake(rw io.ReadWriter, authenticator auth.ServerAuthenticator, configFn ConfigFunc) (*HandshakeResult, error) {
 	// 1. Receive ClientHello
 	var hello ClientHello
 	if err := hello.ReadFrom(rw); err != nil {
@@ -135,15 +99,21 @@ func ServerHandshake(rw io.ReadWriter, auth ServerAuthenticator, configFn Config
 	if hello.Version != HandshakeVersion {
 		return nil, fmt.Errorf("version mismatch: got %d, want %d", hello.Version, HandshakeVersion)
 	}
+	// Verify client requested the same auth type
+	if hello.AuthType != authenticator.Type() {
+		fail := &ServerResponse{Status: HandshakeFail}
+		fail.WriteTo(rw)
+		return nil, fmt.Errorf("auth type mismatch: client=%s, server=%s", hello.AuthType, authenticator.Type())
+	}
 
 	// 2. Send ServerHello with challenge
-	challenge, err := auth.GenerateChallenge()
+	challenge, err := authenticator.GenerateChallenge()
 	if err != nil {
 		return nil, fmt.Errorf("generate challenge: %w", err)
 	}
 	serverHello := &ServerHello{
 		Version:  HandshakeVersion,
-		AuthType: auth.Type(),
+		AuthType: authenticator.Type(),
 		Payload:  challenge,
 	}
 	if err := serverHello.WriteTo(rw); err != nil {
@@ -157,7 +127,7 @@ func ServerHandshake(rw io.ReadWriter, auth ServerAuthenticator, configFn Config
 	}
 
 	// 4. Verify auth
-	if err := auth.VerifyResponse(hello.ClientID, challenge, req.Payload); err != nil {
+	if err := authenticator.VerifyResponse(hello.ClientID, challenge, req.Payload); err != nil {
 		fail := &ServerResponse{Status: HandshakeFail}
 		fail.WriteTo(rw)
 		return nil, fmt.Errorf("auth verify: %w", err)
@@ -175,9 +145,7 @@ func ServerHandshake(rw io.ReadWriter, auth ServerAuthenticator, configFn Config
 		return nil, fmt.Errorf("send ServerResponse: %w", err)
 	}
 
-	// 5. Derive AEAD keypair: server is responder
-	// Server knows client_private (it generated it), so:
-	// ECDH(client_private, server_public) == ECDH(server_private, client_public)
+	// 5. Derive AEAD keypair
 	keypair, err := DeriveSessionKeypair(cfg.ClientPrivateKey, cfg.ServerPublicKey, false)
 	if err != nil {
 		return nil, fmt.Errorf("derive session keys: %w", err)
@@ -188,34 +156,37 @@ func ServerHandshake(rw io.ReadWriter, auth ServerAuthenticator, configFn Config
 
 // --------------- Wire Messages ---------------
 
-// ClientHello: version(1) + clientID(16) = 17 bytes
+// ClientHello: version(1) + authType(1) + clientID(16) = 18 bytes
 type ClientHello struct {
 	Version  byte
+	AuthType auth.Type
 	ClientID [16]byte
 }
 
 func (m *ClientHello) WriteTo(w io.Writer) error {
-	buf := make([]byte, 17)
+	buf := make([]byte, 18)
 	buf[0] = m.Version
-	copy(buf[1:], m.ClientID[:])
+	buf[1] = byte(m.AuthType)
+	copy(buf[2:], m.ClientID[:])
 	_, err := w.Write(buf)
 	return err
 }
 
 func (m *ClientHello) ReadFrom(r io.Reader) error {
-	buf := make([]byte, 17)
+	buf := make([]byte, 18)
 	if _, err := io.ReadFull(r, buf); err != nil {
 		return err
 	}
 	m.Version = buf[0]
-	copy(m.ClientID[:], buf[1:])
+	m.AuthType = auth.Type(buf[1])
+	copy(m.ClientID[:], buf[2:])
 	return nil
 }
 
 // ServerHello: version(1) + authType(1) + payloadLen(2) + payload(N)
 type ServerHello struct {
 	Version  byte
-	AuthType HandshakeType
+	AuthType auth.Type
 	Payload  []byte
 }
 
@@ -240,7 +211,7 @@ func (m *ServerHello) ReadFrom(r io.Reader) error {
 		return err
 	}
 	m.Version = header[0]
-	m.AuthType = HandshakeType(header[1])
+	m.AuthType = auth.Type(header[1])
 	payloadLen := binary.BigEndian.Uint16(header[2:])
 	if payloadLen > 0 {
 		m.Payload = make([]byte, payloadLen)

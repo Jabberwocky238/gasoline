@@ -7,16 +7,17 @@ import (
 	"github.com/quic-go/quic-go"
 
 	"github.com/jabberwocky238/gasoline/protocol"
+	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/transport"
 )
 
 type Dialer struct {
 	clientID [16]byte
-	auth     protocol.ClientAuthenticator
+	auth     auth.ClientAuthenticator
 	tlsConf  *tls.Config
 }
 
-func NewDialer(clientID [16]byte, auth protocol.ClientAuthenticator, tlsConf *tls.Config) *Dialer {
+func NewDialer(clientID [16]byte, auth auth.ClientAuthenticator, tlsConf *tls.Config) *Dialer {
 	return &Dialer{clientID: clientID, auth: auth, tlsConf: tlsConf}
 }
 

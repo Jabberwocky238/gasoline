@@ -2,12 +2,13 @@ package tcp
 
 import (
 	"bytes"
-	"fmt"
+	"crypto/sha256"
 	"net/netip"
 	"sync"
 	"testing"
 
 	"github.com/jabberwocky238/gasoline/protocol"
+	"github.com/jabberwocky238/gasoline/protocol/auth"
 )
 
 // testConfigFn generates a SessionConfig for testing.
@@ -26,10 +27,10 @@ func testConfigFn() protocol.ConfigFunc {
 }
 
 func TestTCPHandshakeAndPacket(t *testing.T) {
-	auth := &protocol.NoAuthServer{}
+	serverAuth := &auth.NoAuthServer{}
 	configFn := testConfigFn()
 
-	ln, err := NewListener("127.0.0.1:0", auth, configFn)
+	ln, err := NewListener("127.0.0.1:0", serverAuth, configFn)
 	if err != nil {
 		t.Fatalf("NewListener: %v", err)
 	}
@@ -37,7 +38,7 @@ func TestTCPHandshakeAndPacket(t *testing.T) {
 
 	addr := ln.Addr()
 	clientID := [16]byte{0x01, 0x02, 0x03}
-	dialer := NewDialer(clientID, &protocol.NoAuthClient{})
+	dialer := NewDialer(clientID, &auth.NoAuthClient{})
 
 	var wg sync.WaitGroup
 	var serverConn *Conn
@@ -143,16 +144,16 @@ func TestTCPHandshakeAndPacket(t *testing.T) {
 }
 
 func TestTCPMultiplePackets(t *testing.T) {
-	auth := &protocol.NoAuthServer{}
+	serverAuth := &auth.NoAuthServer{}
 	configFn := testConfigFn()
 
-	ln, err := NewListener("127.0.0.1:0", auth, configFn)
+	ln, err := NewListener("127.0.0.1:0", serverAuth, configFn)
 	if err != nil {
 		t.Fatalf("NewListener: %v", err)
 	}
 	defer ln.Close()
 
-	dialer := NewDialer([16]byte{}, &protocol.NoAuthClient{})
+	dialer := NewDialer([16]byte{}, &auth.NoAuthClient{})
 
 	var wg sync.WaitGroup
 	var sConn *Conn
@@ -204,15 +205,14 @@ func TestTCPMultiplePackets(t *testing.T) {
 }
 
 func TestTCPHMACAuth(t *testing.T) {
-	secret := []byte("test-shared-secret-1234")
 	clientID := [16]byte{0xAA, 0xBB}
 
-	serverAuth := &protocol.HMACAuthServer{
-		LookupSecret: func(id [16]byte) ([]byte, error) {
-			return secret, nil
+	serverAuth := &auth.HMACServer{
+		Secrets: map[string][]byte{
+			"testclient": []byte("test-shared-secret-1234"),
 		},
 	}
-	clientAuth := &protocol.HMACAuthClient{Secret: secret}
+	clientAuth := &auth.HMACClient{ID: "testclient", Secret: []byte("test-shared-secret-1234")}
 	configFn := testConfigFn()
 
 	ln, err := NewListener("127.0.0.1:0", serverAuth, configFn)
@@ -246,16 +246,15 @@ func TestTCPHMACAuth(t *testing.T) {
 }
 
 func TestTCPUserPassAuth(t *testing.T) {
-	serverAuth := &protocol.UserPassAuthServer{
-		LookupPassword: func(username string) (string, error) {
-			if username == "alice" {
-				return "password123", nil
-			}
-			return "", fmt.Errorf("unknown user")
+	// SHA256("password123")
+	pwHash := sha256.Sum256([]byte("password123"))
+	serverAuth := &auth.UserPassServer{
+		Users: map[string][sha256.Size]byte{
+			"alice": pwHash,
 		},
 	}
-	clientAuth := &protocol.UserPassAuthClient{
-		Username: "alice",
+	clientAuth := &auth.UserPassClient{
+		UserID:   "alice",
 		Password: "password123",
 	}
 	configFn := testConfigFn()

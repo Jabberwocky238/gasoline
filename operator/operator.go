@@ -10,6 +10,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/jabberwocky238/gasoline/protocol"
+	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/transport"
 
 	"golang.org/x/net/ipv4"
@@ -24,7 +25,7 @@ type Config struct {
 	// UUID is this operator's unique identifier
 	UUID OperatorUUIDType
 	// Auth strategy for incoming client handshakes
-	Auth protocol.ServerAuthenticator
+	Auth auth.ServerAuthenticator
 	// ConfigFunc generates SessionConfig for each client after auth
 	ConfigFn protocol.ConfigFunc
 	// ClientListener accepts client transport connections

@@ -6,12 +6,13 @@ import (
 	"sync"
 
 	"github.com/jabberwocky238/gasoline/protocol"
+	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/transport"
 )
 
 type Listener struct {
 	rawConn  *net.UDPConn
-	auth     protocol.ServerAuthenticator
+	auth     auth.ServerAuthenticator
 	configFn protocol.ConfigFunc
 
 	mu    sync.RWMutex
@@ -32,7 +33,7 @@ type acceptResult struct {
 	result *protocol.HandshakeResult
 }
 
-func NewListener(addr string, auth protocol.ServerAuthenticator, configFn protocol.ConfigFunc) (*Listener, error) {
+func NewListener(addr string, auth auth.ServerAuthenticator, configFn protocol.ConfigFunc) (*Listener, error) {
 	udpAddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
 		return nil, err

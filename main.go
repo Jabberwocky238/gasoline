@@ -14,6 +14,7 @@ import (
 	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/operator"
 	"github.com/jabberwocky238/gasoline/protocol"
+	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/transport"
 	"github.com/jabberwocky238/gasoline/transport/quic"
 	"github.com/jabberwocky238/gasoline/transport/tcp"
@@ -40,23 +41,28 @@ func usage() {
   gasoline operator [flags]
   gasoline client   [flags]
 
+Common flags:
+  -c            Config file path (YAML, CLI flags override config values)
+
 Operator flags:
   --listen      Client listen address (e.g. 0.0.0.0:443)
   --op-listen   Operator listen address (e.g. 0.0.0.0:6677)
   --transport   Transport type: tcp, udp, quic (default: quic)
-  --auth        Auth type: noauth, hmac, userpass (default: noauth)
+  --auth        Auth config (default: noauth)
+                  noauth
+                  hmac:<id>:<secret>;<id2>:<secret2>
+                  userpass:<userid>:<sha256>;<userid2>:<sha256>
   --network     VNet:CIDR pairs (e.g. 200:10.0.0.0/24;1000:192.168.200.0/24)
-  --secret      Shared secret for HMAC auth
 
 Client flags:
   --endpoint    Server address (e.g. 1.2.3.4:443)
   --transport   Transport type: tcp, udp, quic (default: quic)
-  --auth        Auth type: noauth, hmac, userpass (default: noauth)
+  --auth        Auth config (default: noauth)
+                  noauth
+                  hmac:<id>:<secret>
+                  userpass:<userid>:<password>
   --vnet        VNet ID (decimal number, e.g. 200)
   --tun-name    TUN device name (default: empty, let sing-tun decide)
-  --secret      Shared secret for HMAC auth
-  --username    Username for userpass auth
-  --password    Password for userpass auth
 `)
 	os.Exit(1)
 }
@@ -65,13 +71,36 @@ Client flags:
 
 func runOperator(args []string) {
 	fs := flag.NewFlagSet("operator", flag.ExitOnError)
+	configFile := fs.String("c", "", "config file path (YAML)")
 	listenAddr := fs.String("listen", "0.0.0.0:8443", "client listen address")
 	opListenAddr := fs.String("op-listen", "0.0.0.0:6677", "operator listen address")
 	transportType := fs.String("transport", "quic", "transport type: tcp, udp, quic")
-	authType := fs.String("auth", "noauth", "auth type: noauth, hmac, userpass")
+	authStr := fs.String("auth", "noauth", "auth config string")
 	network := fs.String("network", "0:10.0.0.0/24", "vnetID:CIDR pairs separated by ';'")
-	secret := fs.String("secret", "", "shared secret for HMAC auth")
 	fs.Parse(args)
+
+	// Load config file and apply as defaults (CLI flags override)
+	if *configFile != "" {
+		cfg, err := common.LoadConfig(*configFile)
+		if err != nil {
+			log.Fatalf("Config: %v", err)
+		}
+		if cfg.Listen != "" && !isFlagSet(fs, "listen") {
+			*listenAddr = cfg.Listen
+		}
+		if cfg.OpListen != "" && !isFlagSet(fs, "op-listen") {
+			*opListenAddr = cfg.OpListen
+		}
+		if cfg.Transport != "" && !isFlagSet(fs, "transport") {
+			*transportType = cfg.Transport
+		}
+		if cfg.Auth != "" && !isFlagSet(fs, "auth") {
+			*authStr = cfg.Auth
+		}
+		if len(cfg.Network) > 0 && !isFlagSet(fs, "network") {
+			*network = cfg.NetworkString()
+		}
+	}
 
 	// VNet pools
 	pools, err := operator.ParseVNetPools(*network)
@@ -91,7 +120,7 @@ func runOperator(args []string) {
 	log.Infof("Server public key: %s", serverPub.ToBase64())
 
 	// Auth
-	serverAuth, err := protocol.NewServerAuth(*authType, *secret)
+	serverAuth, err := auth.ParseServerAuth(*authStr)
 	if err != nil {
 		log.Fatalf("Auth: %v", err)
 	}
@@ -116,7 +145,7 @@ func runOperator(args []string) {
 		log.Fatalf("Operator start: %v", err)
 	}
 	log.Infof("Operator started: client=%s (%s, %s), operator=%s",
-		*listenAddr, *transportType, *authType, *opListenAddr)
+		*listenAddr, *transportType, serverAuth.Type(), *opListenAddr)
 	waitForSignal()
 	op.Close()
 }
@@ -125,15 +154,36 @@ func runOperator(args []string) {
 
 func runClient(args []string) {
 	fs := flag.NewFlagSet("client", flag.ExitOnError)
+	configFile := fs.String("c", "", "config file path (YAML)")
 	endpoint := fs.String("endpoint", "", "server address (required)")
 	transportType := fs.String("transport", "quic", "transport type: tcp, udp, quic")
-	authType := fs.String("auth", "noauth", "auth type: noauth, hmac, userpass")
+	authStr := fs.String("auth", "noauth", "auth config string")
 	vnetIDStr := fs.String("vnet", "", "vnet ID (decimal number, e.g. 200)")
 	tunName := fs.String("tun-name", "", "TUN device name")
-	secret := fs.String("secret", "", "shared secret for HMAC auth")
-	username := fs.String("username", "", "username for userpass auth")
-	password := fs.String("password", "", "password for userpass auth")
 	fs.Parse(args)
+
+	// Load config file and apply as defaults (CLI flags override)
+	if *configFile != "" {
+		cfg, err := common.LoadConfig(*configFile)
+		if err != nil {
+			log.Fatalf("Config: %v", err)
+		}
+		if cfg.Endpoint != "" && !isFlagSet(fs, "endpoint") {
+			*endpoint = cfg.Endpoint
+		}
+		if cfg.Transport != "" && !isFlagSet(fs, "transport") {
+			*transportType = cfg.Transport
+		}
+		if cfg.Auth != "" && !isFlagSet(fs, "auth") {
+			*authStr = cfg.Auth
+		}
+		if cfg.VNet != 0 && !isFlagSet(fs, "vnet") {
+			*vnetIDStr = strconv.FormatUint(cfg.VNet, 10)
+		}
+		if cfg.TUNName != "" && !isFlagSet(fs, "tun-name") {
+			*tunName = cfg.TUNName
+		}
+	}
 
 	if *endpoint == "" {
 		log.Fatal("--endpoint is required")
@@ -150,18 +200,9 @@ func runClient(args []string) {
 	}
 
 	// Auth
-	var clientAuth protocol.ClientAuthenticator
-	if *authType == "noauth" {
-		clientAuth = &protocol.NoAuthClient{
-			VNetID:      vnetID,
-			Fingerprint: []byte("default-fingerprint"), // TODO: real device fingerprint
-		}
-	} else {
-		var err error
-		clientAuth, err = protocol.NewClientAuth(*authType, *secret, *username, *password)
-		if err != nil {
-			log.Fatalf("Auth: %v", err)
-		}
+	clientAuth, err := auth.ParseClientAuth(*authStr, vnetID, []byte("default-fingerprint"))
+	if err != nil {
+		log.Fatalf("Auth: %v", err)
 	}
 
 	// SessionID (empty — server will assign via NoAuth)
@@ -184,7 +225,7 @@ func runClient(args []string) {
 	if err := c.Start(); err != nil {
 		log.Fatalf("Client start: %v", err)
 	}
-	log.Infof("Client connected to %s (%s, %s)", *endpoint, *transportType, *authType)
+	log.Infof("Client connected to %s (%s, %s)", *endpoint, *transportType, clientAuth.Type())
 
 	waitForSignal()
 	c.Close()
@@ -192,37 +233,48 @@ func runClient(args []string) {
 
 // --------------- Transport factories ---------------
 
-func createListener(transportType, addr string, auth protocol.ServerAuthenticator, configFn protocol.ConfigFunc) (transport.Listener, error) {
+func createListener(transportType, addr string, serverAuth auth.ServerAuthenticator, configFn protocol.ConfigFunc) (transport.Listener, error) {
 	switch transportType {
 	case "tcp":
-		return tcp.NewListener(addr, auth, configFn)
+		return tcp.NewListener(addr, serverAuth, configFn)
 	case "udp":
-		return udp.NewListener(addr, auth, configFn)
+		return udp.NewListener(addr, serverAuth, configFn)
 	case "quic":
 		tlsConf, err := quic.GenerateServerTLS()
 		if err != nil {
 			return nil, err
 		}
-		return quic.NewListener(addr, auth, configFn, tlsConf)
+		return quic.NewListener(addr, serverAuth, configFn, tlsConf)
 	default:
 		return nil, fmt.Errorf("unknown transport: %s", transportType)
 	}
 }
 
-func createDialer(transportType string, sessionID [16]byte, auth protocol.ClientAuthenticator) (transport.Dialer, error) {
+func createDialer(transportType string, sessionID [16]byte, clientAuth auth.ClientAuthenticator) (transport.Dialer, error) {
 	switch transportType {
 	case "tcp":
-		return tcp.NewDialer(sessionID, auth), nil
+		return tcp.NewDialer(sessionID, clientAuth), nil
 	case "udp":
-		return udp.NewDialer(sessionID, auth), nil
+		return udp.NewDialer(sessionID, clientAuth), nil
 	case "quic":
-		return quic.NewDialer(sessionID, auth, quic.InsecureClientTLS()), nil
+		return quic.NewDialer(sessionID, clientAuth, quic.InsecureClientTLS()), nil
 	default:
 		return nil, fmt.Errorf("unknown transport: %s", transportType)
 	}
 }
 
 // --------------- Helpers ---------------
+
+// isFlagSet checks if a flag was explicitly set on the command line.
+func isFlagSet(fs *flag.FlagSet, name string) bool {
+	found := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
+}
 
 func waitForSignal() {
 	sigs := make(chan os.Signal, 1)

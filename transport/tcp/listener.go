@@ -4,16 +4,17 @@ import (
 	"net"
 
 	"github.com/jabberwocky238/gasoline/protocol"
+	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/transport"
 )
 
 type Listener struct {
 	inner    net.Listener
-	auth     protocol.ServerAuthenticator
+	auth     auth.ServerAuthenticator
 	configFn protocol.ConfigFunc
 }
 
-func NewListener(addr string, auth protocol.ServerAuthenticator, configFn protocol.ConfigFunc) (*Listener, error) {
+func NewListener(addr string, auth auth.ServerAuthenticator, configFn protocol.ConfigFunc) (*Listener, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err

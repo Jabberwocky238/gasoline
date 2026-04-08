@@ -1,0 +1,29 @@
+# Gasoline configuration file
+# Usage: gasoline operator -c config.yaml
+#        gasoline client -c config.yaml
+
+# ============ Operator 配置示例 ============
+# mode: operator
+#
+# listen: "0.0.0.0:8443"
+# op-listen: "0.0.0.0:6677"
+# transport: "quic"
+# auth: "noauth"
+# # auth: "hmac:client1:mysecret;client2:othersecret"
+# # auth: "userpass:alice:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855;bob:..."
+# network:
+#   - vnet: 200
+#     cidr: "10.0.0.0/24"
+#   - vnet: 1000
+#     cidr: "192.168.200.0/24"
+
+# ============ Client 配置示例 ============
+mode: client
+
+endpoint: "1.2.3.4:8443"
+transport: "quic"
+auth: "noauth"
+# auth: "hmac:client1:mysecret"
+# auth: "userpass:alice:mypassword"
+vnet: 200
+tun-name: ""

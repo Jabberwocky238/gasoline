@@ -53,6 +53,7 @@ type Operator struct {
 	operators *OperatorTable
 	Registry  *Registry
 	Stats     *stats.Engine
+	VNetPools *VNetPoolMap
 
 	// TCP listener for inter-operator connections
 	opListener net.Listener
@@ -130,6 +131,7 @@ func (o *Operator) routineAcceptClients() {
 
 		o.clients.Add(cp)
 		o.Stats.Recorder.Register(cp.SessionID, [16]byte(cp.VNetID), "", conn.RemoteAddr())
+		o.broadcastSessionSync(cp)
 
 		log.Infof("Client %x connected, assigned %s from %s",
 			result.ClientID, result.Config.IPPrefix, conn.RemoteAddr())
@@ -241,9 +243,9 @@ func (o *Operator) handleOperatorControl(peer *OperatorPeer, frame *Frame) {
 	case CtrlDiscoverResp:
 		o.handleDiscoverResp(cf.Payload)
 	case CtrlSessionSync:
-		// TODO: update client session in Registry
+		o.handleSessionSync(o.VNetPools, cf.Payload)
 	case CtrlSessionRevoke:
-		// TODO: remove client session from Registry
+		o.handleSessionRevoke(o.VNetPools, cf.Payload)
 	default:
 		log.Debugf("Unknown control subtype %d from %s", cf.Subtype, peer.RemoteAddr())
 	}
@@ -254,6 +256,7 @@ func (o *Operator) routineReadFromClient(cp *ClientPeer) {
 	defer func() {
 		o.clients.Remove(cp)
 		o.Stats.Recorder.Unregister(cp.SessionID)
+		o.broadcastSessionRevoke(cp)
 		cp.Conn.Close()
 		log.Infof("Client %x disconnected", cp.SessionID)
 	}()
@@ -305,8 +308,11 @@ func (o *Operator) routineReadFromClient(cp *ClientPeer) {
 			continue
 		}
 
-		// TODO: lookup Registry to find which remote operator owns this IP,
-		// then forward via the corresponding OperatorPeer.
+		// Try remote operator
+		if o.forwardToRemoteOperator(cp, dstAddr, data) {
+			continue
+		}
+
 		log.Debugf("No route for %s from client %x", net.IP(dstIP), cp.SessionID)
 	}
 }

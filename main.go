@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"math/rand"
 	"os"
 	"os/signal"
 	"strconv"
@@ -110,8 +111,8 @@ func runOperator(args []string) {
 		}
 	}
 
-	// VNet pools
-	pools, err := operator.ParseVNetPools(*network)
+	// VNet pools (use random seed to spread IP allocation across operators)
+	pools, err := operator.ParseVNetPools(*network, rand.Uint32())
 	if err != nil {
 		log.Fatalf("Network: %v", err)
 	}
@@ -157,14 +158,15 @@ func runOperator(args []string) {
 	}
 
 	op := operator.New(&operator.Config{
-		Auth:                serverAuth,
-		ConfigFn:            configFn,
-		ClientListener:      clientListener,
-		OperatorListenAddr:  opListenAddr,
+		Auth:                 serverAuth,
+		ConfigFn:             configFn,
+		ClientListener:       clientListener,
+		OperatorListenAddr:   opListenAddr,
 		OperatorExternalAddr: opExternalAddr,
-		StatsAddr:           *statsAddr,
-		DiscoverAddrs:       discoverAddrs,
+		StatsAddr:            *statsAddr,
+		DiscoverAddrs:        discoverAddrs,
 	})
+	op.VNetPools = pools
 
 	if err := op.Start(); err != nil {
 		log.Fatalf("Operator start: %v", err)

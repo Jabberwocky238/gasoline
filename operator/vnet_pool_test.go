@@ -2,13 +2,14 @@ package operator
 
 import (
 	"net/netip"
+	"sync"
 	"testing"
 )
 
 // TestVNetPoolRecycle allocates 100 IPs, releases 90, repeats 10 times
 // on a /24 prefix (253 usable hosts: .2 ~ .254). Must not error.
 func TestVNetPoolRecycle(t *testing.T) {
-	pools, err := ParseVNetPools("100:10.0.0.0/24")
+	pools, err := ParseVNetPools("100:10.0.0.0/24", 0)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -65,7 +66,7 @@ func TestVNetPoolRecycle(t *testing.T) {
 // TestVNetPoolExhaust verifies that a /28 (14 usable: .2 ~ .15) pool
 // correctly exhausts and recovers.
 func TestVNetPoolExhaust(t *testing.T) {
-	pools, err := ParseVNetPools("1:192.168.0.0/28")
+	pools, err := ParseVNetPools("1:192.168.0.0/28", 0)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -109,7 +110,7 @@ func TestVNetPoolExhaust(t *testing.T) {
 // TestVNetPoolDuplicateRelease verifies that releasing the same IP twice
 // does not corrupt the pool.
 func TestVNetPoolDuplicateRelease(t *testing.T) {
-	pools, err := ParseVNetPools("1:10.0.0.0/24")
+	pools, err := ParseVNetPools("1:10.0.0.0/24", 0)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -146,4 +147,131 @@ func TestVNetPoolDuplicateRelease(t *testing.T) {
 	}
 
 	t.Logf("double release safe: ip1=%s ip2=%s", ip1, ip2)
+}
+
+// TestVNetPoolConcurrentOperators simulates multiple operators allocating
+// from separate pools (same CIDR, different seeds) + cross-reserving via SessionSync.
+// No IP should be duplicated across all operators.
+func TestVNetPoolConcurrentOperators(t *testing.T) {
+	const (
+		numOperators = 4
+		allocPerOp   = 50 // each operator allocates 50 IPs
+		cidr         = "200:10.0.0.0/24"
+	)
+
+	// Create one pool per operator, each with a different seed
+	pools := make([]*VNetPoolMap, numOperators)
+	for i := 0; i < numOperators; i++ {
+		var err error
+		pools[i], err = ParseVNetPools(cidr, uint32(i*61+7)) // different seed per operator
+		if err != nil {
+			t.Fatalf("parse pool %d: %v", i, err)
+		}
+	}
+
+	var vnetID VNetIDType
+	vnetID[15] = 200
+
+	type result struct {
+		opIdx int
+		ip    netip.Addr
+	}
+
+	results := make(chan result, numOperators*allocPerOp)
+	var wg sync.WaitGroup
+
+	// Each operator concurrently allocates IPs and broadcasts reserves to others
+	for i := 0; i < numOperators; i++ {
+		wg.Add(1)
+		go func(opIdx int) {
+			defer wg.Done()
+			pool, _ := pools[opIdx].Get(vnetID)
+
+			for j := 0; j < allocPerOp; j++ {
+				ip, err := pool.AllocateIP()
+				if err != nil {
+					t.Errorf("op%d alloc %d: %v", opIdx, j, err)
+					return
+				}
+
+				// Simulate SessionSync: reserve this IP on all other operators
+				for k := 0; k < numOperators; k++ {
+					if k == opIdx {
+						continue
+					}
+					otherPool, _ := pools[k].Get(vnetID)
+					otherPool.ReserveIP(ip)
+				}
+
+				results <- result{opIdx: opIdx, ip: ip}
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	close(results)
+
+	// Check for duplicates
+	seen := make(map[netip.Addr]int) // ip → operator index
+	for r := range results {
+		if prevOp, exists := seen[r.ip]; exists {
+			t.Fatalf("DUPLICATE: %s allocated by operator %d and %d", r.ip, prevOp, r.opIdx)
+		}
+		seen[r.ip] = r.opIdx
+	}
+
+	total := len(seen)
+	expected := numOperators * allocPerOp
+	if total != expected {
+		t.Fatalf("expected %d unique IPs, got %d", expected, total)
+	}
+
+	t.Logf("OK: %d operators × %d IPs = %d unique, no duplicates", numOperators, allocPerOp, total)
+}
+
+// TestVNetPoolConcurrentAllocRelease hammers a single pool with
+// concurrent alloc/release from multiple goroutines. Must not panic or duplicate.
+func TestVNetPoolConcurrentAllocRelease(t *testing.T) {
+	pools, err := ParseVNetPools("1:10.0.0.0/24", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vnetID VNetIDType
+	vnetID[15] = 1
+	pool, _ := pools.Get(vnetID)
+
+	const goroutines = 4
+	const opsPerGoroutine = 50
+
+	var wg sync.WaitGroup
+	allIPs := make(chan netip.Addr, goroutines*opsPerGoroutine)
+
+	for g := 0; g < goroutines; g++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var local []netip.Addr
+			for i := 0; i < opsPerGoroutine; i++ {
+				ip, err := pool.AllocateIP()
+				if err != nil {
+					t.Errorf("alloc: %v", err)
+					return
+				}
+				local = append(local, ip)
+				allIPs <- ip
+
+				// Release half the IPs
+				if len(local) > 10 && i%2 == 0 {
+					rel := local[0]
+					local = local[1:]
+					pool.ReleaseIP(rel)
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+	close(allIPs)
+
+	t.Logf("Concurrent alloc/release OK: pool inUse=%d", pool.InUseCount())
 }

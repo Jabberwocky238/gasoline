@@ -19,76 +19,111 @@ type VNetPool struct {
 	baseAddr netip.Addr
 
 	mu      sync.Mutex
-	next    uint32   // next sequence to try (starts at 2: .0=network, .1=gateway)
-	freed   []uint32 // recycled sequences, reused first
-	inUse   map[uint32]bool
-	maxHost uint32 // max usable host count in this prefix
+	next    uint32          // next sequence to try
+	freed   []uint32        // recycled sequences
+	inUse   map[uint32]bool // all known in-use sequences (local + remote)
+	maxHost uint32          // max usable host count
 }
 
-func newVNetPool(vnetID VNetIDType, prefix netip.Prefix) *VNetPool {
+func newVNetPool(vnetID VNetIDType, prefix netip.Prefix, startOffset uint32) *VNetPool {
 	bits := prefix.Bits()
 	hostBits := 32 - bits
 	var maxHost uint32
 	if hostBits >= 32 {
 		maxHost = ^uint32(0)
 	} else {
-		maxHost = (1 << hostBits) - 1 // e.g. /24 → 255
+		maxHost = (1 << hostBits) - 1
+	}
+	if startOffset < 2 {
+		startOffset = 2 // .0=network, .1=gateway
+	}
+	if startOffset > maxHost {
+		startOffset = 2
 	}
 	return &VNetPool{
 		VNetID:   vnetID,
 		Prefix:   prefix,
 		baseAddr: prefix.Addr(),
-		next:     2,
+		next:     startOffset,
 		inUse:    make(map[uint32]bool),
 		maxHost:  maxHost,
 	}
 }
 
 // AllocateIP returns the next available IP in this pool.
+// Wraps around the pool to find a free slot.
 func (p *VNetPool) AllocateIP() (netip.Addr, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	var seq uint32
-
-	if len(p.freed) > 0 {
-		// Reuse a recycled sequence
-		seq = p.freed[len(p.freed)-1]
+	// Try freed list first
+	for len(p.freed) > 0 {
+		seq := p.freed[len(p.freed)-1]
 		p.freed = p.freed[:len(p.freed)-1]
-	} else {
-		// Allocate a new sequence
+		if !p.inUse[seq] {
+			ip := common.AddToAddr(p.baseAddr, seq)
+			p.inUse[seq] = true
+			return ip, nil
+		}
+	}
+
+	// Scan from p.next, wrapping around once
+	start := p.next
+	wrapped := false
+	for {
+		seq := p.next
+		p.next++
 		if p.next > p.maxHost {
+			p.next = 2 // wrap around
+		}
+
+		if !wrapped && p.next == start {
+			// Full loop, pool exhausted
 			return netip.Addr{}, fmt.Errorf("IP pool exhausted for vnet %x", p.VNetID)
 		}
-		seq = p.next
-		p.next++
-	}
+		if p.next == start {
+			wrapped = true
+		}
 
-	ip := common.AddToAddr(p.baseAddr, seq)
-	if !p.Prefix.Contains(ip) {
-		return netip.Addr{}, fmt.Errorf("IP pool exhausted for vnet %x", p.VNetID)
-	}
+		if p.inUse[seq] {
+			continue
+		}
 
-	p.inUse[seq] = true
-	return ip, nil
+		ip := common.AddToAddr(p.baseAddr, seq)
+		if !p.Prefix.Contains(ip) {
+			continue
+		}
+
+		p.inUse[seq] = true
+		return ip, nil
+	}
 }
 
-// ReleaseIP returns an IP back to the pool for reuse.
+// ReleaseIP returns an IP back to the pool for reuse (local allocations only).
 func (p *VNetPool) ReleaseIP(ip netip.Addr) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	b4 := ip.As4()
-	ipVal := uint32(b4[0])<<24 | uint32(b4[1])<<16 | uint32(b4[2])<<8 | uint32(b4[3])
-	base4 := p.baseAddr.As4()
-	baseVal := uint32(base4[0])<<24 | uint32(base4[1])<<16 | uint32(base4[2])<<8 | uint32(base4[3])
-	seq := ipVal - baseVal
-
+	seq := p.ipToSeq(ip)
 	if !p.inUse[seq] {
 		return
 	}
 	delete(p.inUse, seq)
 	p.freed = append(p.freed, seq)
+}
+
+// ReserveIP marks an IP as in-use (allocated by a remote operator).
+func (p *VNetPool) ReserveIP(ip netip.Addr) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.inUse[p.ipToSeq(ip)] = true
+}
+
+// UnreserveIP removes a remote reservation.
+func (p *VNetPool) UnreserveIP(ip netip.Addr) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.inUse, p.ipToSeq(ip))
 }
 
 // InUseCount returns the number of currently allocated IPs.
@@ -98,13 +133,23 @@ func (p *VNetPool) InUseCount() int {
 	return len(p.inUse)
 }
 
-// VNetPoolMap manages multiple VNet pools.
+func (p *VNetPool) ipToSeq(ip netip.Addr) uint32 {
+	b4 := ip.As4()
+	ipVal := uint32(b4[0])<<24 | uint32(b4[1])<<16 | uint32(b4[2])<<8 | uint32(b4[3])
+	base4 := p.baseAddr.As4()
+	baseVal := uint32(base4[0])<<24 | uint32(base4[1])<<16 | uint32(base4[2])<<8 | uint32(base4[3])
+	return ipVal - baseVal
+}
+
+// --------------- VNetPoolMap ---------------
+
 type VNetPoolMap struct {
 	pools map[VNetIDType]*VNetPool
 }
 
 // ParseVNetPools parses "vnetID:CIDR;vnetID:CIDR;..." into a VNetPoolMap.
-func ParseVNetPools(network string) (*VNetPoolMap, error) {
+// seed is used to spread starting offsets across operators (typically UUID bytes).
+func ParseVNetPools(network string, seed uint32) (*VNetPoolMap, error) {
 	m := &VNetPoolMap{pools: make(map[VNetIDType]*VNetPool)}
 
 	for _, entry := range strings.Split(network, ";") {
@@ -127,7 +172,15 @@ func ParseVNetPools(network string) (*VNetPoolMap, error) {
 			return nil, fmt.Errorf("invalid CIDR %q: %w", parts[1], err)
 		}
 
-		m.pools[vnetID] = newVNetPool(vnetID, prefix)
+		// Spread starting offset: seed modulo usable range, minimum 2
+		hostBits := 32 - prefix.Bits()
+		usable := uint32(1<<hostBits) - 2 // exclude .0 and .1
+		offset := uint32(2)
+		if usable > 0 {
+			offset = 2 + (seed % usable)
+		}
+
+		m.pools[vnetID] = newVNetPool(vnetID, prefix, offset)
 	}
 
 	if len(m.pools) == 0 {

@@ -2,14 +2,17 @@
 
 # gasoline
 
-cmd/下防止两个启动器，
+go run main.go operator --listen 0.0.0.0:8443 --network "200:10.0.0.0/24;1000:192.168.200.0/24"
+./gasoline operator --listen 0.0.0.0:20000 --network "200:10.0.0.0/24;1000:192.168.200.0/24"
 
-gasolinec客户端
-gasolines服务端
+sudo go run main.go client --endpoint 69.164.244.173:20000 --vnet 200
+sudo go run main.go client --endpoint localhost:8443 --vnet 200
+go run main.go client --endpoint 69.164.244.173:20000 --vnet 200
+go run main.go client --endpoint 172.29.64.1:8443 --vnet 200
 
-gasolinec serve --endpoint <serverip>:443
-
-gasolines start --listen 0.0.0.0:6677 --serve 0.0.0.0:443 --discover <serverip>:6677
+sudo go run main.go client --endpoint 69.164.244.173:20000 --vnet 1000
+sudo go run main.go client --endpoint localhost:8443 --vnet 1000
+go run main.go client --endpoint 172.29.64.1:8443 --vnet 1000
 
 gasolines启动时自动连接 <serverip>:6677，server自己维护一个map，包括了所有server和自己到目标server的延迟时间。
 

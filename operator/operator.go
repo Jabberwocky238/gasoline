@@ -11,6 +11,7 @@ import (
 
 	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
+	"github.com/jabberwocky238/gasoline/stats"
 	"github.com/jabberwocky238/gasoline/transport"
 
 	"golang.org/x/net/ipv4"
@@ -32,6 +33,8 @@ type Config struct {
 	ClientListener transport.Listener
 	// OperatorListenAddr is the TCP address for inter-operator connections
 	OperatorListenAddr string
+	// StatsAddr is the HTTP address for the stats API (empty = disabled)
+	StatsAddr string
 }
 
 // Operator accepts client connections, decrypts packets, and routes them
@@ -45,6 +48,7 @@ type Operator struct {
 	clients   *ClientTable
 	operators *OperatorTable
 	Registry  *Registry
+	Stats     *stats.Engine
 
 	// TCP listener for inter-operator connections
 	opListener net.Listener
@@ -59,6 +63,7 @@ func New(cfg *Config) *Operator {
 		clients:   NewClientTable(),
 		operators: NewOperatorTable(),
 		Registry:  NewRegistry(),
+		Stats:     stats.New(cfg.StatsAddr),
 	}
 }
 
@@ -76,6 +81,11 @@ func (o *Operator) Start() error {
 	o.opListener = ln
 	log.Infof("Operator endpoint listening on %s", o.cfg.OperatorListenAddr)
 	go o.routineAcceptOperators()
+
+	// Stats API
+	if err := o.Stats.Start(); err != nil {
+		return fmt.Errorf("stats: %w", err)
+	}
 
 	return nil
 }
@@ -105,6 +115,7 @@ func (o *Operator) routineAcceptClients() {
 		}
 
 		o.clients.Add(cp)
+		o.Stats.Recorder.Register(cp.SessionID, [16]byte(cp.VNetID), "", conn.RemoteAddr())
 
 		log.Infof("Client %x connected, assigned %s from %s",
 			result.ClientID, result.Config.IPPrefix, conn.RemoteAddr())
@@ -188,6 +199,7 @@ func (o *Operator) handleOperatorData(frame *Frame) {
 		return
 	}
 
+	o.Stats.Recorder.RecordTx(target.SessionID, uint64(len(df.Packet)))
 	if err := target.Conn.WritePacket(df.Packet); err != nil {
 		log.Errorf("Write to client %x: %v", target.SessionID, err)
 	}
@@ -223,6 +235,7 @@ func (o *Operator) handleOperatorControl(peer *OperatorPeer, frame *Frame) {
 func (o *Operator) routineReadFromClient(cp *ClientPeer) {
 	defer func() {
 		o.clients.Remove(cp)
+		o.Stats.Recorder.Unregister(cp.SessionID)
 		cp.Conn.Close()
 		log.Infof("Client %x disconnected", cp.SessionID)
 	}()
@@ -243,6 +256,15 @@ func (o *Operator) routineReadFromClient(cp *ClientPeer) {
 			continue
 		}
 
+		// Record incoming traffic
+		o.Stats.Recorder.RecordRx(cp.SessionID, uint64(len(data)))
+
+		// Rate limit check (per VNet)
+		if !o.Stats.RateLimiter.Allow([16]byte(cp.VNetID), uint64(len(data))) {
+			log.Debugf("Rate limited packet from %x", cp.SessionID)
+			continue
+		}
+
 		dstIP, err := packetDstIP(data)
 		if err != nil {
 			log.Debugf("Dropping malformed packet from %x: %v", cp.SessionID, err)
@@ -258,6 +280,7 @@ func (o *Operator) routineReadFromClient(cp *ClientPeer) {
 		// Try local client first
 		target := o.clients.LookupByIP(dstAddr)
 		if target != nil {
+			o.Stats.Recorder.RecordTx(target.SessionID, uint64(len(data)))
 			if err := target.Conn.WritePacket(data); err != nil {
 				log.Errorf("Write to client %x: %v", target.SessionID, err)
 			}
@@ -390,6 +413,7 @@ func (o *Operator) Close() error {
 
 	o.clients.CloseAll()
 	o.operators.CloseAll()
+	o.Stats.Close()
 
 	return nil
 }

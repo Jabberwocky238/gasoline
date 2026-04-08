@@ -19,9 +19,10 @@ type Config struct {
 	Mode string `yaml:"mode"` // "operator" or "client"
 
 	// Operator fields
-	Listen   string         `yaml:"listen"`
-	OpListen string         `yaml:"op-listen"`
-	Network  []NetworkEntry `yaml:"network"`
+	Listen    string         `yaml:"listen"`
+	OpListen  string         `yaml:"op-listen"`
+	Network   []NetworkEntry `yaml:"network"`
+	StatsAddr string         `yaml:"stats"` // stats API listen address
 
 	// Client fields
 	Endpoint string `yaml:"endpoint"`

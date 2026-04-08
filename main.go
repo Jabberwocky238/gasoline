@@ -53,6 +53,7 @@ Operator flags:
                   hmac:<id>:<secret>;<id2>:<secret2>
                   userpass:<userid>:<sha256>;<userid2>:<sha256>
   --network     VNet:CIDR pairs (e.g. 200:10.0.0.0/24;1000:192.168.200.0/24)
+  --stats       Stats API listen address (e.g. 127.0.0.1:9090)
 
 Client flags:
   --endpoint    Server address (e.g. 1.2.3.4:443)
@@ -77,6 +78,7 @@ func runOperator(args []string) {
 	transportType := fs.String("transport", "quic", "transport type: tcp, udp, quic")
 	authStr := fs.String("auth", "noauth", "auth config string")
 	network := fs.String("network", "0:10.0.0.0/24", "vnetID:CIDR pairs separated by ';'")
+	statsAddr := fs.String("stats", "127.0.0.1:9090", "stats API listen address (empty to disable)")
 	fs.Parse(args)
 
 	// Load config file and apply as defaults (CLI flags override)
@@ -99,6 +101,9 @@ func runOperator(args []string) {
 		}
 		if len(cfg.Network) > 0 && !isFlagSet(fs, "network") {
 			*network = cfg.NetworkString()
+		}
+		if cfg.StatsAddr != "" && !isFlagSet(fs, "stats") {
+			*statsAddr = cfg.StatsAddr
 		}
 	}
 
@@ -139,6 +144,7 @@ func runOperator(args []string) {
 		ConfigFn:           configFn,
 		ClientListener:     clientListener,
 		OperatorListenAddr: *opListenAddr,
+		StatsAddr:          *statsAddr,
 	})
 
 	if err := op.Start(); err != nil {

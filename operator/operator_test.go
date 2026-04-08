@@ -89,52 +89,79 @@ func TestOperatorDiscovery(t *testing.T) {
 	t.Logf("Discovery OK: A(%x) <-> B(%x)", uuidA[:4], uuidB[:4])
 }
 
-// TestOperatorTriangle tests three operators forming a mesh.
-func TestOperatorTriangle(t *testing.T) {
+// TestOperatorAutoDiscover tests that C only connects to A (seed),
+// then auto-discovers B through A's operator list.
+// Topology: A <-> B (manual), C -> A (seed) -> discovers B -> C <-> B (auto)
+func TestOperatorAutoDiscover(t *testing.T) {
 	uuidA := OperatorUUIDType{0x0A}
 	uuidB := OperatorUUIDType{0x0B}
 	uuidC := OperatorUUIDType{0x0C}
 
-	ops := make([]*Operator, 3)
-	uuids := []OperatorUUIDType{uuidA, uuidB, uuidC}
+	// Start A and B, connect them manually
+	opA := New(&Config{
+		UUID:               uuidA,
+		ClientListener:     newBlockingListener(),
+		OperatorListenAddr: "127.0.0.1:0",
+	})
+	opB := New(&Config{
+		UUID:               uuidB,
+		ClientListener:     newBlockingListener(),
+		OperatorListenAddr: "127.0.0.1:0",
+	})
 
-	for i, uuid := range uuids {
-		ops[i] = New(&Config{
-			UUID:               uuid,
-			ClientListener:     newBlockingListener(),
-			OperatorListenAddr: "127.0.0.1:0",
-		})
-		if err := ops[i].Start(); err != nil {
-			t.Fatalf("op[%d] start: %v", i, err)
+	if err := opA.Start(); err != nil {
+		t.Fatalf("opA start: %v", err)
+	}
+	defer opA.Close()
+	// Set external addr to actual bound address (port 0 was auto-assigned)
+	opA.cfg.OperatorExternalAddr = opA.opListener.Addr().String()
+
+	if err := opB.Start(); err != nil {
+		t.Fatalf("opB start: %v", err)
+	}
+	defer opB.Close()
+	opB.cfg.OperatorExternalAddr = opB.opListener.Addr().String()
+
+	// A dials B
+	if err := opA.DialOperator(opB.cfg.OperatorExternalAddr); err != nil {
+		t.Fatalf("A dial B: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	// Now start C with A as seed — C should auto-discover B
+	opC := New(&Config{
+		UUID:                uuidC,
+		ClientListener:      newBlockingListener(),
+		OperatorListenAddr:  "127.0.0.1:0",
+		OperatorExternalAddr: "127.0.0.1:0", // placeholder, set after Start
+		DiscoverAddrs:       []string{opA.cfg.OperatorExternalAddr},
+	})
+	if err := opC.Start(); err != nil {
+		t.Fatalf("opC start: %v", err)
+	}
+	defer opC.Close()
+	opC.cfg.OperatorExternalAddr = opC.opListener.Addr().String()
+
+	// Poll until C knows both A and B
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if opC.ConnectedOperators() >= 2 {
+			break
 		}
-		defer ops[i].Close()
+		time.Sleep(50 * time.Millisecond)
 	}
 
-	// A->B, A->C, B->C
-	pairs := [][2]int{{0, 1}, {0, 2}, {1, 2}}
-	for _, p := range pairs {
-		addr := ops[p[1]].opListener.Addr().String()
-		if err := ops[p[0]].DialOperator(addr); err != nil {
-			t.Fatalf("op[%d] dial op[%d]: %v", p[0], p[1], err)
-		}
-	}
-
-	time.Sleep(100 * time.Millisecond)
-
-	// A: knows B and C
-	if opA := ops[0]; opA.ConnectedOperators() != 2 {
-		t.Fatalf("opA expected 2 peers, got %d", opA.ConnectedOperators())
-	}
-	// B: knows A and C
-	if opB := ops[1]; opB.ConnectedOperators() != 2 {
-		t.Fatalf("opB expected 2 peers, got %d", opB.ConnectedOperators())
-	}
-	// C: knows A and B
-	if opC := ops[2]; opC.ConnectedOperators() != 2 {
+	if opC.ConnectedOperators() < 2 {
 		t.Fatalf("opC expected 2 peers, got %d", opC.ConnectedOperators())
 	}
+	if _, ok := opC.Registry.GetOperator(uuidA); !ok {
+		t.Fatal("opC registry missing A")
+	}
+	if _, ok := opC.Registry.GetOperator(uuidB); !ok {
+		t.Fatal("opC registry missing B")
+	}
 
-	t.Log("Triangle mesh OK: A <-> B <-> C <-> A")
+	t.Logf("Auto-discover OK: C found A and B via seed")
 }
 
 // TestOperatorPingPong tests that Ping/Pong works between two operators
@@ -175,16 +202,16 @@ func TestOperatorPingPong(t *testing.T) {
 		t.Fatalf("ping: %v", err)
 	}
 
-	// Poll until PingCost is updated or timeout
+	// Poll until LastPing is set (PingCost can be 0 on localhost)
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		entry, ok := opA.Registry.GetOperator(uuidB)
-		if ok && entry.PingCost > 0 {
+		if ok && !entry.LastPing.IsZero() {
 			t.Logf("Ping-Pong OK: RTT=%v, LastPing=%v", entry.PingCost, entry.LastPing)
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	t.Fatal("PingCost was not updated within timeout")
+	t.Fatal("LastPing was not set within timeout")
 }

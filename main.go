@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 
 	log "github.com/sirupsen/logrus"
@@ -46,7 +47,7 @@ Common flags:
 
 Operator flags:
   --listen      Client listen address (e.g. 0.0.0.0:443)
-  --op-listen   Operator listen address (e.g. 0.0.0.0:6677)
+  --op-listen   Operator listen: <bind>;[external] (e.g. 0.0.0.0:6677;1.2.3.4:6677)
   --transport   Transport type: tcp, udp, quic (default: quic)
   --auth        Auth config (default: noauth)
                   noauth
@@ -54,6 +55,7 @@ Operator flags:
                   userpass:<userid>:<sha256>;<userid2>:<sha256>
   --network     VNet:CIDR pairs (e.g. 200:10.0.0.0/24;1000:192.168.200.0/24)
   --stats       Stats API listen address (e.g. 127.0.0.1:9090)
+  --discover    Seed operator addresses for auto-discovery (comma-separated)
 
 Client flags:
   --endpoint    Server address (e.g. 1.2.3.4:443)
@@ -74,11 +76,12 @@ func runOperator(args []string) {
 	fs := flag.NewFlagSet("operator", flag.ExitOnError)
 	configFile := fs.String("c", "", "config file path (YAML)")
 	listenAddr := fs.String("listen", "0.0.0.0:8443", "client listen address")
-	opListenAddr := fs.String("op-listen", "0.0.0.0:6677", "operator listen address")
+	opListen := fs.String("op-listen", "0.0.0.0:6677", "operator listen: <bind>;[external] (e.g. 0.0.0.0:6677;1.2.3.4:6677)")
 	transportType := fs.String("transport", "quic", "transport type: tcp, udp, quic")
 	authStr := fs.String("auth", "noauth", "auth config string")
 	network := fs.String("network", "0:10.0.0.0/24", "vnetID:CIDR pairs separated by ';'")
 	statsAddr := fs.String("stats", "127.0.0.1:9090", "stats API listen address (empty to disable)")
+	discover := fs.String("discover", "", "seed operator addresses for discovery (comma-separated)")
 	fs.Parse(args)
 
 	// Load config file and apply as defaults (CLI flags override)
@@ -91,7 +94,7 @@ func runOperator(args []string) {
 			*listenAddr = cfg.Listen
 		}
 		if cfg.OpListen != "" && !isFlagSet(fs, "op-listen") {
-			*opListenAddr = cfg.OpListen
+			*opListen = cfg.OpListen
 		}
 		if cfg.Transport != "" && !isFlagSet(fs, "transport") {
 			*transportType = cfg.Transport
@@ -139,19 +142,40 @@ func runOperator(args []string) {
 		log.Fatalf("Listener: %v", err)
 	}
 
+	// Parse --op-listen: "<bind>;[external]"
+	opListenAddr, opExternalAddr := parseOpListen(*opListen)
+
+	// Parse discover seeds
+	var discoverAddrs []string
+	if *discover != "" {
+		for _, addr := range strings.Split(*discover, ",") {
+			addr = strings.TrimSpace(addr)
+			if addr != "" {
+				discoverAddrs = append(discoverAddrs, addr)
+			}
+		}
+	}
+
 	op := operator.New(&operator.Config{
-		Auth:               serverAuth,
-		ConfigFn:           configFn,
-		ClientListener:     clientListener,
-		OperatorListenAddr: *opListenAddr,
-		StatsAddr:          *statsAddr,
+		Auth:                serverAuth,
+		ConfigFn:            configFn,
+		ClientListener:      clientListener,
+		OperatorListenAddr:  opListenAddr,
+		OperatorExternalAddr: opExternalAddr,
+		StatsAddr:           *statsAddr,
+		DiscoverAddrs:       discoverAddrs,
 	})
 
 	if err := op.Start(); err != nil {
 		log.Fatalf("Operator start: %v", err)
 	}
-	log.Infof("Operator started: client=%s (%s, %s), operator=%s",
-		*listenAddr, *transportType, serverAuth.Type(), *opListenAddr)
+	if opExternalAddr != "" {
+		log.Infof("Operator started: client=%s (%s, %s), operator=%s (external %s)",
+			*listenAddr, *transportType, serverAuth.Type(), opListenAddr, opExternalAddr)
+	} else {
+		log.Infof("Operator started: client=%s (%s, %s), operator=%s",
+			*listenAddr, *transportType, serverAuth.Type(), opListenAddr)
+	}
 	waitForSignal()
 	op.Close()
 }
@@ -270,6 +294,17 @@ func createDialer(transportType string, sessionID [16]byte, clientAuth auth.Clie
 }
 
 // --------------- Helpers ---------------
+
+// parseOpListen splits "bind;external" into two addresses.
+// If no ";", external is empty.
+func parseOpListen(s string) (bind, external string) {
+	parts := strings.SplitN(s, ";", 2)
+	bind = strings.TrimSpace(parts[0])
+	if len(parts) == 2 {
+		external = strings.TrimSpace(parts[1])
+	}
+	return
+}
 
 // isFlagSet checks if a flag was explicitly set on the command line.
 func isFlagSet(fs *flag.FlagSet, name string) bool {

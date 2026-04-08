@@ -38,6 +38,8 @@ const (
 	CtrlRegisterAck   ControlSubtype = 0x04
 	CtrlSessionSync   ControlSubtype = 0x05 // sync client session info
 	CtrlSessionRevoke ControlSubtype = 0x06
+	CtrlDiscoverReq   ControlSubtype = 0x07 // request known operator list
+	CtrlDiscoverResp  ControlSubtype = 0x08 // response with operator list
 )
 
 // Frame is a parsed inter-operator frame.

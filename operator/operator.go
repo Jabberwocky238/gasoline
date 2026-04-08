@@ -31,10 +31,14 @@ type Config struct {
 	ConfigFn protocol.ConfigFunc
 	// ClientListener accepts client transport connections
 	ClientListener transport.Listener
-	// OperatorListenAddr is the TCP address for inter-operator connections
+	// OperatorListenAddr is the local TCP address to bind for inter-operator connections
 	OperatorListenAddr string
+	// OperatorExternalAddr is the address other operators should use to reach us
+	OperatorExternalAddr string
 	// StatsAddr is the HTTP address for the stats API (empty = disabled)
 	StatsAddr string
+	// DiscoverAddrs is a list of seed operator addresses for bootstrap discovery
+	DiscoverAddrs []string
 }
 
 // Operator accepts client connections, decrypts packets, and routes them
@@ -69,6 +73,11 @@ func New(cfg *Config) *Operator {
 
 // Start begins accepting client and operator connections.
 func (o *Operator) Start() error {
+	// Validate: discover requires external addr
+	if len(o.cfg.DiscoverAddrs) > 0 && o.cfg.OperatorExternalAddr == "" {
+		return fmt.Errorf("--discover requires --op-listen to include an external endpoint (e.g. 0.0.0.0:6677;1.2.3.4:6677)")
+	}
+
 	// Client endpoint
 	log.Infof("Client endpoint listening on %s", o.cfg.ClientListener.Addr())
 	go o.routineAcceptClients()
@@ -85,6 +94,11 @@ func (o *Operator) Start() error {
 	// Stats API
 	if err := o.Stats.Start(); err != nil {
 		return fmt.Errorf("stats: %w", err)
+	}
+
+	// Bootstrap discovery
+	if len(o.cfg.DiscoverAddrs) > 0 {
+		go o.Bootstrap()
 	}
 
 	return nil
@@ -222,6 +236,10 @@ func (o *Operator) handleOperatorControl(peer *OperatorPeer, frame *Frame) {
 		o.handleRegister(peer, cf.Payload)
 	case CtrlRegisterAck:
 		o.handleRegisterAck(peer, cf.Payload)
+	case CtrlDiscoverReq:
+		o.handleDiscoverReq(peer)
+	case CtrlDiscoverResp:
+		o.handleDiscoverResp(cf.Payload)
 	case CtrlSessionSync:
 		// TODO: update client session in Registry
 	case CtrlSessionRevoke:
@@ -302,13 +320,13 @@ func (o *Operator) DialOperator(addr string) error {
 
 	peer := NewOperatorPeer(OperatorUUIDType{}, conn)
 
-	// Send our UUID as Register
-	if err := peer.SendControl(CtrlRegister, o.cfg.UUID[:]); err != nil {
+	// Send our UUID + external addr as Register
+	if err := peer.SendControl(CtrlRegister, encodeRegisterPayload(o.cfg.UUID, o.cfg.OperatorExternalAddr)); err != nil {
 		peer.Close()
 		return fmt.Errorf("send register to %s: %w", addr, err)
 	}
 
-	// Read RegisterAck to get remote UUID
+	// Read RegisterAck to get remote UUID + external addr
 	frame, err := peer.Recv()
 	if err != nil {
 		peer.Close()
@@ -329,11 +347,12 @@ func (o *Operator) DialOperator(addr string) error {
 		return fmt.Errorf("expected RegisterAck, got subtype %d from %s", cf.Subtype, addr)
 	}
 
-	copy(peer.UUID[:], cf.Payload)
+	remoteUUID, remoteAddr := decodeRegisterPayload(cf.Payload)
+	copy(peer.UUID[:], remoteUUID[:])
 
 	o.operators.Add(peer)
-	o.Registry.SetOperator(peer.UUID, &OperatorEntry{Addr: addr})
-	log.Infof("Registered with operator %x at %s", peer.UUID, addr)
+	o.Registry.SetOperator(peer.UUID, &OperatorEntry{Addr: remoteAddr})
+	log.Infof("Registered with operator %x at %s", peer.UUID, remoteAddr)
 
 	go o.routineHandleOperator(peer)
 	return nil
@@ -341,33 +360,52 @@ func (o *Operator) DialOperator(addr string) error {
 
 // handleRegister processes an incoming CtrlRegister from a peer operator.
 func (o *Operator) handleRegister(peer *OperatorPeer, payload []byte) {
-	if len(payload) < 16 {
-		log.Debugf("Register payload too short from %s", peer.RemoteAddr())
-		return
-	}
+	remoteUUID, remoteAddr := decodeRegisterPayload(payload)
+	copy(peer.UUID[:], remoteUUID[:])
 
-	copy(peer.UUID[:], payload)
-
-	// Reply with our UUID
-	peer.SendControl(CtrlRegisterAck, o.cfg.UUID[:])
+	// Reply with our UUID + external addr
+	peer.SendControl(CtrlRegisterAck, encodeRegisterPayload(o.cfg.UUID, o.cfg.OperatorExternalAddr))
 
 	o.operators.Add(peer)
-	o.Registry.SetOperator(peer.UUID, &OperatorEntry{Addr: peer.RemoteAddr()})
-	log.Infof("Operator %x registered from %s", peer.UUID, peer.RemoteAddr())
+	o.Registry.SetOperator(peer.UUID, &OperatorEntry{Addr: remoteAddr})
+	log.Infof("Operator %x registered, external %s", peer.UUID, remoteAddr)
 }
 
 // handleRegisterAck processes an incoming CtrlRegisterAck from a peer operator.
 func (o *Operator) handleRegisterAck(peer *OperatorPeer, payload []byte) {
-	if len(payload) < 16 {
-		log.Debugf("RegisterAck payload too short from %s", peer.RemoteAddr())
-		return
-	}
-
-	copy(peer.UUID[:], payload)
+	remoteUUID, remoteAddr := decodeRegisterPayload(payload)
+	copy(peer.UUID[:], remoteUUID[:])
 
 	o.operators.Add(peer)
-	o.Registry.SetOperator(peer.UUID, &OperatorEntry{Addr: peer.RemoteAddr()})
-	log.Infof("Operator %x acked from %s", peer.UUID, peer.RemoteAddr())
+	o.Registry.SetOperator(peer.UUID, &OperatorEntry{Addr: remoteAddr})
+	log.Infof("Operator %x acked, external %s", peer.UUID, remoteAddr)
+}
+
+// encodeRegisterPayload encodes [uuid:16][addrLen:2][addr:N].
+func encodeRegisterPayload(uuid OperatorUUIDType, addr string) []byte {
+	buf := make([]byte, 16+2+len(addr))
+	copy(buf[0:16], uuid[:])
+	buf[16] = byte(len(addr) >> 8)
+	buf[17] = byte(len(addr))
+	copy(buf[18:], addr)
+	return buf
+}
+
+// decodeRegisterPayload decodes [uuid:16][addrLen:2][addr:N].
+func decodeRegisterPayload(payload []byte) (OperatorUUIDType, string) {
+	var uuid OperatorUUIDType
+	if len(payload) < 18 {
+		if len(payload) >= 16 {
+			copy(uuid[:], payload[:16])
+		}
+		return uuid, ""
+	}
+	copy(uuid[:], payload[:16])
+	addrLen := int(payload[16])<<8 | int(payload[17])
+	if 18+addrLen > len(payload) {
+		return uuid, ""
+	}
+	return uuid, string(payload[18 : 18+addrLen])
 }
 
 // handlePong processes a Pong response and updates PingCost in Registry.

@@ -1,15 +1,12 @@
 package operator
 
 import (
+	"encoding/binary"
 	"fmt"
 	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
-
-	"github.com/jabberwocky238/gasoline/common"
-	"github.com/jabberwocky238/gasoline/protocol"
-	"github.com/jabberwocky238/gasoline/protocol/auth"
 )
 
 // VNetPool manages IP allocation for a single VNet.
@@ -25,30 +22,6 @@ type VNetPool struct {
 	maxHost uint32          // max usable host count
 }
 
-func newVNetPool(vnetID VNetIDType, prefix netip.Prefix, startOffset uint32) *VNetPool {
-	bits := prefix.Bits()
-	hostBits := 32 - bits
-	var maxHost uint32
-	if hostBits >= 32 {
-		maxHost = ^uint32(0)
-	} else {
-		maxHost = (1 << hostBits) - 1
-	}
-	if startOffset < 2 {
-		startOffset = 2 // .0=network, .1=gateway
-	}
-	if startOffset > maxHost {
-		startOffset = 2
-	}
-	return &VNetPool{
-		VNetID:   vnetID,
-		Prefix:   prefix,
-		baseAddr: prefix.Addr(),
-		next:     startOffset,
-		inUse:    make(map[uint32]bool),
-		maxHost:  maxHost,
-	}
-}
 
 // AllocateIP returns the next available IP in this pool.
 // Wraps around the pool to find a free slot.
@@ -61,7 +34,7 @@ func (p *VNetPool) AllocateIP() (netip.Addr, error) {
 		seq := p.freed[len(p.freed)-1]
 		p.freed = p.freed[:len(p.freed)-1]
 		if !p.inUse[seq] {
-			ip := common.AddToAddr(p.baseAddr, seq)
+			ip := addToAddr(p.baseAddr, seq)
 			p.inUse[seq] = true
 			return ip, nil
 		}
@@ -89,7 +62,7 @@ func (p *VNetPool) AllocateIP() (netip.Addr, error) {
 			continue
 		}
 
-		ip := common.AddToAddr(p.baseAddr, seq)
+		ip := addToAddr(p.baseAddr, seq)
 		if !p.Prefix.Contains(ip) {
 			continue
 		}
@@ -165,7 +138,9 @@ func ParseVNetPools(network string, seed uint32) (*VNetPoolMap, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid vnet ID %q: %w", parts[0], err)
 		}
-		vnetID := VNetIDType(common.EncodeVNetID(vnetNum))
+		var vnetIDBytes [16]byte
+		binary.BigEndian.PutUint64(vnetIDBytes[8:], vnetNum)
+		vnetID := VNetIDType(vnetIDBytes)
 
 		prefix, err := netip.ParsePrefix(parts[1])
 		if err != nil {
@@ -180,7 +155,26 @@ func ParseVNetPools(network string, seed uint32) (*VNetPoolMap, error) {
 			offset = 2 + (seed % usable)
 		}
 
-		m.pools[vnetID] = newVNetPool(vnetID, prefix, offset)
+		var maxHost uint32
+		if hostBits >= 32 {
+			maxHost = ^uint32(0)
+		} else {
+			maxHost = (1 << hostBits) - 1
+		}
+		if offset < 2 {
+			offset = 2 // .0=network, .1=gateway
+		}
+		if offset > maxHost {
+			offset = 2
+		}
+		m.pools[vnetID] = &VNetPool{
+			VNetID:   vnetID,
+			Prefix:   prefix,
+			baseAddr: prefix.Addr(),
+			next:     offset,
+			inUse:    make(map[uint32]bool),
+			maxHost:  maxHost,
+		}
 	}
 
 	if len(m.pools) == 0 {
@@ -200,38 +194,10 @@ func (m *VNetPoolMap) All() map[VNetIDType]*VNetPool {
 	return m.pools
 }
 
-// MakeConfigFunc creates a protocol.ConfigFunc that allocates IPs from the correct VNet pool.
-func MakeConfigFunc(pools *VNetPoolMap, serverPub protocol.PublicKey, authenticator auth.ServerAuthenticator) protocol.ConfigFunc {
-	return func(clientID [16]byte) (*protocol.SessionConfig, error) {
-		var vnetID VNetIDType
-		var sessionID [16]byte
-		if noauth, ok := authenticator.(*auth.NoAuthServer); ok {
-			vnetID = VNetIDType(noauth.LastVNetID)
-			sessionID = noauth.LastSessionID
-		}
-
-		pool, ok := pools.Get(vnetID)
-		if !ok {
-			return nil, fmt.Errorf("unknown vnet %x", vnetID)
-		}
-
-		clientIP, err := pool.AllocateIP()
-		if err != nil {
-			return nil, err
-		}
-
-		clientPriv, err := protocol.NewPrivateKey()
-		if err != nil {
-			return nil, err
-		}
-
-		return &protocol.SessionConfig{
-			SessionID:        sessionID,
-			VNetID:           [16]byte(vnetID),
-			ClientPrivateKey: clientPriv,
-			ServerPublicKey:  serverPub,
-			IPPrefix:         netip.PrefixFrom(clientIP, 32),
-			AllowedRanges:    []netip.Prefix{pool.Prefix},
-		}, nil
-	}
+func addToAddr(base netip.Addr, offset uint32) netip.Addr {
+	b4 := base.As4()
+	val := uint32(b4[0])<<24 | uint32(b4[1])<<16 | uint32(b4[2])<<8 | uint32(b4[3])
+	val += offset
+	return netip.AddrFrom4([4]byte{byte(val >> 24), byte(val >> 16), byte(val >> 8), byte(val)})
 }
+

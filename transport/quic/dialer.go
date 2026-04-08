@@ -13,12 +13,13 @@ import (
 
 type Dialer struct {
 	clientID [16]byte
+	vnetID   [16]byte
 	auth     auth.ClientAuthenticator
 	tlsConf  *tls.Config
 }
 
-func NewDialer(clientID [16]byte, auth auth.ClientAuthenticator, tlsConf *tls.Config) *Dialer {
-	return &Dialer{clientID: clientID, auth: auth, tlsConf: tlsConf}
+func NewDialer(clientID [16]byte, vnetID [16]byte, auth auth.ClientAuthenticator, tlsConf *tls.Config) *Dialer {
+	return &Dialer{clientID: clientID, vnetID: vnetID, auth: auth, tlsConf: tlsConf}
 }
 
 func (d *Dialer) Dial(endpoint string) (transport.Conn, *protocol.HandshakeResult, error) {
@@ -32,7 +33,7 @@ func (d *Dialer) Dial(endpoint string) (transport.Conn, *protocol.HandshakeResul
 		return nil, nil, err
 	}
 
-	result, err := protocol.ClientHandshake(stream, d.clientID, d.auth)
+	result, err := protocol.ClientHandshake(stream, d.clientID, d.vnetID, d.auth)
 	if err != nil {
 		conn.CloseWithError(0, "handshake failed")
 		return nil, nil, err

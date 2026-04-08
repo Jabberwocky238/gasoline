@@ -12,7 +12,7 @@ import (
 
 type Listener struct {
 	rawConn  *net.UDPConn
-	auth     auth.ServerAuthenticator
+	resolver auth.AuthResolver
 	configFn protocol.ConfigFunc
 
 	mu    sync.RWMutex
@@ -33,7 +33,7 @@ type acceptResult struct {
 	result *protocol.HandshakeResult
 }
 
-func NewListener(addr string, auth auth.ServerAuthenticator, configFn protocol.ConfigFunc) (*Listener, error) {
+func NewListener(addr string, resolver auth.AuthResolver, configFn protocol.ConfigFunc) (*Listener, error) {
 	udpAddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
 		return nil, err
@@ -44,7 +44,7 @@ func NewListener(addr string, auth auth.ServerAuthenticator, configFn protocol.C
 	}
 	l := &Listener{
 		rawConn:  rawConn,
-		auth:     auth,
+		resolver: resolver,
 		configFn: configFn,
 		peers:    make(map[string]*virtualPeer),
 		acceptCh: make(chan acceptResult, 16),
@@ -103,7 +103,7 @@ func (l *Listener) readLoop() {
 		go func(vp *virtualPeer) {
 			// Handshake over stream adapter
 			adapter := newVirtualStreamAdapter(l.rawConn, vp.remoteAddr, vp.incoming)
-			result, err := protocol.ServerHandshake(adapter, l.auth, l.configFn)
+			result, err := protocol.ServerHandshake(adapter, l.resolver, l.configFn)
 			if err != nil {
 				l.mu.Lock()
 				delete(l.peers, vp.remoteAddr.String())

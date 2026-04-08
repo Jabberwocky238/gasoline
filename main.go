@@ -2,14 +2,16 @@ package main
 
 import (
 	cryptoRand "crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
 	"flag"
 	"fmt"
 	"math/rand"
+	"net/netip"
 	"os"
 	"os/signal"
-	"strconv"
-	"strings"
 	"syscall"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 
@@ -26,7 +28,8 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		usage()
+		fmt.Fprintf(os.Stderr, "Usage: gasoline <operator|client> [flags]\n")
+		os.Exit(1)
 	}
 
 	switch os.Args[1] {
@@ -35,85 +38,21 @@ func main() {
 	case "client":
 		runClient(os.Args[2:])
 	default:
-		usage()
+		fmt.Fprintf(os.Stderr, "Usage: gasoline <operator|client> [flags]\n")
+		os.Exit(1)
 	}
-}
-
-func usage() {
-	fmt.Fprintf(os.Stderr, `Usage:
-  gasoline operator [flags]
-  gasoline client   [flags]
-
-Common flags:
-  -c            Config file path (YAML, CLI flags override config values)
-
-Operator flags:
-  --listen      Client listen address (e.g. 0.0.0.0:443)
-  --op-listen   Operator listen: <bind>;[external] (e.g. 0.0.0.0:6677;1.2.3.4:6677)
-  --transport   Transport type: tcp, udp, quic (default: quic)
-  --auth        Auth config (default: noauth)
-                  noauth
-                  hmac:<id>:<secret>;<id2>:<secret2>
-                  userpass:<userid>:<sha256>;<userid2>:<sha256>
-  --network     VNet:CIDR pairs (e.g. 200:10.0.0.0/24;1000:192.168.200.0/24)
-  --stats       Stats API listen address (e.g. 127.0.0.1:9090)
-  --discover    Seed operator addresses for auto-discovery (comma-separated)
-
-Client flags:
-  --endpoint    Server address (e.g. 1.2.3.4:443)
-  --transport   Transport type: tcp, udp, quic (default: quic)
-  --auth        Auth config (default: noauth)
-                  noauth
-                  hmac:<id>:<secret>
-                  userpass:<userid>:<password>
-  --vnet        VNet ID (decimal number, e.g. 200)
-  --tun-name    TUN device name (default: empty, let sing-tun decide)
-`)
-	os.Exit(1)
 }
 
 // --------------- Operator ---------------
 
 func runOperator(args []string) {
 	fs := flag.NewFlagSet("operator", flag.ExitOnError)
-	configFile := fs.String("c", "", "config file path (YAML)")
-	listenAddr := fs.String("listen", "0.0.0.0:8443", "client listen address")
-	opListen := fs.String("op-listen", "0.0.0.0:6677", "operator listen: <bind>;[external] (e.g. 0.0.0.0:6677;1.2.3.4:6677)")
-	transportType := fs.String("transport", "quic", "transport type: tcp, udp, quic")
-	authStr := fs.String("auth", "noauth", "auth config string")
-	network := fs.String("network", "0:10.0.0.0/24", "vnetID:CIDR pairs separated by ';'")
-	statsAddr := fs.String("stats", "127.0.0.1:9090", "stats API listen address (empty to disable)")
-	discover := fs.String("discover", "", "seed operator addresses for discovery (comma-separated)")
+	resolve := common.RegisterOperatorFlags(fs)
 	fs.Parse(args)
+	a := resolve()
 
-	// Load config file and apply as defaults (CLI flags override)
-	if *configFile != "" {
-		cfg, err := common.LoadConfig(*configFile)
-		if err != nil {
-			log.Fatalf("Config: %v", err)
-		}
-		if cfg.Listen != "" && !isFlagSet(fs, "listen") {
-			*listenAddr = cfg.Listen
-		}
-		if cfg.OpListen != "" && !isFlagSet(fs, "op-listen") {
-			*opListen = cfg.OpListen
-		}
-		if cfg.Transport != "" && !isFlagSet(fs, "transport") {
-			*transportType = cfg.Transport
-		}
-		if cfg.Auth != "" && !isFlagSet(fs, "auth") {
-			*authStr = cfg.Auth
-		}
-		if len(cfg.Network) > 0 && !isFlagSet(fs, "network") {
-			*network = cfg.NetworkString()
-		}
-		if cfg.StatsAddr != "" && !isFlagSet(fs, "stats") {
-			*statsAddr = cfg.StatsAddr
-		}
-	}
-
-	// VNet pools (use random seed to spread IP allocation across operators)
-	pools, err := operator.ParseVNetPools(*network, rand.Uint32())
+	// VNet pools
+	pools, err := operator.ParseVNetPools(a.Network, rand.Uint32())
 	if err != nil {
 		log.Fatalf("Network: %v", err)
 	}
@@ -129,48 +68,72 @@ func runOperator(args []string) {
 	serverPub := serverPriv.PublicKey()
 	log.Infof("Server public key: %s", serverPub.ToBase64())
 
-	// Auth
-	serverAuth, err := auth.ParseServerAuth(*authStr)
+	// Build per-VNet AuthResolver
+	defaultAuth, err := auth.ParseServerAuth(a.AuthStr)
 	if err != nil {
 		log.Fatalf("Auth: %v", err)
 	}
+	resolver := auth.NewMapResolver(defaultAuth)
+	for vnetID, authStr := range a.NetworkAuth {
+		vnetAuth, err := auth.ParseServerAuth(authStr)
+		if err != nil {
+			log.Fatalf("Auth for vnet %x: %v", vnetID, err)
+		}
+		resolver.Set(vnetID, vnetAuth)
+		log.Infof("VNet %x: auth=%s", vnetID, vnetAuth.Type())
+	}
 
-	// ConfigFunc
-	configFn := operator.MakeConfigFunc(pools, serverPub, serverAuth)
+	// ConfigFunc — allocates IPs from VNet pool
+	configFn := func(clientID [16]byte, vnetID [16]byte) (*protocol.SessionConfig, error) {
+		pool, ok := pools.Get(operator.VNetIDType(vnetID))
+		if !ok {
+			return nil, fmt.Errorf("unknown vnet %x", vnetID)
+		}
+		clientIP, err := pool.AllocateIP()
+		if err != nil {
+			return nil, err
+		}
+		clientPriv, err := protocol.NewPrivateKey()
+		if err != nil {
+			return nil, err
+		}
+		h := sha256.New()
+		h.Write(clientID[:])
+		var ts [8]byte
+		binary.BigEndian.PutUint64(ts[:], uint64(time.Now().UnixNano()))
+		h.Write(ts[:])
+		var sessionID [16]byte
+		copy(sessionID[:], h.Sum(nil)[:16])
+		return &protocol.SessionConfig{
+			SessionID:        sessionID,
+			VNetID:           vnetID,
+			ClientPrivateKey: clientPriv,
+			ServerPublicKey:  serverPub,
+			IPPrefix:         netip.PrefixFrom(clientIP, 32),
+			AllowedRanges:    []netip.Prefix{pool.Prefix},
+		}, nil
+	}
 
 	// Client listener
-	clientListener, err := createListener(*transportType, *listenAddr, serverAuth, configFn)
+	clientListener, err := createListener(a.Transport, a.ListenAddr, resolver, configFn)
 	if err != nil {
 		log.Fatalf("Listener: %v", err)
 	}
 
-	// Parse --op-listen: "<bind>;[external]"
-	opListenAddr, opExternalAddr := parseOpListen(*opListen)
-
-	// Parse discover seeds
-	var discoverAddrs []string
-	if *discover != "" {
-		for _, addr := range strings.Split(*discover, ",") {
-			addr = strings.TrimSpace(addr)
-			if addr != "" {
-				discoverAddrs = append(discoverAddrs, addr)
-			}
-		}
-	}
-
-	// Generate random operator UUID
+	// Operator identity
+	opListenAddr, opExternalAddr := a.OpListenAddrs()
 	var opUUID operator.OperatorUUIDType
 	cryptoRand.Read(opUUID[:])
 
 	op := operator.New(&operator.Config{
 		UUID:                 opUUID,
-		Auth:                 serverAuth,
+		Auth:                 resolver,
 		ConfigFn:             configFn,
 		ClientListener:       clientListener,
 		OperatorListenAddr:   opListenAddr,
 		OperatorExternalAddr: opExternalAddr,
-		StatsAddr:            *statsAddr,
-		DiscoverAddrs:        discoverAddrs,
+		StatsAddr:            a.StatsAddr,
+		DiscoverAddrs:        a.DiscoverAddrs(),
 	})
 	log.Infof("Operator UUID: %x", opUUID)
 	op.VNetPools = pools
@@ -180,10 +143,10 @@ func runOperator(args []string) {
 	}
 	if opExternalAddr != "" {
 		log.Infof("Operator started: client=%s (%s, %s), operator=%s (external %s)",
-			*listenAddr, *transportType, serverAuth.Type(), opListenAddr, opExternalAddr)
+			a.ListenAddr, a.Transport, defaultAuth.Type(), opListenAddr, opExternalAddr)
 	} else {
 		log.Infof("Operator started: client=%s (%s, %s), operator=%s",
-			*listenAddr, *transportType, serverAuth.Type(), opListenAddr)
+			a.ListenAddr, a.Transport, defaultAuth.Type(), opListenAddr)
 	}
 	waitForSignal()
 	op.Close()
@@ -193,137 +156,67 @@ func runOperator(args []string) {
 
 func runClient(args []string) {
 	fs := flag.NewFlagSet("client", flag.ExitOnError)
-	configFile := fs.String("c", "", "config file path (YAML)")
-	endpoint := fs.String("endpoint", "", "server address (required)")
-	transportType := fs.String("transport", "quic", "transport type: tcp, udp, quic")
-	authStr := fs.String("auth", "noauth", "auth config string")
-	vnetIDStr := fs.String("vnet", "", "vnet ID (decimal number, e.g. 200)")
-	tunName := fs.String("tun-name", "", "TUN device name")
+	resolve := common.RegisterClientFlags(fs)
 	fs.Parse(args)
+	a := resolve()
 
-	// Load config file and apply as defaults (CLI flags override)
-	if *configFile != "" {
-		cfg, err := common.LoadConfig(*configFile)
-		if err != nil {
-			log.Fatalf("Config: %v", err)
-		}
-		if cfg.Endpoint != "" && !isFlagSet(fs, "endpoint") {
-			*endpoint = cfg.Endpoint
-		}
-		if cfg.Transport != "" && !isFlagSet(fs, "transport") {
-			*transportType = cfg.Transport
-		}
-		if cfg.Auth != "" && !isFlagSet(fs, "auth") {
-			*authStr = cfg.Auth
-		}
-		if cfg.VNet != 0 && !isFlagSet(fs, "vnet") {
-			*vnetIDStr = strconv.FormatUint(cfg.VNet, 10)
-		}
-		if cfg.TUNName != "" && !isFlagSet(fs, "tun-name") {
-			*tunName = cfg.TUNName
-		}
-	}
-
-	if *endpoint == "" {
-		log.Fatal("--endpoint is required")
-	}
-
-	// VNet ID
-	var vnetID [16]byte
-	if *vnetIDStr != "" {
-		vnetNum, err := strconv.ParseUint(*vnetIDStr, 10, 64)
-		if err != nil {
-			log.Fatalf("Invalid vnet ID %q: %v", *vnetIDStr, err)
-		}
-		vnetID = common.EncodeVNetID(vnetNum)
-	}
-
-	// Auth
-	clientAuth, err := auth.ParseClientAuth(*authStr, vnetID, []byte("default-fingerprint"))
+	clientAuth, err := auth.ParseClientAuth(a.AuthStr, []byte("default-fingerprint"))
 	if err != nil {
 		log.Fatalf("Auth: %v", err)
 	}
 
-	// SessionID (empty — server will assign via NoAuth)
 	var sessionID [16]byte
-
-	// Dialer
-	dialer, err := createDialer(*transportType, sessionID, clientAuth)
+	dialer, err := createDialer(a.Transport, sessionID, a.VNetID, clientAuth)
 	if err != nil {
 		log.Fatalf("Dialer: %v", err)
 	}
 
 	c := client.New(&client.Config{
-		Endpoint:  *endpoint,
+		Endpoint:  a.Endpoint,
 		SessionID: sessionID,
-		VNetID:    vnetID,
-		TUNName:   *tunName,
+		VNetID:    a.VNetID,
+		TUNName:   a.TUNName,
 		Dialer:    dialer,
 	})
 
 	if err := c.Start(); err != nil {
 		log.Fatalf("Client start: %v", err)
 	}
-	log.Infof("Client connected to %s (%s, %s)", *endpoint, *transportType, clientAuth.Type())
-
+	log.Infof("Client connected to %s (%s, %s)", a.Endpoint, a.Transport, clientAuth.Type())
 	waitForSignal()
 	c.Close()
 }
 
 // --------------- Transport factories ---------------
 
-func createListener(transportType, addr string, serverAuth auth.ServerAuthenticator, configFn protocol.ConfigFunc) (transport.Listener, error) {
+func createListener(transportType, addr string, resolver auth.AuthResolver, configFn protocol.ConfigFunc) (transport.Listener, error) {
 	switch transportType {
 	case "tcp":
-		return tcp.NewListener(addr, serverAuth, configFn)
+		return tcp.NewListener(addr, resolver, configFn)
 	case "udp":
-		return udp.NewListener(addr, serverAuth, configFn)
+		return udp.NewListener(addr, resolver, configFn)
 	case "quic":
 		tlsConf, err := quic.GenerateServerTLS()
 		if err != nil {
 			return nil, err
 		}
-		return quic.NewListener(addr, serverAuth, configFn, tlsConf)
+		return quic.NewListener(addr, resolver, configFn, tlsConf)
 	default:
 		return nil, fmt.Errorf("unknown transport: %s", transportType)
 	}
 }
 
-func createDialer(transportType string, sessionID [16]byte, clientAuth auth.ClientAuthenticator) (transport.Dialer, error) {
+func createDialer(transportType string, sessionID [16]byte, vnetID [16]byte, clientAuth auth.ClientAuthenticator) (transport.Dialer, error) {
 	switch transportType {
 	case "tcp":
-		return tcp.NewDialer(sessionID, clientAuth), nil
+		return tcp.NewDialer(sessionID, vnetID, clientAuth), nil
 	case "udp":
-		return udp.NewDialer(sessionID, clientAuth), nil
+		return udp.NewDialer(sessionID, vnetID, clientAuth), nil
 	case "quic":
-		return quic.NewDialer(sessionID, clientAuth, quic.InsecureClientTLS()), nil
+		return quic.NewDialer(sessionID, vnetID, clientAuth, quic.InsecureClientTLS()), nil
 	default:
 		return nil, fmt.Errorf("unknown transport: %s", transportType)
 	}
-}
-
-// --------------- Helpers ---------------
-
-// parseOpListen splits "bind;external" into two addresses.
-// If no ";", external is empty.
-func parseOpListen(s string) (bind, external string) {
-	parts := strings.SplitN(s, ";", 2)
-	bind = strings.TrimSpace(parts[0])
-	if len(parts) == 2 {
-		external = strings.TrimSpace(parts[1])
-	}
-	return
-}
-
-// isFlagSet checks if a flag was explicitly set on the command line.
-func isFlagSet(fs *flag.FlagSet, name string) bool {
-	found := false
-	fs.Visit(func(f *flag.Flag) {
-		if f.Name == name {
-			found = true
-		}
-	})
-	return found
 }
 
 func waitForSignal() {
@@ -332,4 +225,3 @@ func waitForSignal() {
 	<-sigs
 	log.Info("Shutting down...")
 }
-

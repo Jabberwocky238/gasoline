@@ -72,12 +72,12 @@ func ParseServerAuth(raw string) (ServerAuthenticator, error) {
 //
 // Formats:
 //
-//	"noauth" (requires VNetID and Fingerprint to be set separately)
+//	"noauth"
 //	"hmac:<id>:<secret>"
 //	"userpass:<userid>:<password>"
-func ParseClientAuth(raw string, vnetID [16]byte, fingerprint []byte) (ClientAuthenticator, error) {
+func ParseClientAuth(raw string, fingerprint []byte) (ClientAuthenticator, error) {
 	if raw == "" || raw == "noauth" {
-		return &NoAuthClient{VNetID: vnetID, Fingerprint: fingerprint}, nil
+		return &NoAuthClient{Fingerprint: fingerprint}, nil
 	}
 
 	if strings.HasPrefix(raw, "hmac:") {

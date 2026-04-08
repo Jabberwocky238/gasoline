@@ -14,7 +14,7 @@ func testConfigFn() protocol.ConfigFunc {
 	serverPriv, _ := protocol.NewPrivateKey()
 	serverPub := serverPriv.PublicKey()
 
-	return func(clientID [16]byte) (*protocol.SessionConfig, error) {
+	return func(clientID [16]byte, vnetID [16]byte) (*protocol.SessionConfig, error) {
 		clientPriv, _ := protocol.NewPrivateKey()
 		return &protocol.SessionConfig{
 			ClientPrivateKey: clientPriv,
@@ -24,11 +24,15 @@ func testConfigFn() protocol.ConfigFunc {
 	}
 }
 
+func testResolver(a auth.ServerAuthenticator) auth.AuthResolver {
+	return auth.NewMapResolver(a)
+}
+
 func TestUDPHandshakeAndPacket(t *testing.T) {
 	serverAuth := &auth.NoAuthServer{}
 	configFn := testConfigFn()
 
-	ln, err := NewListener("127.0.0.1:0", serverAuth, configFn)
+	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth), configFn)
 	if err != nil {
 		t.Fatalf("NewListener: %v", err)
 	}
@@ -36,7 +40,7 @@ func TestUDPHandshakeAndPacket(t *testing.T) {
 
 	addr := ln.Addr()
 	clientID := [16]byte{0x10, 0x20, 0x30}
-	dialer := NewDialer(clientID, &auth.NoAuthClient{})
+	dialer := NewDialer(clientID, [16]byte{}, &auth.NoAuthClient{})
 
 	var wg sync.WaitGroup
 	var serverConn *Conn
@@ -144,13 +148,13 @@ func TestUDPMultiplePackets(t *testing.T) {
 	serverAuth := &auth.NoAuthServer{}
 	configFn := testConfigFn()
 
-	ln, err := NewListener("127.0.0.1:0", serverAuth, configFn)
+	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth), configFn)
 	if err != nil {
 		t.Fatalf("NewListener: %v", err)
 	}
 	defer ln.Close()
 
-	dialer := NewDialer([16]byte{}, &auth.NoAuthClient{})
+	dialer := NewDialer([16]byte{}, [16]byte{}, &auth.NoAuthClient{})
 
 	var wg sync.WaitGroup
 	var sConn *Conn
@@ -204,7 +208,7 @@ func TestUDPMultiplePackets(t *testing.T) {
 func TestUDPMultipleClients(t *testing.T) {
 	serverAuth := &auth.NoAuthServer{}
 	clientCount := 0
-	configFn := func(clientID [16]byte) (*protocol.SessionConfig, error) {
+	configFn := func(clientID [16]byte, vnetID [16]byte) (*protocol.SessionConfig, error) {
 		clientCount++
 		clientPriv, _ := protocol.NewPrivateKey()
 		serverPriv, _ := protocol.NewPrivateKey()
@@ -215,7 +219,7 @@ func TestUDPMultipleClients(t *testing.T) {
 		}, nil
 	}
 
-	ln, err := NewListener("127.0.0.1:0", serverAuth, configFn)
+	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth), configFn)
 	if err != nil {
 		t.Fatalf("NewListener: %v", err)
 	}
@@ -245,7 +249,7 @@ func TestUDPMultipleClients(t *testing.T) {
 	clientConns := make([]interface{}, numClients)
 	for i := 0; i < numClients; i++ {
 		id := [16]byte{byte(i)}
-		d := NewDialer(id, &auth.NoAuthClient{})
+		d := NewDialer(id, [16]byte{}, &auth.NoAuthClient{})
 		c, _, err := d.Dial(addr)
 		if err != nil {
 			t.Fatalf("Dial %d: %v", i, err)

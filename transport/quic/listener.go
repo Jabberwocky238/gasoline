@@ -21,16 +21,16 @@ import (
 
 type Listener struct {
 	inner    *quic.Listener
-	auth     auth.ServerAuthenticator
+	resolver auth.AuthResolver
 	configFn protocol.ConfigFunc
 }
 
-func NewListener(addr string, auth auth.ServerAuthenticator, configFn protocol.ConfigFunc, tlsConf *tls.Config) (*Listener, error) {
+func NewListener(addr string, resolver auth.AuthResolver, configFn protocol.ConfigFunc, tlsConf *tls.Config) (*Listener, error) {
 	ln, err := quic.ListenAddr(addr, tlsConf, nil)
 	if err != nil {
 		return nil, err
 	}
-	return &Listener{inner: ln, auth: auth, configFn: configFn}, nil
+	return &Listener{inner: ln, resolver: resolver, configFn: configFn}, nil
 }
 
 func (l *Listener) Accept() (transport.Conn, *protocol.HandshakeResult, error) {
@@ -44,7 +44,7 @@ func (l *Listener) Accept() (transport.Conn, *protocol.HandshakeResult, error) {
 		return nil, nil, err
 	}
 
-	result, err := protocol.ServerHandshake(stream, l.auth, l.configFn)
+	result, err := protocol.ServerHandshake(stream, l.resolver, l.configFn)
 	if err != nil {
 		conn.CloseWithError(0, "handshake failed")
 		return nil, nil, err

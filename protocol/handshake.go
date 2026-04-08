@@ -17,8 +17,8 @@ const (
 	HandshakeFail byte = 0x01
 )
 
-// ConfigFunc generates a SessionConfig for a clientID after auth succeeds.
-type ConfigFunc func(clientID [16]byte) (*SessionConfig, error)
+// ConfigFunc generates a SessionConfig for a clientID and vnetID after auth succeeds.
+type ConfigFunc func(clientID [16]byte, vnetID [16]byte) (*SessionConfig, error)
 
 // HandshakeResult is returned after a successful handshake.
 type HandshakeResult struct {
@@ -31,14 +31,14 @@ type HandshakeResult struct {
 
 // ClientHandshake performs the 4-step handshake on the client side.
 //
-//  1. C→S: ClientHello  (version + authType + clientID)
+//  1. C→S: ClientHello  (version + authType + clientID + vnetID)
 //  2. S→C: ServerHello  (version + authType + challenge)
 //  3. C→S: ClientRequest(auth response)
 //  4. S→C: ServerResponse(status + config)
 //  5. derive AEAD keypair via ECDH
-func ClientHandshake(rw io.ReadWriter, clientID [16]byte, authenticator auth.ClientAuthenticator) (*HandshakeResult, error) {
-	// 1. Send ClientHello with auth type
-	hello := &ClientHello{Version: HandshakeVersion, AuthType: authenticator.Type(), ClientID: clientID}
+func ClientHandshake(rw io.ReadWriter, clientID [16]byte, vnetID [16]byte, authenticator auth.ClientAuthenticator) (*HandshakeResult, error) {
+	// 1. Send ClientHello with auth type and vnetID
+	hello := &ClientHello{Version: HandshakeVersion, AuthType: authenticator.Type(), ClientID: clientID, VNetID: vnetID}
 	if err := hello.WriteTo(rw); err != nil {
 		return nil, fmt.Errorf("send ClientHello: %w", err)
 	}
@@ -90,8 +90,9 @@ func ClientHandshake(rw io.ReadWriter, clientID [16]byte, authenticator auth.Cli
 }
 
 // ServerHandshake performs the 4-step handshake on the server side.
-func ServerHandshake(rw io.ReadWriter, authenticator auth.ServerAuthenticator, configFn ConfigFunc) (*HandshakeResult, error) {
-	// 1. Receive ClientHello
+// It uses an AuthResolver to select the correct authenticator based on the client's VNetID.
+func ServerHandshake(rw io.ReadWriter, resolver auth.AuthResolver, configFn ConfigFunc) (*HandshakeResult, error) {
+	// 1. Receive ClientHello (now includes VNetID)
 	var hello ClientHello
 	if err := hello.ReadFrom(rw); err != nil {
 		return nil, fmt.Errorf("recv ClientHello: %w", err)
@@ -99,6 +100,15 @@ func ServerHandshake(rw io.ReadWriter, authenticator auth.ServerAuthenticator, c
 	if hello.Version != HandshakeVersion {
 		return nil, fmt.Errorf("version mismatch: got %d, want %d", hello.Version, HandshakeVersion)
 	}
+
+	// Resolve auth for this VNet
+	authenticator, err := resolver.Resolve(hello.VNetID)
+	if err != nil {
+		fail := &ServerResponse{Status: HandshakeFail}
+		fail.WriteTo(rw)
+		return nil, fmt.Errorf("resolve auth for vnet %x: %w", hello.VNetID, err)
+	}
+
 	// Verify client requested the same auth type
 	if hello.AuthType != authenticator.Type() {
 		fail := &ServerResponse{Status: HandshakeFail}
@@ -133,7 +143,7 @@ func ServerHandshake(rw io.ReadWriter, authenticator auth.ServerAuthenticator, c
 		return nil, fmt.Errorf("auth verify: %w", err)
 	}
 
-	cfg, err := configFn(hello.ClientID)
+	cfg, err := configFn(hello.ClientID, hello.VNetID)
 	if err != nil {
 		fail := &ServerResponse{Status: HandshakeFail}
 		fail.WriteTo(rw)
@@ -156,30 +166,33 @@ func ServerHandshake(rw io.ReadWriter, authenticator auth.ServerAuthenticator, c
 
 // --------------- Wire Messages ---------------
 
-// ClientHello: version(1) + authType(1) + clientID(16) = 18 bytes
+// ClientHello: version(1) + authType(1) + clientID(16) + vnetID(16) = 34 bytes
 type ClientHello struct {
 	Version  byte
 	AuthType auth.Type
 	ClientID [16]byte
+	VNetID   [16]byte
 }
 
 func (m *ClientHello) WriteTo(w io.Writer) error {
-	buf := make([]byte, 18)
+	buf := make([]byte, 34)
 	buf[0] = m.Version
 	buf[1] = byte(m.AuthType)
-	copy(buf[2:], m.ClientID[:])
+	copy(buf[2:18], m.ClientID[:])
+	copy(buf[18:34], m.VNetID[:])
 	_, err := w.Write(buf)
 	return err
 }
 
 func (m *ClientHello) ReadFrom(r io.Reader) error {
-	buf := make([]byte, 18)
+	buf := make([]byte, 34)
 	if _, err := io.ReadFull(r, buf); err != nil {
 		return err
 	}
 	m.Version = buf[0]
 	m.AuthType = auth.Type(buf[1])
-	copy(m.ClientID[:], buf[2:])
+	copy(m.ClientID[:], buf[2:18])
+	copy(m.VNetID[:], buf[18:34])
 	return nil
 }
 

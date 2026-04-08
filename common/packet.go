@@ -10,6 +10,12 @@ const (
 )
 
 const (
+	SessionIDLen    = 16
+	OperatorUUIDLen = 16
+	VNetIDLen       = 16
+)
+
+const (
 	DefaultUDPBufferSize = 2 << 13 // 16KB
 )
 

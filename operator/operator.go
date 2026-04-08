@@ -9,6 +9,7 @@ import (
 
 	log "github.com/sirupsen/logrus"
 
+	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/stats"
@@ -18,15 +19,15 @@ import (
 	"golang.org/x/net/ipv6"
 )
 
-type SessionIDType [16]byte
-type OperatorUUIDType [16]byte
-type VNetIDType [16]byte
+type SessionIDType [common.SessionIDLen]byte
+type OperatorUUIDType [common.OperatorUUIDLen]byte
+type VNetIDType [common.VNetIDLen]byte
 
 type Config struct {
 	// UUID is this operator's unique identifier
 	UUID OperatorUUIDType
-	// Auth strategy for incoming client handshakes
-	Auth auth.ServerAuthenticator
+	// Auth resolver for per-VNet auth
+	Auth auth.AuthResolver
 	// ConfigFunc generates SessionConfig for each client after auth
 	ConfigFn protocol.ConfigFunc
 	// ClientListener accepts client transport connections

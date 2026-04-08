@@ -8,10 +8,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// NetworkEntry represents a single VNet:CIDR pair in the config file.
+// NetworkEntry represents a single VNet:CIDR pair in the config file, with optional per-VNet auth.
 type NetworkEntry struct {
 	VNet uint64 `yaml:"vnet"`
 	CIDR string `yaml:"cidr"`
+	Auth string `yaml:"auth,omitempty"` // per-VNet auth override (empty = use global default)
 }
 
 // Config holds all configuration fields shared by operator and client.

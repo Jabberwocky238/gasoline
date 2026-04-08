@@ -16,7 +16,7 @@ func testConfigFn() protocol.ConfigFunc {
 	serverPriv, _ := protocol.NewPrivateKey()
 	serverPub := serverPriv.PublicKey()
 
-	return func(clientID [16]byte) (*protocol.SessionConfig, error) {
+	return func(clientID [16]byte, vnetID [16]byte) (*protocol.SessionConfig, error) {
 		clientPriv, _ := protocol.NewPrivateKey()
 		return &protocol.SessionConfig{
 			ClientPrivateKey: clientPriv,
@@ -26,11 +26,15 @@ func testConfigFn() protocol.ConfigFunc {
 	}
 }
 
+func testResolver(a auth.ServerAuthenticator) auth.AuthResolver {
+	return auth.NewMapResolver(a)
+}
+
 func TestTCPHandshakeAndPacket(t *testing.T) {
 	serverAuth := &auth.NoAuthServer{}
 	configFn := testConfigFn()
 
-	ln, err := NewListener("127.0.0.1:0", serverAuth, configFn)
+	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth), configFn)
 	if err != nil {
 		t.Fatalf("NewListener: %v", err)
 	}
@@ -38,7 +42,7 @@ func TestTCPHandshakeAndPacket(t *testing.T) {
 
 	addr := ln.Addr()
 	clientID := [16]byte{0x01, 0x02, 0x03}
-	dialer := NewDialer(clientID, &auth.NoAuthClient{})
+	dialer := NewDialer(clientID, [16]byte{}, &auth.NoAuthClient{})
 
 	var wg sync.WaitGroup
 	var serverConn *Conn
@@ -147,13 +151,13 @@ func TestTCPMultiplePackets(t *testing.T) {
 	serverAuth := &auth.NoAuthServer{}
 	configFn := testConfigFn()
 
-	ln, err := NewListener("127.0.0.1:0", serverAuth, configFn)
+	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth), configFn)
 	if err != nil {
 		t.Fatalf("NewListener: %v", err)
 	}
 	defer ln.Close()
 
-	dialer := NewDialer([16]byte{}, &auth.NoAuthClient{})
+	dialer := NewDialer([16]byte{}, [16]byte{}, &auth.NoAuthClient{})
 
 	var wg sync.WaitGroup
 	var sConn *Conn
@@ -215,13 +219,13 @@ func TestTCPHMACAuth(t *testing.T) {
 	clientAuth := &auth.HMACClient{ID: "testclient", Secret: []byte("test-shared-secret-1234")}
 	configFn := testConfigFn()
 
-	ln, err := NewListener("127.0.0.1:0", serverAuth, configFn)
+	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth), configFn)
 	if err != nil {
 		t.Fatalf("NewListener: %v", err)
 	}
 	defer ln.Close()
 
-	dialer := NewDialer(clientID, clientAuth)
+	dialer := NewDialer(clientID, [16]byte{}, clientAuth)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -259,13 +263,13 @@ func TestTCPUserPassAuth(t *testing.T) {
 	}
 	configFn := testConfigFn()
 
-	ln, err := NewListener("127.0.0.1:0", serverAuth, configFn)
+	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth), configFn)
 	if err != nil {
 		t.Fatalf("NewListener: %v", err)
 	}
 	defer ln.Close()
 
-	dialer := NewDialer([16]byte{0x01}, clientAuth)
+	dialer := NewDialer([16]byte{0x01}, [16]byte{}, clientAuth)
 
 	var wg sync.WaitGroup
 	wg.Add(1)

@@ -178,6 +178,7 @@ func (o *Operator) forwardToRemoteOperator(srcPeer *ClientPeer, dstAddr netip.Ad
 		return false
 	}
 
+	log.Infof("Forwarding %d bytes to operator %x for %s", len(data), targetOpUUID, dstAddr)
 	if err := peer.SendData([16]byte(srcPeer.VNetID), data); err != nil {
 		log.Errorf("Forward to operator %x: %v", targetOpUUID, err)
 		return false

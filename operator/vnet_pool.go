@@ -227,6 +227,7 @@ func MakeConfigFunc(pools *VNetPoolMap, serverPub protocol.PublicKey, authentica
 
 		return &protocol.SessionConfig{
 			SessionID:        sessionID,
+			VNetID:           [16]byte(vnetID),
 			ClientPrivateKey: clientPriv,
 			ServerPublicKey:  serverPub,
 			IPPrefix:         netip.PrefixFrom(clientIP, 32),

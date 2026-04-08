@@ -124,7 +124,9 @@ func (o *Operator) routineAcceptClients() {
 
 		cp := &ClientPeer{
 			Conn:       conn,
-			SessionID:  result.ClientID,
+			SessionID:  SessionIDType(result.Config.SessionID),
+			VNetID:     VNetIDType(result.Config.VNetID),
+			OperatorID: o.cfg.UUID,
 			IP:         result.Config.IPPrefix,
 			AllowedIPs: result.Config.AllowedRanges,
 		}

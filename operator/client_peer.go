@@ -54,21 +54,11 @@ func (ct *ClientTable) Remove(cp *ClientPeer) {
 	}
 }
 
-// LookupByIP finds a client peer whose AllowedIPs contain the given address.
+// LookupByIP finds a client peer by exact assigned IP match.
 func (ct *ClientTable) LookupByIP(addr netip.Addr) *ClientPeer {
 	ct.mu.RLock()
 	defer ct.mu.RUnlock()
-	// Fast path: exact match on assigned IP
-	if cp, ok := ct.peers[addr]; ok {
-		return cp
-	}
-	// Slow path: check AllowedIPs
-	for _, cp := range ct.peers {
-		if cp.ContainsIP(addr) {
-			return cp
-		}
-	}
-	return nil
+	return ct.peers[addr]
 }
 
 func (ct *ClientTable) Len() int {

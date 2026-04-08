@@ -1,6 +1,7 @@
 package main
 
 import (
+	cryptoRand "crypto/rand"
 	"flag"
 	"fmt"
 	"math/rand"
@@ -157,7 +158,12 @@ func runOperator(args []string) {
 		}
 	}
 
+	// Generate random operator UUID
+	var opUUID operator.OperatorUUIDType
+	cryptoRand.Read(opUUID[:])
+
 	op := operator.New(&operator.Config{
+		UUID:                 opUUID,
 		Auth:                 serverAuth,
 		ConfigFn:             configFn,
 		ClientListener:       clientListener,
@@ -166,6 +172,7 @@ func runOperator(args []string) {
 		StatsAddr:            *statsAddr,
 		DiscoverAddrs:        discoverAddrs,
 	})
+	log.Infof("Operator UUID: %x", opUUID)
 	op.VNetPools = pools
 
 	if err := op.Start(); err != nil {

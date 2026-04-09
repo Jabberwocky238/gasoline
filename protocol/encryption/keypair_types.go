@@ -1,9 +1,4 @@
-/* SPDX-License-Identifier: MIT
- *
- * Copyright (C) 2017-2025 WireGuard LLC. All Rights Reserved.
- */
-
-package protocol
+package encryption
 
 import (
 	"crypto/rand"
@@ -86,8 +81,7 @@ func (pk *PublicKey) ToBase64() string {
 }
 
 func (pk *PublicKey) FromHex(src string) (err error) {
-	err = loadExactHex(pk[:], src)
-	return err
+	return loadExactHex(pk[:], src)
 }
 
 func (pk *PublicKey) Sha256() [32]byte {
@@ -95,11 +89,11 @@ func (pk *PublicKey) Sha256() [32]byte {
 }
 
 func (sk *PrivateKey) PublicKey() PublicKey {
-	var pk = new(PublicKey)
-	apk := (*[KeyLength]byte)(pk)
+	var pk PublicKey
+	apk := (*[KeyLength]byte)(&pk)
 	ask := (*[KeyLength]byte)(sk)
 	curve25519.ScalarBaseMult(apk, ask)
-	return *pk
+	return pk
 }
 
 func NewPrivateKey() (sk PrivateKey, err error) {

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
+
+	"github.com/jabberwocky238/gasoline/protocol/encryption"
 )
 
 // SessionConfig is the config the server sends to the client after successful auth.
@@ -18,8 +20,8 @@ import (
 type SessionConfig struct {
 	SessionID        [16]byte       // Session ID assigned by server
 	VNetID           [16]byte       // Virtual network ID
-	ClientPrivateKey PrivateKey     // WG private key assigned to client
-	ServerPublicKey  PublicKey      // Server's WG public key
+	ClientPrivateKey encryption.PrivateKey // WG private key assigned to client
+	ServerPublicKey  encryption.PublicKey  // Server's WG public key
 	IPPrefix         netip.Prefix   // Client's assigned IP (e.g. 10.0.0.2/24)
 	AllowedRanges    []netip.Prefix // Internal network ranges routable via VPN
 }
@@ -109,7 +111,7 @@ func (c *SessionConfig) Unmarshal(data []byte) error {
 }
 
 // MarshalSessionConfig is a convenience helper.
-func MarshalSessionConfig(clientPriv PrivateKey, serverPub PublicKey, prefix netip.Prefix, allowedRanges []netip.Prefix) []byte {
+func MarshalSessionConfig(clientPriv encryption.PrivateKey, serverPub encryption.PublicKey, prefix netip.Prefix, allowedRanges []netip.Prefix) []byte {
 	cfg := &SessionConfig{
 		ClientPrivateKey: clientPriv,
 		ServerPublicKey:  serverPub,

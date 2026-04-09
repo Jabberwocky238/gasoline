@@ -8,14 +8,15 @@ import (
 
 	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
+	"github.com/jabberwocky238/gasoline/protocol/encryption"
 )
 
 func testConfigFn() protocol.ConfigFunc {
-	serverPriv, _ := protocol.NewPrivateKey()
+	serverPriv, _ := encryption.NewPrivateKey()
 	serverPub := serverPriv.PublicKey()
 
 	return func(clientID [16]byte, vnetID [16]byte) (*protocol.SessionConfig, error) {
-		clientPriv, _ := protocol.NewPrivateKey()
+		clientPriv, _ := encryption.NewPrivateKey()
 		return &protocol.SessionConfig{
 			ClientPrivateKey: clientPriv,
 			ServerPublicKey:  serverPub,
@@ -212,8 +213,8 @@ func TestUDPMultipleClients(t *testing.T) {
 	clientCount := 0
 	configFn := func(clientID [16]byte, vnetID [16]byte) (*protocol.SessionConfig, error) {
 		clientCount++
-		clientPriv, _ := protocol.NewPrivateKey()
-		serverPriv, _ := protocol.NewPrivateKey()
+		clientPriv, _ := encryption.NewPrivateKey()
+		serverPriv, _ := encryption.NewPrivateKey()
 		return &protocol.SessionConfig{
 			ClientPrivateKey: clientPriv,
 			ServerPublicKey:  serverPriv.PublicKey(),

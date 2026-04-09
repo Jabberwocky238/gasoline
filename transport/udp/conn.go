@@ -7,7 +7,7 @@ import (
 	"sync"
 
 	"github.com/jabberwocky238/gasoline/common"
-	"github.com/jabberwocky238/gasoline/protocol"
+	"github.com/jabberwocky238/gasoline/protocol/encryption"
 )
 
 // Conn wraps a UDP connection with AEAD encryption.
@@ -18,7 +18,7 @@ import (
 type Conn struct {
 	rawConn    *net.UDPConn
 	remoteAddr *net.UDPAddr
-	keypair    *protocol.SessionKeypair
+	keypair    *encryption.SessionKeypair
 
 	// virtual conn fields (server side)
 	incoming  chan []byte
@@ -29,7 +29,7 @@ type Conn struct {
 	writeMu sync.Mutex
 }
 
-func newClientConn(rawConn *net.UDPConn, keypair *protocol.SessionKeypair) *Conn {
+func newClientConn(rawConn *net.UDPConn, keypair *encryption.SessionKeypair) *Conn {
 	return &Conn{
 		rawConn:    rawConn,
 		remoteAddr: rawConn.RemoteAddr().(*net.UDPAddr),
@@ -37,7 +37,7 @@ func newClientConn(rawConn *net.UDPConn, keypair *protocol.SessionKeypair) *Conn
 	}
 }
 
-func newVirtualConn(rawConn *net.UDPConn, remoteAddr *net.UDPAddr, keypair *protocol.SessionKeypair) *Conn {
+func newVirtualConn(rawConn *net.UDPConn, remoteAddr *net.UDPAddr, keypair *encryption.SessionKeypair) *Conn {
 	return &Conn{
 		rawConn:    rawConn,
 		remoteAddr: remoteAddr,
@@ -52,7 +52,9 @@ func (c *Conn) WritePacket(data []byte) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 
-	encrypted := c.keypair.Send.Seal(data)
+	tmp := common.GetBuffer()
+	encrypted := c.keypair.Send.Seal(*tmp, data)
+	defer common.PutBuffer(tmp)
 	if c.isVirtual {
 		_, err := c.rawConn.WriteToUDP(encrypted, c.remoteAddr)
 		return err
@@ -85,11 +87,11 @@ func (c *Conn) ReadPacket(buf []byte) (int, error) {
 		defer common.PutBuffer(tmp)
 	}
 
-	plain, err := c.keypair.Receive.Open(datagram)
+	plain, err := c.keypair.Receive.Open(buf, datagram)
 	if err != nil {
 		return 0, err
 	}
-	return copy(buf, plain), nil
+	return len(plain), nil
 }
 
 func (c *Conn) Close() error {

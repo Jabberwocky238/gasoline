@@ -17,6 +17,7 @@ import (
 	"github.com/jabberwocky238/gasoline/operator/ctrl"
 	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
+	"github.com/jabberwocky238/gasoline/protocol/encryption"
 	"github.com/jabberwocky238/gasoline/stats"
 	"github.com/jabberwocky238/gasoline/transport"
 	transportQuic "github.com/jabberwocky238/gasoline/transport/quic"
@@ -70,7 +71,7 @@ func New(cfg *common.OperatorConfig) (*Operator, error) {
 			logger.Infof("VNet %x: %s", vnetID, pool.Prefix)
 		}
 
-		serverPriv, err := protocol.NewPrivateKey()
+		serverPriv, err := encryption.NewPrivateKey()
 		if err != nil {
 			cancel()
 			return nil, fmt.Errorf("generate server key: %w", err)
@@ -431,7 +432,7 @@ func (o *Operator) routineReaper() {
 
 // --------------- Helpers ---------------
 
-func makeConfigFunc(pools *VNetPoolMap, serverPub protocol.PublicKey) protocol.ConfigFunc {
+func makeConfigFunc(pools *VNetPoolMap, serverPub encryption.PublicKey) protocol.ConfigFunc {
 	return func(clientID [16]byte, vnetID [16]byte) (*protocol.SessionConfig, error) {
 		pool, ok := pools.Get(vnetID)
 		if !ok {
@@ -441,7 +442,7 @@ func makeConfigFunc(pools *VNetPoolMap, serverPub protocol.PublicKey) protocol.C
 		if err != nil {
 			return nil, err
 		}
-		clientPriv, err := protocol.NewPrivateKey()
+		clientPriv, err := encryption.NewPrivateKey()
 		if err != nil {
 			return nil, err
 		}

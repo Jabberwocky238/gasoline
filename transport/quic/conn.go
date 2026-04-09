@@ -6,7 +6,7 @@ import (
 	"sync"
 
 	"github.com/jabberwocky238/gasoline/common"
-	"github.com/jabberwocky238/gasoline/protocol"
+	"github.com/jabberwocky238/gasoline/protocol/encryption"
 )
 
 // Stream is the interface that QUIC streams must satisfy.
@@ -19,14 +19,14 @@ type Stream interface {
 // Wire format is identical to TCP: [frameLen:2][counter:8][ciphertext + tag]
 type Conn struct {
 	stream     Stream
-	keypair    *protocol.SessionKeypair
+	keypair    *encryption.SessionKeypair
 	remoteAddr string
 
 	readMu  sync.Mutex
 	writeMu sync.Mutex
 }
 
-func newConn(stream Stream, keypair *protocol.SessionKeypair, remoteAddr string) *Conn {
+func newConn(stream Stream, keypair *encryption.SessionKeypair, remoteAddr string) *Conn {
 	return &Conn{stream: stream, keypair: keypair, remoteAddr: remoteAddr}
 }
 
@@ -34,7 +34,9 @@ func (c *Conn) WritePacket(data []byte) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 
-	encrypted := c.keypair.Send.Seal(data)
+	tmp := common.GetBuffer()
+	encrypted := c.keypair.Send.Seal(*tmp, data)
+	defer common.PutBuffer(tmp)
 
 	var header [2]byte
 	binary.LittleEndian.PutUint16(header[:], uint16(len(encrypted)))
@@ -62,12 +64,12 @@ func (c *Conn) ReadPacket(buf []byte) (int, error) {
 		return 0, err
 	}
 
-	plain, err := c.keypair.Receive.Open(encrypted)
+	plain, err := c.keypair.Receive.Open(buf, encrypted)
 	common.PutBuffer(tmp)
 	if err != nil {
 		return 0, err
 	}
-	return copy(buf, plain), nil
+	return len(plain), nil
 }
 
 func (c *Conn) Close() error      { return c.stream.Close() }

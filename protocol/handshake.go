@@ -6,6 +6,7 @@ import (
 	"io"
 
 	"github.com/jabberwocky238/gasoline/protocol/auth"
+	"github.com/jabberwocky238/gasoline/protocol/encryption"
 )
 
 const (
@@ -24,7 +25,7 @@ type ConfigFunc func(clientID [16]byte, vnetID [16]byte) (*SessionConfig, error)
 type HandshakeResult struct {
 	ClientID [16]byte
 	Config   SessionConfig
-	Keypair  *SessionKeypair
+	Keypair  *encryption.SessionKeypair
 }
 
 // --------------- Handshake Protocol ---------------
@@ -81,7 +82,7 @@ func ClientHandshake(rw io.ReadWriter, clientID [16]byte, vnetID [16]byte, authe
 	}
 
 	// 5. Derive AEAD keypair
-	keypair, err := DeriveSessionKeypair(cfg.ClientPrivateKey, cfg.ServerPublicKey, true)
+	keypair, err := encryption.DeriveSessionKeypair(cfg.ClientPrivateKey, cfg.ServerPublicKey, true)
 	if err != nil {
 		return nil, fmt.Errorf("derive session keys: %w", err)
 	}
@@ -156,7 +157,7 @@ func ServerHandshake(rw io.ReadWriter, resolver auth.AuthResolver, configFn Conf
 	}
 
 	// 5. Derive AEAD keypair
-	keypair, err := DeriveSessionKeypair(cfg.ClientPrivateKey, cfg.ServerPublicKey, false)
+	keypair, err := encryption.DeriveSessionKeypair(cfg.ClientPrivateKey, cfg.ServerPublicKey, false)
 	if err != nil {
 		return nil, fmt.Errorf("derive session keys: %w", err)
 	}

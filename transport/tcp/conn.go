@@ -7,7 +7,7 @@ import (
 	"sync"
 
 	"github.com/jabberwocky238/gasoline/common"
-	"github.com/jabberwocky238/gasoline/protocol"
+	"github.com/jabberwocky238/gasoline/protocol/encryption"
 )
 
 // Conn wraps a TCP net.Conn with length-prefix framing + AEAD encryption.
@@ -19,13 +19,13 @@ import (
 // frameLen = AEADHeaderSize + len(plaintext) + AEADTagSize
 type Conn struct {
 	raw     net.Conn
-	keypair *protocol.SessionKeypair
+	keypair *encryption.SessionKeypair
 
 	readMu  sync.Mutex
 	writeMu sync.Mutex
 }
 
-func newConn(raw net.Conn, keypair *protocol.SessionKeypair) *Conn {
+func newConn(raw net.Conn, keypair *encryption.SessionKeypair) *Conn {
 	return &Conn{raw: raw, keypair: keypair}
 }
 
@@ -34,7 +34,9 @@ func (c *Conn) WritePacket(data []byte) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 
-	encrypted := c.keypair.Send.Seal(data)
+	tmp := common.GetBuffer()
+	encrypted := c.keypair.Send.Seal(*tmp, data)
+	defer common.PutBuffer(tmp)
 
 	var header [2]byte
 	binary.LittleEndian.PutUint16(header[:], uint16(len(encrypted)))
@@ -66,12 +68,12 @@ func (c *Conn) ReadPacket(buf []byte) (int, error) {
 		return 0, err
 	}
 
-	plain, err := c.keypair.Receive.Open(encrypted)
+	plain, err := c.keypair.Receive.Open(buf, encrypted)
 	common.PutBuffer(tmp)
 	if err != nil {
 		return 0, err
 	}
-	return copy(buf, plain), nil
+	return len(plain), nil
 }
 
 func (c *Conn) Close() error      { return c.raw.Close() }

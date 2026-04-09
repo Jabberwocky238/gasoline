@@ -6,7 +6,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/jabberwocky238/gasoline/protocol"
+	"github.com/jabberwocky238/gasoline/protocol/encryption"
 )
 
 // mockStream implements the Stream interface (io.ReadWriteCloser) for testing.
@@ -64,18 +64,18 @@ func (s *pipedStream) Close() error {
 
 func TestQUICConnWriteReadPacket(t *testing.T) {
 	// Create two symmetric AEAD keypairs
-	clientPriv, _ := protocol.NewPrivateKey()
-	serverPriv, _ := protocol.NewPrivateKey()
+	clientPriv, _ := encryption.NewPrivateKey()
+	serverPriv, _ := encryption.NewPrivateKey()
 	clientPub := clientPriv.PublicKey()
 	serverPub := serverPriv.PublicKey()
 
 	// Client keypair: ECDH(clientPriv, serverPub), initiator=true
-	clientKP, err := protocol.DeriveSessionKeypair(clientPriv, serverPub, true)
+	clientKP, err := encryption.DeriveSessionKeypair(clientPriv, serverPub, true)
 	if err != nil {
 		t.Fatalf("client keypair: %v", err)
 	}
 	// Server keypair: ECDH(serverPriv, clientPub), initiator=false
-	serverKP, err := protocol.DeriveSessionKeypair(serverPriv, clientPub, false)
+	serverKP, err := encryption.DeriveSessionKeypair(serverPriv, clientPub, false)
 	if err != nil {
 		t.Fatalf("server keypair: %v", err)
 	}
@@ -145,11 +145,11 @@ func TestQUICConnWriteReadPacket(t *testing.T) {
 }
 
 func TestQUICConnMultiplePackets(t *testing.T) {
-	clientPriv, _ := protocol.NewPrivateKey()
-	serverPriv, _ := protocol.NewPrivateKey()
+	clientPriv, _ := encryption.NewPrivateKey()
+	serverPriv, _ := encryption.NewPrivateKey()
 
-	clientKP, _ := protocol.DeriveSessionKeypair(clientPriv, serverPriv.PublicKey(), true)
-	serverKP, _ := protocol.DeriveSessionKeypair(serverPriv, clientPriv.PublicKey(), false)
+	clientKP, _ := encryption.DeriveSessionKeypair(clientPriv, serverPriv.PublicKey(), true)
+	serverKP, _ := encryption.DeriveSessionKeypair(serverPriv, clientPriv.PublicKey(), false)
 
 	clientStream, serverStream := newPipedStreamPair()
 	defer clientStream.Close()
@@ -191,9 +191,9 @@ func TestQUICConnMultiplePackets(t *testing.T) {
 }
 
 func TestQUICConnRemoteAddr(t *testing.T) {
-	clientPriv, _ := protocol.NewPrivateKey()
-	serverPriv, _ := protocol.NewPrivateKey()
-	kp, _ := protocol.DeriveSessionKeypair(clientPriv, serverPriv.PublicKey(), true)
+	clientPriv, _ := encryption.NewPrivateKey()
+	serverPriv, _ := encryption.NewPrivateKey()
+	kp, _ := encryption.DeriveSessionKeypair(clientPriv, serverPriv.PublicKey(), true)
 
 	stream, _ := newPipedStreamPair()
 	c := newConn(stream, kp, "10.0.0.1:443")

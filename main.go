@@ -12,11 +12,6 @@ import (
 	"github.com/jabberwocky238/gasoline/client"
 	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/operator"
-	"github.com/jabberwocky238/gasoline/protocol/auth"
-	"github.com/jabberwocky238/gasoline/transport"
-	"github.com/jabberwocky238/gasoline/transport/quic"
-	"github.com/jabberwocky238/gasoline/transport/tcp"
-	"github.com/jabberwocky238/gasoline/transport/udp"
 )
 
 func main() {
@@ -40,20 +35,16 @@ func runOperator(args []string) {
 	fs := flag.NewFlagSet("operator", flag.ExitOnError)
 	resolve := common.RegisterOperatorFlags(fs)
 	fs.Parse(args)
-	cfg := resolve()
 
-	op, err := operator.New(cfg)
+	op, err := operator.New(resolve())
 	if err != nil {
 		log.Fatalf("Operator init: %v", err)
 	}
-
 	if err := op.Start(); err != nil {
 		log.Fatalf("Operator start: %v", err)
 	}
 
-	log.Infof("Operator %x started: client=%s (%s), operator=%s",
-		op.UUID(), cfg.ListenAddr, cfg.Transport, cfg.OpListenAddr)
-
+	log.Infof("Operator %x started", op.UUID())
 	waitForSignal()
 	op.Close()
 }
@@ -62,46 +53,18 @@ func runClient(args []string) {
 	fs := flag.NewFlagSet("client", flag.ExitOnError)
 	resolve := common.RegisterClientFlags(fs)
 	fs.Parse(args)
-	cfg := resolve()
 
-	clientAuth, err := auth.ParseClientAuth(cfg.AuthStr, []byte("default-fingerprint"))
+	c, err := client.New(resolve())
 	if err != nil {
-		log.Fatalf("Auth: %v", err)
+		log.Fatalf("Client init: %v", err)
 	}
-
-	var sessionID [16]byte
-	dialer, err := createDialer(cfg.Transport, sessionID, cfg.VNetID, clientAuth)
-	if err != nil {
-		log.Fatalf("Dialer: %v", err)
-	}
-
-	c := client.New(&client.Config{
-		Endpoint:  cfg.Endpoint,
-		SessionID: sessionID,
-		VNetID:    cfg.VNetID,
-		TUNName:   cfg.TUNName,
-		Dialer:    dialer,
-	})
-
 	if err := c.Start(); err != nil {
 		log.Fatalf("Client start: %v", err)
 	}
-	log.Infof("Client connected to %s (%s, %s)", cfg.Endpoint, cfg.Transport, clientAuth.Type())
+
+	log.Infof("Client started")
 	waitForSignal()
 	c.Close()
-}
-
-func createDialer(transportType string, sessionID [16]byte, vnetID [16]byte, clientAuth auth.ClientAuthenticator) (transport.Dialer, error) {
-	switch transportType {
-	case "tcp":
-		return tcp.NewDialer(sessionID, vnetID, clientAuth), nil
-	case "udp":
-		return udp.NewDialer(sessionID, vnetID, clientAuth), nil
-	case "quic":
-		return quic.NewDialer(sessionID, vnetID, clientAuth, quic.InsecureClientTLS()), nil
-	default:
-		return nil, fmt.Errorf("unknown transport: %s", transportType)
-	}
 }
 
 func waitForSignal() {

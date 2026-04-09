@@ -149,9 +149,10 @@ type OperatorConfig struct {
 
 // ClientConfig is the declarative configuration consumed by client.New().
 type ClientConfig struct {
-	Endpoint  string   // server address
-	Transport string   // "tcp", "udp", "quic"
-	AuthStr   string   // auth config string
-	VNetID    [16]byte // virtual network ID
-	TUNName   string   // TUN device name
+	Endpoint    string   // server address
+	Transport   string   // "tcp", "udp", "quic"
+	AuthStr     string   // auth config string
+	VNetID      [16]byte // virtual network ID
+	TUNName     string   // TUN device name
+	Socks5Port  int      // quick-socks5 port, 0 = disabled
 }

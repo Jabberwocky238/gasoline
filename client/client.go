@@ -3,11 +3,13 @@ package client
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/netip"
 	"sync"
 	"time"
 
 	log "github.com/sirupsen/logrus"
+	socks5 "github.com/things-go/go-socks5"
 
 	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
@@ -29,11 +31,12 @@ type Client struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	cfg       *common.ClientConfig
-	dialer    transport.Dialer
-	tun       *tunPkg.Tun
-	conn      transport.Conn
-	tunOpener TunOpener
+	cfg           *common.ClientConfig
+	dialer        transport.Dialer
+	tun           *tunPkg.Tun
+	conn          transport.Conn
+	tunOpener     TunOpener
+	socks5Listener net.Listener
 }
 
 func (c *Client) SetPlatformTunOpener(opener TunOpener) {
@@ -114,6 +117,12 @@ func (c *Client) Start() error {
 	go c.routineTUNToConn()
 	go c.routineConnToTUN()
 	go c.routineKeepalive()
+
+	if c.cfg.Socks5Port > 0 {
+		if err := c.startSocks5(); err != nil {
+			return fmt.Errorf("socks5: %w", err)
+		}
+	}
 
 	return nil
 }
@@ -205,12 +214,37 @@ func (c *Client) routineKeepalive() {
 
 func (c *Client) Close() error {
 	c.cancel()
+	if c.socks5Listener != nil {
+		c.socks5Listener.Close()
+	}
 	if c.conn != nil {
 		c.conn.Close()
 	}
 	if c.tun != nil {
 		c.tun.Close()
 	}
+	return nil
+}
+
+func (c *Client) startSocks5() error {
+	addr := fmt.Sprintf("0.0.0.0:%d", c.cfg.Socks5Port)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", addr, err)
+	}
+	c.socks5Listener = ln
+
+	server := socks5.NewServer()
+	go func() {
+		log.Infof("SOCKS5 proxy listening on %s", addr)
+		if err := server.Serve(ln); err != nil {
+			select {
+			case <-c.ctx.Done():
+			default:
+				log.Errorf("SOCKS5 server error: %v", err)
+			}
+		}
+	}()
 	return nil
 }
 

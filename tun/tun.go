@@ -28,6 +28,18 @@ func New(name string, address string) (*Tun, error) {
 	return &Tun{tunIf: tunIf}, nil
 }
 
+// NewFromFD wraps an existing TUN file descriptor (e.g. from Android VpnService).
+func NewFromFD(fd int) (*Tun, error) {
+	tunIf, err := singTun.New(singTun.Options{
+		FileDescriptor: fd,
+		MTU:            DefaultMTU,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("wrap fd %d: %w", fd, err)
+	}
+	return &Tun{tunIf: tunIf}, nil
+}
+
 func defaultTUNName() string {
 	n := rand.Intn(10000)
 	if runtime.GOOS == "darwin" {

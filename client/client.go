@@ -13,6 +13,13 @@ import (
 	tunPkg "github.com/jabberwocky238/gasoline/tun"
 )
 
+// TunOpener allows the platform (e.g. Android VpnService) to create TUN devices.
+// When set, the client uses this instead of creating TUN directly via sing-tun.
+type TunOpener interface {
+	// OpenTun creates a TUN device and returns its file descriptor.
+	OpenTun(name string, address string, mtu int32) (int32, error)
+}
+
 type Config struct {
 	// Server endpoint to dial, e.g. "1.2.3.4:443"
 	Endpoint string
@@ -32,9 +39,16 @@ type Client struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	cfg  *Config
-	tun  *tunPkg.Tun
-	conn transport.Conn
+	cfg       *Config
+	tun       *tunPkg.Tun
+	conn      transport.Conn
+	tunOpener TunOpener
+}
+
+// SetPlatformTunOpener sets a platform-specific TUN opener (e.g. Android VpnService).
+// Must be called before Start().
+func (c *Client) SetPlatformTunOpener(opener TunOpener) {
+	c.tunOpener = opener
 }
 
 func New(cfg *Config) *Client {
@@ -69,14 +83,32 @@ func (c *Client) Start() error {
 			break
 		}
 	}
-	tun, err := tunPkg.New(c.cfg.TUNName, tunAddr.String())
-	if err != nil {
-		conn.Close()
-		return fmt.Errorf("create TUN: %w", err)
-	}
-	if err := tun.Start(); err != nil {
-		conn.Close()
-		return fmt.Errorf("start TUN: %w", err)
+
+	var tun *tunPkg.Tun
+	if c.tunOpener != nil {
+		// Platform-provided TUN (e.g. Android VpnService)
+		fd, err := c.tunOpener.OpenTun(c.cfg.TUNName, tunAddr.String(), int32(tunPkg.DefaultMTU))
+		if err != nil {
+			conn.Close()
+			return fmt.Errorf("platform open TUN: %w", err)
+		}
+		tun, err = tunPkg.NewFromFD(int(fd))
+		if err != nil {
+			conn.Close()
+			return fmt.Errorf("wrap TUN fd: %w", err)
+		}
+	} else {
+		// Direct TUN creation (desktop: Windows/Linux/macOS)
+		var err error
+		tun, err = tunPkg.New(c.cfg.TUNName, tunAddr.String())
+		if err != nil {
+			conn.Close()
+			return fmt.Errorf("create TUN: %w", err)
+		}
+		if err := tun.Start(); err != nil {
+			conn.Close()
+			return fmt.Errorf("start TUN: %w", err)
+		}
 	}
 	c.tun = tun
 
@@ -161,4 +193,3 @@ func (c *Client) Close() error {
 	}
 	return nil
 }
-

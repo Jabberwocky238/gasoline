@@ -18,6 +18,10 @@ genproto:
 test-op:
 	go test ./operator/ -v -timeout 30s
 
+test-op-dataforwarding:
+	go test ./operator/ -v -run TestDataForwarding -timeout 10s   
+
+
 test: test-op
 
 clean:

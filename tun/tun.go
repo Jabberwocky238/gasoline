@@ -48,14 +48,6 @@ func defaultTUNName() string {
 	return fmt.Sprintf("gatun%04d", n)
 }
 
-func (t *Tun) Read(buf []byte) (int, error) {
-	return t.tunIf.Read(buf)
-}
-
-func (t *Tun) Write(buf []byte) (int, error) {
-	return t.tunIf.Write(buf)
-}
-
 func (t *Tun) Close() error {
 	return t.tunIf.Close()
 }

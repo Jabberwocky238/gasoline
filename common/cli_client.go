@@ -17,6 +17,7 @@ func RegisterClientFlags(fs *flag.FlagSet) func() *ClientConfig {
 	authStr := fs.String("auth", "noauth", "auth config string")
 	vnetIDStr := fs.String("vnet", "", "vnet ID (decimal number, e.g. 200)")
 	tunName := fs.String("tun-name", "", "TUN device name")
+	socks5Port := fs.Int("quick-socks5", 0, "SOCKS5 proxy port (0=disabled, must be >1024)")
 
 	return func() *ClientConfig {
 		if *configFile != "" {
@@ -57,12 +58,18 @@ func RegisterClientFlags(fs *flag.FlagSet) func() *ClientConfig {
 			binary.BigEndian.PutUint64(vnetID[8:], vnetNum)
 		}
 
+		if *socks5Port != 0 && *socks5Port <= 1024 {
+			fmt.Fprintf(os.Stderr, "--quick-socks5 port must be > 1024, got %d\n", *socks5Port)
+			os.Exit(1)
+		}
+
 		return &ClientConfig{
-			Endpoint:  *endpoint,
-			Transport: *transportType,
-			AuthStr:   *authStr,
-			VNetID:    vnetID,
-			TUNName:   *tunName,
+			Endpoint:   *endpoint,
+			Transport:  *transportType,
+			AuthStr:    *authStr,
+			VNetID:     vnetID,
+			TUNName:    *tunName,
+			Socks5Port: *socks5Port,
 		}
 	}
 }

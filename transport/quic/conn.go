@@ -5,6 +5,7 @@ import (
 	"io"
 	"sync"
 
+	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol"
 )
 
@@ -44,22 +45,29 @@ func (c *Conn) WritePacket(data []byte) error {
 	return err
 }
 
-func (c *Conn) ReadPacket() ([]byte, error) {
+func (c *Conn) ReadPacket(buf []byte) (int, error) {
 	c.readMu.Lock()
 	defer c.readMu.Unlock()
 
 	var header [2]byte
 	if _, err := io.ReadFull(c.stream, header[:]); err != nil {
-		return nil, err
+		return 0, err
 	}
 	frameLen := int(binary.LittleEndian.Uint16(header[:]))
 
-	encrypted := make([]byte, frameLen)
+	tmp := common.GetBuffer()
+	encrypted := (*tmp)[:frameLen]
 	if _, err := io.ReadFull(c.stream, encrypted); err != nil {
-		return nil, err
+		common.PutBuffer(tmp)
+		return 0, err
 	}
 
-	return c.keypair.Receive.Open(encrypted)
+	plain, err := c.keypair.Receive.Open(encrypted)
+	common.PutBuffer(tmp)
+	if err != nil {
+		return 0, err
+	}
+	return copy(buf, plain), nil
 }
 
 func (c *Conn) Close() error      { return c.stream.Close() }

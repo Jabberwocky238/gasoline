@@ -6,6 +6,7 @@ import (
 	"net"
 	"sync"
 
+	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol"
 )
 
@@ -60,8 +61,9 @@ func (c *Conn) WritePacket(data []byte) error {
 	return err
 }
 
-// ReadPacket receives one UDP datagram, decrypts it, and returns the plaintext IP packet.
-func (c *Conn) ReadPacket() ([]byte, error) {
+// ReadPacket receives one UDP datagram, decrypts it, and copies the plaintext into buf.
+// Returns the number of plaintext bytes copied.
+func (c *Conn) ReadPacket(buf []byte) (int, error) {
 	c.readMu.Lock()
 	defer c.readMu.Unlock()
 
@@ -69,19 +71,25 @@ func (c *Conn) ReadPacket() ([]byte, error) {
 	if c.isVirtual {
 		d, ok := <-c.incoming
 		if !ok {
-			return nil, fmt.Errorf("connection closed")
+			return 0, fmt.Errorf("connection closed")
 		}
 		datagram = d
 	} else {
-		buf := make([]byte, 65535)
-		n, err := c.rawConn.Read(buf)
+		tmp := common.GetBuffer()
+		n, err := c.rawConn.Read(*tmp)
 		if err != nil {
-			return nil, err
+			common.PutBuffer(tmp)
+			return 0, err
 		}
-		datagram = buf[:n]
+		datagram = (*tmp)[:n]
+		defer common.PutBuffer(tmp)
 	}
 
-	return c.keypair.Receive.Open(datagram)
+	plain, err := c.keypair.Receive.Open(datagram)
+	if err != nil {
+		return 0, err
+	}
+	return copy(buf, plain), nil
 }
 
 func (c *Conn) Close() error {

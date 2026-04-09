@@ -224,12 +224,14 @@ func (o *Operator) routineDataRecv() {
 		}
 
 		// Wrap with data prefix before sending to local client
-		prefixed := make([]byte, 1+len(df.Packet))
+		pBuf := common.GetBuffer()
+		prefixed := (*pBuf)[:1+len(df.Packet)]
 		prefixed[0] = common.PacketData
 		copy(prefixed[1:], df.Packet)
 
 		o.Stats.Recorder.RecordTx(target.SessionID, uint64(len(df.Packet)))
 		target.Conn.WritePacket(prefixed)
+		common.PutBuffer(pBuf)
 		o.framePool.Put(df)
 	}
 }
@@ -313,6 +315,9 @@ func (o *Operator) routineReadFromClient(cp *ClientPeer) {
 		log.Infof("Client %x disconnected", cp.SessionID)
 	}()
 
+	bufPtr := common.GetBuffer()
+	defer common.PutBuffer(bufPtr)
+	readBuf := *bufPtr
 	for {
 		select {
 		case <-o.ctx.Done():
@@ -320,14 +325,15 @@ func (o *Operator) routineReadFromClient(cp *ClientPeer) {
 		default:
 		}
 
-		data, err := cp.Conn.ReadPacket()
+		n, err := cp.Conn.ReadPacket(readBuf)
 		if err != nil {
 			log.Errorf("Read from client %x: %v", cp.SessionID, err)
 			return
 		}
-		if len(data) < 1 {
+		if n < 1 {
 			continue
 		}
+		data := readBuf[:n]
 
 		// Every packet (data or keepalive) refreshes the session
 		cp.Touch()

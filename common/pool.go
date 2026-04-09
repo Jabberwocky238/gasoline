@@ -2,12 +2,12 @@ package common
 
 import "sync"
 
-const MaxMTU = 2000
+const MaxPacketSize = 8192
 
 // PacketPool is a sync.Pool for reusable packet buffers.
 var PacketPool = sync.Pool{
 	New: func() any {
-		buf := make([]byte, MaxMTU)
+		buf := make([]byte, MaxPacketSize)
 		return &buf
 	},
 }

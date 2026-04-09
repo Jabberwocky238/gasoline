@@ -100,11 +100,12 @@ func TestTCPHandshakeAndPacket(t *testing.T) {
 
 	// Client → Server
 	wg.Add(1)
-	var received []byte
+	recvBuf := make([]byte, 65535)
+	var recvN int
 	var recvErr error
 	go func() {
 		defer wg.Done()
-		received, recvErr = serverConn.ReadPacket()
+		recvN, recvErr = serverConn.ReadPacket(recvBuf)
 	}()
 
 	if err := clientConn.WritePacket(testPacket); err != nil {
@@ -114,8 +115,8 @@ func TestTCPHandshakeAndPacket(t *testing.T) {
 	if recvErr != nil {
 		t.Fatalf("ReadPacket: %v", recvErr)
 	}
-	if !bytes.Equal(received, testPacket) {
-		t.Errorf("packet mismatch:\n  got:  %x\n  want: %x", received, testPacket)
+	if !bytes.Equal(recvBuf[:recvN], testPacket) {
+		t.Errorf("packet mismatch:\n  got:  %x\n  want: %x", recvBuf[:recvN], testPacket)
 	}
 
 	// Server → Client
@@ -132,7 +133,7 @@ func TestTCPHandshakeAndPacket(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		received, recvErr = clientConn.ReadPacket()
+		recvN, recvErr = clientConn.ReadPacket(recvBuf)
 	}()
 
 	if err := serverConn.WritePacket(replyPacket); err != nil {
@@ -142,8 +143,8 @@ func TestTCPHandshakeAndPacket(t *testing.T) {
 	if recvErr != nil {
 		t.Fatalf("ReadPacket reply: %v", recvErr)
 	}
-	if !bytes.Equal(received, replyPacket) {
-		t.Errorf("reply mismatch:\n  got:  %x\n  want: %x", received, replyPacket)
+	if !bytes.Equal(recvBuf[:recvN], replyPacket) {
+		t.Errorf("reply mismatch:\n  got:  %x\n  want: %x", recvBuf[:recvN], replyPacket)
 	}
 }
 
@@ -185,13 +186,14 @@ func TestTCPMultiplePackets(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		buf := make([]byte, 65535)
 		for i := 0; i < count; i++ {
-			data, err := sConn.ReadPacket()
+			n, err := sConn.ReadPacket(buf)
 			if err != nil {
 				t.Errorf("ReadPacket %d: %v", i, err)
 				return
 			}
-			if len(data) != 64 || data[0] != byte(i) {
+			if n != 64 || buf[0] != byte(i) {
 				t.Errorf("packet %d: unexpected content", i)
 				return
 			}

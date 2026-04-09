@@ -9,7 +9,7 @@ import "github.com/jabberwocky238/gasoline/protocol"
 //   - UDP: one datagram = one packet (no framing needed)
 //   - TCP/QUIC: length-prefix framing over the byte stream
 type Conn interface {
-	ReadPacket() ([]byte, error)
+	ReadPacket(buf []byte) (int, error)
 	WritePacket(data []byte) error
 	Close() error
 	RemoteAddr() string

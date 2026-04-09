@@ -100,13 +100,14 @@ func TestQUICConnWriteReadPacket(t *testing.T) {
 
 	// Client → Server
 	var wg sync.WaitGroup
-	var received []byte
+	recvBuf := make([]byte, 65535)
+	var recvN int
 	var recvErr error
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		received, recvErr = serverConn.ReadPacket()
+		recvN, recvErr = serverConn.ReadPacket(recvBuf)
 	}()
 
 	if err := clientConn.WritePacket(testPacket); err != nil {
@@ -117,8 +118,8 @@ func TestQUICConnWriteReadPacket(t *testing.T) {
 	if recvErr != nil {
 		t.Fatalf("ReadPacket: %v", recvErr)
 	}
-	if !bytes.Equal(received, testPacket) {
-		t.Errorf("packet mismatch:\n  got:  %x\n  want: %x", received, testPacket)
+	if !bytes.Equal(recvBuf[:recvN], testPacket) {
+		t.Errorf("packet mismatch:\n  got:  %x\n  want: %x", recvBuf[:recvN], testPacket)
 	}
 
 	// Server → Client
@@ -127,7 +128,7 @@ func TestQUICConnWriteReadPacket(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		received, recvErr = clientConn.ReadPacket()
+		recvN, recvErr = clientConn.ReadPacket(recvBuf)
 	}()
 
 	if err := serverConn.WritePacket(replyPacket); err != nil {
@@ -138,8 +139,8 @@ func TestQUICConnWriteReadPacket(t *testing.T) {
 	if recvErr != nil {
 		t.Fatalf("ReadPacket reply: %v", recvErr)
 	}
-	if !bytes.Equal(received, replyPacket) {
-		t.Errorf("reply mismatch: len got=%d want=%d", len(received), len(replyPacket))
+	if !bytes.Equal(recvBuf[:recvN], replyPacket) {
+		t.Errorf("reply mismatch: len got=%d want=%d", recvN, len(replyPacket))
 	}
 }
 
@@ -164,14 +165,15 @@ func TestQUICConnMultiplePackets(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		buf := make([]byte, 65535)
 		for i := 0; i < count; i++ {
-			data, err := serverConn.ReadPacket()
+			n, err := serverConn.ReadPacket(buf)
 			if err != nil {
 				t.Errorf("ReadPacket %d: %v", i, err)
 				return
 			}
-			if len(data) != 64 || data[0] != byte(i) {
-				t.Errorf("packet %d: bad content (len=%d, first=%d)", i, len(data), data[0])
+			if n != 64 || buf[0] != byte(i) {
+				t.Errorf("packet %d: bad content (len=%d, first=%d)", i, n, buf[0])
 				return
 			}
 		}

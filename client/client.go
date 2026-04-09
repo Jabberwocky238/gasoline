@@ -31,11 +31,11 @@ type Client struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	cfg           *common.ClientConfig
-	dialer        transport.Dialer
-	tun           *tunPkg.Tun
-	conn          transport.Conn
-	tunOpener     TunOpener
+	cfg            *common.ClientConfig
+	dialer         transport.Dialer
+	tun            *tunPkg.Tun
+	conn           transport.Conn
+	tunOpener      TunOpener
 	socks5Listener net.Listener
 }
 
@@ -162,6 +162,9 @@ func (c *Client) routineTUNToConn() {
 func (c *Client) routineConnToTUN() {
 	defer log.Debugf("Routine: Conn→TUN stopped")
 
+	buf := common.GetBuffer()
+	defer common.PutBuffer(buf)
+
 	for {
 		select {
 		case <-c.ctx.Done():
@@ -169,18 +172,19 @@ func (c *Client) routineConnToTUN() {
 		default:
 		}
 
-		data, err := c.conn.ReadPacket()
+		n, err := c.conn.ReadPacket(*buf)
 		if err != nil {
 			log.Errorf("Conn read: %v", err)
 			return
 		}
-		if len(data) < 1 {
+		if n < 1 {
 			continue
 		}
+		data := (*buf)[:n]
 
 		switch data[0] {
 		case common.PacketData:
-			if len(data) < 2 {
+			if n < 2 {
 				continue
 			}
 			if _, err := c.tun.Write(data[1:]); err != nil {

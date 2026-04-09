@@ -6,6 +6,7 @@ import (
 	"net"
 	"sync"
 
+	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol"
 )
 
@@ -44,25 +45,33 @@ func (c *Conn) WritePacket(data []byte) error {
 	return err
 }
 
-// ReadPacket reads one framed message, decrypts it, and returns the plaintext IP packet.
-func (c *Conn) ReadPacket() ([]byte, error) {
+// ReadPacket reads one framed message, decrypts it, and copies the plaintext into buf.
+// Returns the number of plaintext bytes copied.
+func (c *Conn) ReadPacket(buf []byte) (int, error) {
 	c.readMu.Lock()
 	defer c.readMu.Unlock()
 
 	// Read frame length
 	var header [2]byte
 	if _, err := io.ReadFull(c.raw, header[:]); err != nil {
-		return nil, err
+		return 0, err
 	}
 	frameLen := int(binary.LittleEndian.Uint16(header[:]))
 
-	// Read encrypted payload
-	encrypted := make([]byte, frameLen)
+	// Read encrypted payload into pooled buffer
+	tmp := common.GetBuffer()
+	encrypted := (*tmp)[:frameLen]
 	if _, err := io.ReadFull(c.raw, encrypted); err != nil {
-		return nil, err
+		common.PutBuffer(tmp)
+		return 0, err
 	}
 
-	return c.keypair.Receive.Open(encrypted)
+	plain, err := c.keypair.Receive.Open(encrypted)
+	common.PutBuffer(tmp)
+	if err != nil {
+		return 0, err
+	}
+	return copy(buf, plain), nil
 }
 
 func (c *Conn) Close() error      { return c.raw.Close() }

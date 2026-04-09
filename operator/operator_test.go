@@ -28,12 +28,12 @@ func newMockConn(addr string) *mockConn {
 	}
 }
 
-func (c *mockConn) ReadPacket() ([]byte, error) {
+func (c *mockConn) ReadPacket(buf []byte) (int, error) {
 	pkt, ok := <-c.incoming
 	if !ok {
-		return nil, fmt.Errorf("mock conn closed")
+		return 0, fmt.Errorf("mock conn closed")
 	}
-	return pkt, nil
+	return copy(buf, pkt), nil
 }
 
 func (c *mockConn) WritePacket(data []byte) error {

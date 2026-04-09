@@ -3,6 +3,8 @@ package operator
 import (
 	"net/netip"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/jabberwocky238/gasoline/transport"
 )
@@ -15,6 +17,18 @@ type ClientPeer struct {
 	OperatorID OperatorUUIDType // UUID of the operator this client is on
 	IP         netip.Prefix     // assigned IP
 	AllowedIPs []netip.Prefix   // allowed IP ranges for this client
+
+	// LastActive is the UnixNano timestamp of the last packet received from this client.
+	// Updated atomically by routineReadFromClient.
+	LastActive atomic.Int64
+}
+
+func (cp *ClientPeer) Touch() {
+	cp.LastActive.Store(time.Now().UnixNano())
+}
+
+func (cp *ClientPeer) IdleDuration() time.Duration {
+	return time.Duration(time.Now().UnixNano() - cp.LastActive.Load())
 }
 
 // ContainsIP reports whether addr falls within this client's AllowedIPs.

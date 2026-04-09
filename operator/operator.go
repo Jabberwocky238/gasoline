@@ -158,6 +158,9 @@ func (o *Operator) Start() error {
 		go o.routineAcceptClients()
 	}
 
+	// Session reaper: periodically kick idle clients
+	go o.routineReaper()
+
 	if err := o.Stats.Start(); err != nil {
 		return fmt.Errorf("stats: %w", err)
 	}
@@ -224,8 +227,13 @@ func (o *Operator) routineDataRecv() {
 			continue
 		}
 
+		// Wrap with data prefix before sending to local client
+		prefixed := make([]byte, 1+len(df.Packet))
+		prefixed[0] = common.PacketData
+		copy(prefixed[1:], df.Packet)
+
 		o.Stats.Recorder.RecordTx(target.SessionID, uint64(len(df.Packet)))
-		target.Conn.WritePacket(df.Packet)
+		target.Conn.WritePacket(prefixed)
 		o.framePool.Put(df)
 	}
 }
@@ -252,9 +260,14 @@ func (o *Operator) forwardToRemote(srcVNetID [16]byte, dstAddr netip.Addr, packe
 
 	df := o.framePool.Get()
 	wire := df.Encode(srcVNetID, packet)
-	_, err = o.dataConn.WriteToUDP(wire, udpAddr)
+	n, err := o.dataConn.WriteToUDP(wire, udpAddr)
 	o.framePool.Put(df)
-	return err == nil
+	if err != nil {
+		log.Errorf("forwardToRemote WriteToUDP: %v", err)
+		return false
+	}
+	log.Debugf("Forwarded %d bytes to %s for %s", n, udpAddr, dstAddr)
+	return true
 }
 
 // --------------- Client data plane ---------------
@@ -284,6 +297,7 @@ func (o *Operator) routineAcceptClients() {
 			AllowedIPs: result.Config.AllowedRanges,
 		}
 
+		cp.Touch()
 		o.clients.Add(cp)
 		o.Stats.Recorder.Register(cp.SessionID, cp.VNetID, "", conn.RemoteAddr())
 		o.Ctrl.BroadcastSessionSync(cp.SessionID, cp.VNetID, cp.IP.Addr())
@@ -315,16 +329,39 @@ func (o *Operator) routineReadFromClient(cp *ClientPeer) {
 			log.Errorf("Read from client %x: %v", cp.SessionID, err)
 			return
 		}
-		if len(data) == 0 {
+		if len(data) < 1 {
 			continue
 		}
 
-		o.Stats.Recorder.RecordRx(cp.SessionID, uint64(len(data)))
-		if !o.Stats.RateLimiter.Allow(cp.VNetID, uint64(len(data))) {
+		// Every packet (data or keepalive) refreshes the session
+		cp.Touch()
+
+		pktType := data[0]
+		payload := data[1:]
+
+		switch pktType {
+		case common.PacketKeepalive:
+			log.Debugf("Keepalive from client %x", cp.SessionID)
+			continue
+
+		case common.PacketData:
+			// fall through to routing
+
+		default:
+			log.Debugf("Unknown packet type 0x%02x from client %x", pktType, cp.SessionID)
 			continue
 		}
 
-		dstIP, err := packetDstIP(data)
+		if len(payload) == 0 {
+			continue
+		}
+
+		o.Stats.Recorder.RecordRx(cp.SessionID, uint64(len(payload)))
+		if !o.Stats.RateLimiter.Allow(cp.VNetID, uint64(len(payload))) {
+			continue
+		}
+
+		dstIP, err := packetDstIP(payload)
 		if err != nil {
 			continue
 		}
@@ -333,19 +370,48 @@ func (o *Operator) routineReadFromClient(cp *ClientPeer) {
 			continue
 		}
 
-		// Local delivery
+		// Local delivery — add data prefix before sending to peer client
 		if target := o.clients.LookupByIP(dstAddr); target != nil {
-			o.Stats.Recorder.RecordTx(target.SessionID, uint64(len(data)))
-			target.Conn.WritePacket(data)
+			o.Stats.Recorder.RecordTx(target.SessionID, uint64(len(payload)))
+			target.Conn.WritePacket(data) // data already has prefix
 			continue
 		}
 
-		// Remote forwarding via UDP
-		if o.dataConn != nil && o.forwardToRemote(cp.VNetID, dstAddr, data) {
+		// Remote forwarding via UDP (inter-operator, no prefix — raw IP)
+		if o.dataConn != nil && o.forwardToRemote(cp.VNetID, dstAddr, payload) {
 			continue
 		}
 
 		log.Debugf("No route for %s from client %x", dstAddr, cp.SessionID)
+	}
+}
+
+// routineReaper periodically scans for idle clients and disconnects them.
+func (o *Operator) routineReaper() {
+	timeout := time.Duration(common.KeepaliveTimeout) * time.Second
+	ticker := time.NewTicker(timeout / 2)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-o.ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		o.clients.mu.RLock()
+		var stale []*ClientPeer
+		for _, cp := range o.clients.peers {
+			if cp.IdleDuration() > timeout {
+				stale = append(stale, cp)
+			}
+		}
+		o.clients.mu.RUnlock()
+
+		for _, cp := range stale {
+			log.Warnf("Reaping idle client %x (idle %v)", cp.SessionID, cp.IdleDuration().Round(time.Second))
+			cp.Conn.Close() // triggers routineReadFromClient to exit and clean up
+		}
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/netip"
 	"sync"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 
@@ -14,24 +15,16 @@ import (
 )
 
 // TunOpener allows the platform (e.g. Android VpnService) to create TUN devices.
-// When set, the client uses this instead of creating TUN directly via sing-tun.
 type TunOpener interface {
-	// OpenTun creates a TUN device and returns its file descriptor.
 	OpenTun(name string, address string, mtu int32) (int32, error)
 }
 
 type Config struct {
-	// Server endpoint to dial, e.g. "1.2.3.4:443"
-	Endpoint string
-	// VNetID is the virtual network this client belongs to
-	VNetID [16]byte
-	// SessionID is this client's unique session identifier
+	Endpoint  string
+	VNetID    [16]byte
 	SessionID [16]byte
-	// TUNName is the name of the TUN device (default: gtun-XXXX)
-	TUNName string
-	// Dialer creates the transport connection (TCP/UDP/QUIC)
-	// Auth and handshake are handled internally by the Dialer.
-	Dialer transport.Dialer
+	TUNName   string
+	Dialer    transport.Dialer
 }
 
 type Client struct {
@@ -45,8 +38,6 @@ type Client struct {
 	tunOpener TunOpener
 }
 
-// SetPlatformTunOpener sets a platform-specific TUN opener (e.g. Android VpnService).
-// Must be called before Start().
 func (c *Client) SetPlatformTunOpener(opener TunOpener) {
 	c.tunOpener = opener
 }
@@ -60,12 +51,10 @@ func New(cfg *Config) *Client {
 	}
 }
 
-// Start dials the server, performs handshake, creates TUN, and starts packet forwarding.
 func (c *Client) Start() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// 1. Dial + handshake
 	conn, result, err := c.cfg.Dialer.Dial(c.cfg.Endpoint)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
@@ -75,18 +64,16 @@ func (c *Client) Start() error {
 	cfg := &result.Config
 	log.Infof("Handshake OK: assigned IP %s, allowed %v", cfg.IPPrefix.String(), cfg.AllowedRanges)
 
-	// 2. Create TUN with assigned IP using the network prefix length from AllowedRanges
-	tunAddr := cfg.IPPrefix // e.g. 10.0.0.2/32
+	tunAddr := cfg.IPPrefix
 	for _, r := range cfg.AllowedRanges {
 		if r.Contains(cfg.IPPrefix.Addr()) {
-			tunAddr = netip.PrefixFrom(cfg.IPPrefix.Addr(), r.Bits()) // e.g. 10.0.0.2/24
+			tunAddr = netip.PrefixFrom(cfg.IPPrefix.Addr(), r.Bits())
 			break
 		}
 	}
 
 	var tun *tunPkg.Tun
 	if c.tunOpener != nil {
-		// Platform-provided TUN (e.g. Android VpnService)
 		fd, err := c.tunOpener.OpenTun(c.cfg.TUNName, tunAddr.String(), int32(tunPkg.DefaultMTU))
 		if err != nil {
 			conn.Close()
@@ -98,7 +85,6 @@ func (c *Client) Start() error {
 			return fmt.Errorf("wrap TUN fd: %w", err)
 		}
 	} else {
-		// Direct TUN creation (desktop: Windows/Linux/macOS)
 		var err error
 		tun, err = tunPkg.New(c.cfg.TUNName, tunAddr.String())
 		if err != nil {
@@ -114,17 +100,16 @@ func (c *Client) Start() error {
 
 	log.Infof("TUN interface up: %s", cfg.IPPrefix.String())
 
-	// 3. Start bidirectional packet forwarding
 	go c.routineTUNToConn()
 	go c.routineConnToTUN()
+	go c.routineKeepalive()
 
 	return nil
 }
 
-// routineTUNToConn reads IP packets from TUN and sends them to the server.
+// routineTUNToConn reads IP packets from TUN and sends them with a data prefix.
 func (c *Client) routineTUNToConn() {
 	defer log.Debugf("Routine: TUN→Conn stopped")
-	log.Debugf("Routine: TUN→Conn started")
 
 	for {
 		select {
@@ -134,7 +119,7 @@ func (c *Client) routineTUNToConn() {
 		}
 
 		buf := common.GetBuffer()
-		n, err := c.tun.Read(*buf)
+		n, err := c.tun.Read((*buf)[1:]) // reserve buf[0] for type prefix
 		if err != nil {
 			common.PutBuffer(buf)
 			log.Errorf("TUN read: %v", err)
@@ -145,8 +130,8 @@ func (c *Client) routineTUNToConn() {
 			continue
 		}
 
-		// Send packet to server
-		if err := c.conn.WritePacket((*buf)[:n]); err != nil {
+		(*buf)[0] = common.PacketData
+		if err := c.conn.WritePacket((*buf)[:1+n]); err != nil {
 			common.PutBuffer(buf)
 			log.Errorf("Conn write: %v", err)
 			return
@@ -155,10 +140,10 @@ func (c *Client) routineTUNToConn() {
 	}
 }
 
-// routineConnToTUN reads decrypted packets from the server and writes them to TUN.
+// routineConnToTUN reads packets from the server, strips the type prefix,
+// and writes IP packets to TUN.
 func (c *Client) routineConnToTUN() {
 	defer log.Debugf("Routine: Conn→TUN stopped")
-	log.Debugf("Routine: Conn→TUN started")
 
 	for {
 		select {
@@ -172,14 +157,42 @@ func (c *Client) routineConnToTUN() {
 			log.Errorf("Conn read: %v", err)
 			return
 		}
-		if len(data) == 0 {
+		if len(data) < 1 {
 			continue
 		}
 
-		if _, err := c.tun.Write(data); err != nil {
-			log.Errorf("TUN write: %v", err)
+		switch data[0] {
+		case common.PacketData:
+			if len(data) < 2 {
+				continue
+			}
+			if _, err := c.tun.Write(data[1:]); err != nil {
+				log.Errorf("TUN write: %v", err)
+				return
+			}
+		case common.PacketKeepalive:
+			// Server echoed keepalive — nothing to do
+		}
+	}
+}
+
+// routineKeepalive sends periodic heartbeats to keep the session alive on the operator.
+func (c *Client) routineKeepalive() {
+	ticker := time.NewTicker(time.Duration(common.KeepaliveInterval) * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		if err := c.conn.WritePacket([]byte{common.PacketKeepalive}); err != nil {
+			log.Errorf("Keepalive send failed: %v", err)
 			return
 		}
+		log.Debugf("Keepalive sent")
 	}
 }
 

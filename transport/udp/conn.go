@@ -100,19 +100,6 @@ func (c *Conn) RemoteAddr() string {
 	return c.remoteAddr.String()
 }
 
-// deliver routes a datagram into this virtual conn (called by listener muxer).
-func (c *Conn) deliver(data []byte) {
-	if c.closed {
-		return
-	}
-	cp := make([]byte, len(data))
-	copy(cp, data)
-	select {
-	case c.incoming <- cp:
-	default:
-	}
-}
-
 // --------------- Stream adapter for handshake phase ---------------
 
 // streamAdapter provides io.ReadWriter over UDP datagrams

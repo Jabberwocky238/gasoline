@@ -1,6 +1,7 @@
 package ctrl
 
 import (
+	"net"
 	"sync"
 
 	"google.golang.org/grpc"
@@ -8,18 +9,21 @@ import (
 
 // Peer represents a remote operator's gRPC client connection.
 type Peer struct {
-	UUID   [16]byte
-	Addr   string // external address
-	conn   *grpc.ClientConn
-	Client OperatorServiceClient
+	UUID    [16]byte
+	Addr    string // external address
+	UDPAddr *net.UDPAddr // cached resolved UDP address for data plane
+	conn    *grpc.ClientConn
+	Client  OperatorServiceClient
 }
 
 func NewPeer(uuid [16]byte, addr string, conn *grpc.ClientConn) *Peer {
+	udpAddr, _ := net.ResolveUDPAddr("udp", addr)
 	return &Peer{
-		UUID:   uuid,
-		Addr:   addr,
-		conn:   conn,
-		Client: NewOperatorServiceClient(conn),
+		UUID:    uuid,
+		Addr:    addr,
+		UDPAddr: udpAddr,
+		conn:    conn,
+		Client:  NewOperatorServiceClient(conn),
 	}
 }
 

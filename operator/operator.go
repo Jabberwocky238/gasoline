@@ -27,10 +27,6 @@ import (
 	"golang.org/x/net/ipv6"
 )
 
-type SessionIDType = [common.SessionIDLen]byte
-type OperatorUUIDType = [common.OperatorUUIDLen]byte
-type VNetIDType = [common.VNetIDLen]byte
-
 type Operator struct {
 	ctx    context.Context
 	cancel context.CancelFunc

@@ -6,17 +6,18 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/transport"
 )
 
 // ClientPeer represents a client connected to the cluster.
 type ClientPeer struct {
 	Conn       transport.Conn
-	SessionID  SessionIDType    // unique ID for this session
-	VNetID     VNetIDType       // virtual network this client belongs to
-	OperatorID OperatorUUIDType // UUID of the operator this client is on
-	IP         netip.Prefix     // assigned IP
-	AllowedIPs []netip.Prefix   // allowed IP ranges for this client
+	SessionID  [common.SessionIDLen]byte    // unique ID for this session
+	VNetID     [common.VNetIDLen]byte       // virtual network this client belongs to
+	OperatorID [common.OperatorUUIDLen]byte // UUID of the operator this client is on
+	IP         netip.Prefix                 // assigned IP
+	AllowedIPs []netip.Prefix               // allowed IP ranges for this client
 
 	// LastActive is the UnixNano timestamp of the last packet received from this client.
 	// Updated atomically by routineReadFromClient.

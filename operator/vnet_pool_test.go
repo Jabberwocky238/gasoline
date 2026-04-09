@@ -4,6 +4,8 @@ import (
 	"net/netip"
 	"sync"
 	"testing"
+
+	"github.com/jabberwocky238/gasoline/common"
 )
 
 // TestVNetPoolRecycle allocates 100 IPs, releases 90, repeats 10 times
@@ -14,7 +16,7 @@ func TestVNetPoolRecycle(t *testing.T) {
 		t.Fatalf("parse: %v", err)
 	}
 
-	var vnetID VNetIDType
+	var vnetID [common.VNetIDLen]byte
 	vnetID[15] = 100
 	vnetID[14] = 0
 	// EncodeVNetID(100) puts 100 in the last 8 bytes big-endian
@@ -169,7 +171,7 @@ func TestVNetPoolConcurrentOperators(t *testing.T) {
 		}
 	}
 
-	var vnetID VNetIDType
+	var vnetID [common.VNetIDLen]byte
 	vnetID[15] = 200
 
 	type result struct {
@@ -236,7 +238,7 @@ func TestVNetPoolConcurrentAllocRelease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var vnetID VNetIDType
+	var vnetID [common.VNetIDLen]byte
 	vnetID[15] = 1
 	pool, _ := pools.Get(vnetID)
 

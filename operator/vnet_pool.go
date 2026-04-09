@@ -7,11 +7,13 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/jabberwocky238/gasoline/common"
 )
 
 // VNetPool manages IP allocation for a single VNet.
 type VNetPool struct {
-	VNetID   VNetIDType
+	VNetID   [common.VNetIDLen]byte
 	Prefix   netip.Prefix
 	baseAddr netip.Addr
 
@@ -21,7 +23,6 @@ type VNetPool struct {
 	inUse   map[uint32]bool // all known in-use sequences (local + remote)
 	maxHost uint32          // max usable host count
 }
-
 
 // AllocateIP returns the next available IP in this pool.
 // Wraps around the pool to find a free slot.
@@ -117,13 +118,13 @@ func (p *VNetPool) ipToSeq(ip netip.Addr) uint32 {
 // --------------- VNetPoolMap ---------------
 
 type VNetPoolMap struct {
-	pools map[VNetIDType]*VNetPool
+	pools map[[common.VNetIDLen]byte]*VNetPool
 }
 
 // ParseVNetPools parses "vnetID:CIDR;vnetID:CIDR;..." into a VNetPoolMap.
 // seed is used to spread starting offsets across operators (typically UUID bytes).
 func ParseVNetPools(network string, seed uint32) (*VNetPoolMap, error) {
-	m := &VNetPoolMap{pools: make(map[VNetIDType]*VNetPool)}
+	m := &VNetPoolMap{pools: make(map[[common.VNetIDLen]byte]*VNetPool)}
 
 	for _, entry := range strings.Split(network, ";") {
 		entry = strings.TrimSpace(entry)
@@ -138,9 +139,9 @@ func ParseVNetPools(network string, seed uint32) (*VNetPoolMap, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid vnet ID %q: %w", parts[0], err)
 		}
-		var vnetIDBytes [16]byte
+		var vnetIDBytes [common.VNetIDLen]byte
 		binary.BigEndian.PutUint64(vnetIDBytes[8:], vnetNum)
-		vnetID := VNetIDType(vnetIDBytes)
+		vnetID := vnetIDBytes
 
 		prefix, err := netip.ParsePrefix(parts[1])
 		if err != nil {
@@ -184,13 +185,13 @@ func ParseVNetPools(network string, seed uint32) (*VNetPoolMap, error) {
 }
 
 // Get returns a pool by VNetID.
-func (m *VNetPoolMap) Get(vnetID VNetIDType) (*VNetPool, bool) {
+func (m *VNetPoolMap) Get(vnetID [common.VNetIDLen]byte) (*VNetPool, bool) {
 	p, ok := m.pools[vnetID]
 	return p, ok
 }
 
 // All returns all pools for iteration.
-func (m *VNetPoolMap) All() map[VNetIDType]*VNetPool {
+func (m *VNetPoolMap) All() map[[common.VNetIDLen]byte]*VNetPool {
 	return m.pools
 }
 
@@ -200,4 +201,3 @@ func addToAddr(base netip.Addr, offset uint32) netip.Addr {
 	val += offset
 	return netip.AddrFrom4([4]byte{byte(val >> 24), byte(val >> 16), byte(val >> 8), byte(val)})
 }
-

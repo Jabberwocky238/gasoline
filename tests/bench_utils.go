@@ -3,6 +3,8 @@ package tests
 import (
 	"fmt"
 	"net/netip"
+	"os"
+	"runtime/pprof"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -105,6 +107,20 @@ func runTransfer(t *testing.T, label string, connA, connB transport.Conn, srcIP,
 	wire := make([]byte, 1+len(ipPkt))
 	wire[0] = common.PacketData
 	copy(wire[1:], ipPkt)
+
+	// CPU profile — output to project root
+	profilePath := fmt.Sprintf("../cpu_%s.prof", label)
+	f, err := os.Create(profilePath)
+	if err != nil {
+		t.Fatalf("create profile: %v", err)
+	}
+	defer f.Close()
+	pprof.StartCPUProfile(f)
+	defer func() {
+		pprof.StopCPUProfile()
+		t.Logf("CPU profile saved to %s", profilePath)
+		t.Logf("  View: go tool pprof -http=:8080 %s", profilePath)
+	}()
 
 	var rxTotal atomic.Int64
 	var wg sync.WaitGroup

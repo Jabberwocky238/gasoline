@@ -43,7 +43,6 @@ type Operator struct {
 	// UDP data plane for inter-operator packet forwarding.
 	dataConn  *net.UDPConn
 	framePool *FramePool
-	sendQ     *sendQueue
 }
 
 func New(cfg *common.OperatorConfig) (*Operator, error) {
@@ -159,8 +158,6 @@ func (o *Operator) Start() error {
 			return fmt.Errorf("data udp listen on %s: %w", grpcAddr, err)
 		}
 		o.framePool = NewFramePool(256)
-		o.sendQ = newSendQueue(o.dataConn, 4096)
-		go o.sendQ.Run()
 		o.log.Infof("Data plane UDP listening on %s", o.dataConn.LocalAddr())
 		go o.routineDataRecv()
 	}
@@ -182,9 +179,6 @@ func (o *Operator) Start() error {
 func (o *Operator) Close() error {
 	o.cancel()
 	o.Ctrl.Stop()
-	if o.sendQ != nil {
-		o.sendQ.Close()
-	}
 	if o.dataConn != nil {
 		o.dataConn.Close()
 	}
@@ -272,14 +266,11 @@ func (o *Operator) forwardToRemote(srcVNetID [16]byte, dstAddr netip.Addr, packe
 
 	df := o.framePool.Get()
 	wire := df.Encode(srcVNetID, packet)
-	// Copy into pooled buffer since df is recycled immediately
-	buf := common.GetBuffer()
-	n := copy(*buf, wire)
+	_, err := o.dataConn.WriteToUDP(wire, peer.UDPAddr)
 	o.framePool.Put(df)
-
-	if !o.sendQ.Enqueue(peer.UDPAddr, (*buf)[:n], buf) {
-		common.PutBuffer(buf)
-		o.log.Debugf("Send queue full, dropped packet for %s", dstAddr)
+	if err != nil {
+		o.log.Errorf("forwardToRemote WriteToUDP: %v", err)
+		return false
 	}
 	return true
 }

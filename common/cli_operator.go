@@ -50,10 +50,10 @@ func RegisterOperatorFlags(fs *flag.FlagSet) func() *OperatorConfig {
 				*statsAddr = cfg.StatsAddr
 			}
 			for _, entry := range cfg.Network {
-				if entry.Auth != "" {
+				if entry.Auth != nil && entry.Auth.String() != "" {
 					var vnetID [16]byte
 					binary.BigEndian.PutUint64(vnetID[8:], entry.VNet)
-					result.NetworkAuth[vnetID] = entry.Auth
+					result.NetworkAuth[vnetID] = entry.Auth.String()
 				}
 			}
 		}

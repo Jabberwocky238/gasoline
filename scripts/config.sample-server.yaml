@@ -15,4 +15,11 @@ network:
     # auth: "noauth"  # inherits global default
   - vnet: 1000
     cidr: "192.168.200.0/24"
-    auth: "hmac:client1:mysecret;client2:othersecret"
+    # auth: "hmac:client1:mysecret;client2:othersecret"
+    auth:
+      - type: hmac
+        clients:
+          - name: client1
+            secret: mysecret
+          - name: client2
+            secret: othersecret

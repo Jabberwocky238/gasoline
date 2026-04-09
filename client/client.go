@@ -10,21 +10,18 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/jabberwocky238/gasoline/common"
+	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/transport"
+	"github.com/jabberwocky238/gasoline/transport/quic"
+	"github.com/jabberwocky238/gasoline/transport/tcp"
+	"github.com/jabberwocky238/gasoline/transport/udp"
 	tunPkg "github.com/jabberwocky238/gasoline/tun"
+	singTun "github.com/sagernet/sing-tun"
 )
 
 // TunOpener allows the platform (e.g. Android VpnService) to create TUN devices.
 type TunOpener interface {
-	OpenTun(name string, address string, mtu int32) (int32, error)
-}
-
-type Config struct {
-	Endpoint  string
-	VNetID    [16]byte
-	SessionID [16]byte
-	TUNName   string
-	Dialer    transport.Dialer
+	OpenTun(options singTun.Options) (int32, error)
 }
 
 type Client struct {
@@ -32,7 +29,8 @@ type Client struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	cfg       *Config
+	cfg       *common.ClientConfig
+	dialer    transport.Dialer
 	tun       *tunPkg.Tun
 	conn      transport.Conn
 	tunOpener TunOpener
@@ -42,39 +40,52 @@ func (c *Client) SetPlatformTunOpener(opener TunOpener) {
 	c.tunOpener = opener
 }
 
-func New(cfg *Config) *Client {
+func New(cfg *common.ClientConfig) (*Client, error) {
+	clientAuth, err := auth.ParseClientAuth(cfg.AuthStr, []byte("default-fingerprint"))
+	if err != nil {
+		return nil, fmt.Errorf("auth: %w", err)
+	}
+
+	var sessionID [16]byte
+	dialer, err := createDialer(cfg.Transport, sessionID, cfg.VNetID, clientAuth)
+	if err != nil {
+		return nil, fmt.Errorf("dialer: %w", err)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Client{
 		cfg:    cfg,
+		dialer: dialer,
 		ctx:    ctx,
 		cancel: cancel,
-	}
+	}, nil
 }
 
 func (c *Client) Start() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	conn, result, err := c.cfg.Dialer.Dial(c.cfg.Endpoint)
+	conn, result, err := c.dialer.Dial(c.cfg.Endpoint)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
 	c.conn = conn
 
-	cfg := &result.Config
-	log.Infof("Handshake OK: assigned IP %s, allowed %v", cfg.IPPrefix.String(), cfg.AllowedRanges)
+	hsCfg := &result.Config
+	log.Infof("Handshake OK: assigned IP %s, allowed %v", hsCfg.IPPrefix.String(), hsCfg.AllowedRanges)
 
-	tunAddr := cfg.IPPrefix
-	for _, r := range cfg.AllowedRanges {
-		if r.Contains(cfg.IPPrefix.Addr()) {
-			tunAddr = netip.PrefixFrom(cfg.IPPrefix.Addr(), r.Bits())
+	tunAddr := hsCfg.IPPrefix
+	for _, r := range hsCfg.AllowedRanges {
+		if r.Contains(hsCfg.IPPrefix.Addr()) {
+			tunAddr = netip.PrefixFrom(hsCfg.IPPrefix.Addr(), r.Bits())
 			break
 		}
 	}
 
 	var tun *tunPkg.Tun
 	if c.tunOpener != nil {
-		fd, err := c.tunOpener.OpenTun(c.cfg.TUNName, tunAddr.String(), int32(tunPkg.DefaultMTU))
+		tunOptions := buildTunOptions(c.cfg.TUNName, tunAddr, hsCfg.AllowedRanges)
+		fd, err := c.tunOpener.OpenTun(tunOptions)
 		if err != nil {
 			conn.Close()
 			return fmt.Errorf("platform open TUN: %w", err)
@@ -98,7 +109,7 @@ func (c *Client) Start() error {
 	}
 	c.tun = tun
 
-	log.Infof("TUN interface up: %s", cfg.IPPrefix.String())
+	log.Infof("TUN interface up: %s", hsCfg.IPPrefix.String())
 
 	go c.routineTUNToConn()
 	go c.routineConnToTUN()
@@ -107,7 +118,6 @@ func (c *Client) Start() error {
 	return nil
 }
 
-// routineTUNToConn reads IP packets from TUN and sends them with a data prefix.
 func (c *Client) routineTUNToConn() {
 	defer log.Debugf("Routine: TUN→Conn stopped")
 
@@ -119,7 +129,7 @@ func (c *Client) routineTUNToConn() {
 		}
 
 		buf := common.GetBuffer()
-		n, err := c.tun.Read((*buf)[1:]) // reserve buf[0] for type prefix
+		n, err := c.tun.Read((*buf)[1:])
 		if err != nil {
 			common.PutBuffer(buf)
 			log.Errorf("TUN read: %v", err)
@@ -140,8 +150,6 @@ func (c *Client) routineTUNToConn() {
 	}
 }
 
-// routineConnToTUN reads packets from the server, strips the type prefix,
-// and writes IP packets to TUN.
 func (c *Client) routineConnToTUN() {
 	defer log.Debugf("Routine: Conn→TUN stopped")
 
@@ -171,12 +179,11 @@ func (c *Client) routineConnToTUN() {
 				return
 			}
 		case common.PacketKeepalive:
-			// Server echoed keepalive — nothing to do
+			// nothing
 		}
 	}
 }
 
-// routineKeepalive sends periodic heartbeats to keep the session alive on the operator.
 func (c *Client) routineKeepalive() {
 	ticker := time.NewTicker(time.Duration(common.KeepaliveInterval) * time.Second)
 	defer ticker.Stop()
@@ -205,4 +212,53 @@ func (c *Client) Close() error {
 		c.tun.Close()
 	}
 	return nil
+}
+
+// --------------- Helpers ---------------
+
+func createDialer(transportType string, sessionID [16]byte, vnetID [16]byte, clientAuth auth.ClientAuthenticator) (transport.Dialer, error) {
+	switch transportType {
+	case "tcp":
+		return tcp.NewDialer(sessionID, vnetID, clientAuth), nil
+	case "udp":
+		return udp.NewDialer(sessionID, vnetID, clientAuth), nil
+	case "quic":
+		return quic.NewDialer(sessionID, vnetID, clientAuth, quic.InsecureClientTLS()), nil
+	default:
+		return nil, fmt.Errorf("unknown transport: %s", transportType)
+	}
+}
+
+func buildTunOptions(name string, tunAddr netip.Prefix, allowedRanges []netip.Prefix) singTun.Options {
+	var inet4Addr, inet6Addr []netip.Prefix
+	var inet4Route, inet6Route []netip.Prefix
+
+	if tunAddr.Addr().Is4() {
+		inet4Addr = []netip.Prefix{tunAddr}
+	} else {
+		inet6Addr = []netip.Prefix{tunAddr}
+	}
+	for _, r := range allowedRanges {
+		if r.Addr().Is4() {
+			inet4Route = append(inet4Route, r)
+		} else {
+			inet6Route = append(inet6Route, r)
+		}
+	}
+	if len(inet4Route) == 0 && tunAddr.Addr().Is4() {
+		inet4Route = []netip.Prefix{tunAddr}
+	}
+	if len(inet6Route) == 0 && tunAddr.Addr().Is6() {
+		inet6Route = []netip.Prefix{tunAddr}
+	}
+
+	return singTun.Options{
+		Name:              name,
+		Inet4Address:      inet4Addr,
+		Inet6Address:      inet6Addr,
+		MTU:               tunPkg.DefaultMTU,
+		StrictRoute:       true,
+		Inet4RouteAddress: inet4Route,
+		Inet6RouteAddress: inet6Route,
+	}
 }

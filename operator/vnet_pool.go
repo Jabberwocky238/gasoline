@@ -115,10 +115,52 @@ func (p *VNetPool) ipToSeq(ip netip.Addr) uint32 {
 	return ipVal - baseVal
 }
 
+// NewVNetPool creates a single VNet pool for the given vnetID, CIDR prefix, and seed offset.
+func NewVNetPool(vnetID [common.VNetIDLen]byte, prefix netip.Prefix, seed uint32) *VNetPool {
+	hostBits := 32 - prefix.Bits()
+	usable := uint32(1<<hostBits) - 2
+	offset := uint32(2)
+	if usable > 0 {
+		offset = 2 + (seed % usable)
+	}
+	var maxHost uint32
+	if hostBits >= 32 {
+		maxHost = ^uint32(0)
+	} else {
+		maxHost = (1 << hostBits) - 1
+	}
+	if offset < 2 {
+		offset = 2
+	}
+	if offset > maxHost {
+		offset = 2
+	}
+	return &VNetPool{
+		VNetID:   vnetID,
+		Prefix:   prefix,
+		baseAddr: prefix.Addr(),
+		next:     offset,
+		inUse:    make(map[uint32]bool),
+		maxHost:  maxHost,
+	}
+}
+
+// VNetIDFromUint64 converts a uint64 vnet number to a [16]byte VNetID.
+func VNetIDFromUint64(num uint64) [common.VNetIDLen]byte {
+	var id [common.VNetIDLen]byte
+	binary.BigEndian.PutUint64(id[8:], num)
+	return id
+}
+
 // --------------- VNetPoolMap ---------------
 
 type VNetPoolMap struct {
+	mu    sync.RWMutex
 	pools map[[common.VNetIDLen]byte]*VNetPool
+}
+
+func NewVNetPoolMap() *VNetPoolMap {
+	return &VNetPoolMap{pools: make(map[[common.VNetIDLen]byte]*VNetPool)}
 }
 
 // ParseVNetPools parses "vnetID:CIDR;vnetID:CIDR;..." into a VNetPoolMap.
@@ -139,43 +181,14 @@ func ParseVNetPools(network string, seed uint32) (*VNetPoolMap, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid vnet ID %q: %w", parts[0], err)
 		}
-		var vnetIDBytes [common.VNetIDLen]byte
-		binary.BigEndian.PutUint64(vnetIDBytes[8:], vnetNum)
-		vnetID := vnetIDBytes
+		vnetID := VNetIDFromUint64(vnetNum)
 
 		prefix, err := netip.ParsePrefix(parts[1])
 		if err != nil {
 			return nil, fmt.Errorf("invalid CIDR %q: %w", parts[1], err)
 		}
 
-		// Spread starting offset: seed modulo usable range, minimum 2
-		hostBits := 32 - prefix.Bits()
-		usable := uint32(1<<hostBits) - 2 // exclude .0 and .1
-		offset := uint32(2)
-		if usable > 0 {
-			offset = 2 + (seed % usable)
-		}
-
-		var maxHost uint32
-		if hostBits >= 32 {
-			maxHost = ^uint32(0)
-		} else {
-			maxHost = (1 << hostBits) - 1
-		}
-		if offset < 2 {
-			offset = 2 // .0=network, .1=gateway
-		}
-		if offset > maxHost {
-			offset = 2
-		}
-		m.pools[vnetID] = &VNetPool{
-			VNetID:   vnetID,
-			Prefix:   prefix,
-			baseAddr: prefix.Addr(),
-			next:     offset,
-			inUse:    make(map[uint32]bool),
-			maxHost:  maxHost,
-		}
+		m.pools[vnetID] = NewVNetPool(vnetID, prefix, seed)
 	}
 
 	if len(m.pools) == 0 {
@@ -186,13 +199,37 @@ func ParseVNetPools(network string, seed uint32) (*VNetPoolMap, error) {
 
 // Get returns a pool by VNetID.
 func (m *VNetPoolMap) Get(vnetID [common.VNetIDLen]byte) (*VNetPool, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	p, ok := m.pools[vnetID]
 	return p, ok
 }
 
-// All returns all pools for iteration.
+// Add inserts or replaces a pool for the given VNetID.
+func (m *VNetPoolMap) Add(vnetID [common.VNetIDLen]byte, pool *VNetPool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.pools[vnetID] = pool
+}
+
+// Remove deletes a pool by VNetID. Returns true if it existed.
+func (m *VNetPoolMap) Remove(vnetID [common.VNetIDLen]byte) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.pools[vnetID]
+	delete(m.pools, vnetID)
+	return ok
+}
+
+// All returns a snapshot of all pools for iteration.
 func (m *VNetPoolMap) All() map[[common.VNetIDLen]byte]*VNetPool {
-	return m.pools
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	cp := make(map[[common.VNetIDLen]byte]*VNetPool, len(m.pools))
+	for k, v := range m.pools {
+		cp[k] = v
+	}
+	return cp
 }
 
 func addToAddr(base netip.Addr, offset uint32) netip.Addr {

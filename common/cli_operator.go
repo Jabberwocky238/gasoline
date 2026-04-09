@@ -19,6 +19,7 @@ func RegisterOperatorFlags(fs *flag.FlagSet) func() *OperatorConfig {
 	network := fs.String("network", "0:10.0.0.0/24", "vnetID:CIDR pairs separated by ';'")
 	statsAddr := fs.String("stats", "127.0.0.1:9090", "stats API listen address")
 	discover := fs.String("discover", "", "seed operator addresses for discovery (comma-separated)")
+	watchDir := fs.String("watch", "", "directory to watch for vnet config files")
 
 	return func() *OperatorConfig {
 		result := &OperatorConfig{
@@ -69,6 +70,7 @@ func RegisterOperatorFlags(fs *flag.FlagSet) func() *OperatorConfig {
 		result.Network = *network
 		result.StatsAddr = *statsAddr
 		result.DiscoverAddrs = parseDiscoverAddrs(*discover)
+		result.WatchDir = *watchDir
 		return result
 	}
 }

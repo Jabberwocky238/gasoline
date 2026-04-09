@@ -131,6 +131,22 @@ func (c *FileConfig) NetworkString() string {
 	return strings.Join(parts, ";")
 }
 
+// LoadVNetConfig parses a single vnet config YAML file (vnet + cidr + optional auth).
+func LoadVNetConfig(path string) (*NetworkEntry, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	var entry NetworkEntry
+	if err := yaml.Unmarshal(data, &entry); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if entry.VNet == 0 || entry.CIDR == "" {
+		return nil, fmt.Errorf("%s: missing vnet or cidr", path)
+	}
+	return &entry, nil
+}
+
 // --------------- Runtime configs ---------------
 
 // OperatorConfig is the declarative configuration consumed by operator.New().
@@ -145,6 +161,7 @@ type OperatorConfig struct {
 	Network        string              // "vnetID:CIDR;..." pairs
 	StatsAddr      string              // stats HTTP API address
 	DiscoverAddrs  []string            // seed operator addresses for bootstrap
+	WatchDir       string              // directory to watch for vnet config files, "" = disabled
 }
 
 // ClientConfig is the declarative configuration consumed by client.New().

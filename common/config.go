@@ -162,6 +162,7 @@ type OperatorConfig struct {
 	StatsAddr      string              // stats HTTP API address
 	DiscoverAddrs  []string            // seed operator addresses for bootstrap
 	WatchDir       string              // directory to watch for vnet config files, "" = disabled
+	LogLevel       string              // log level: trace, debug, info, warn, error, fatal, panic
 }
 
 // ClientConfig is the declarative configuration consumed by client.New().

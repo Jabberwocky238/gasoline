@@ -25,12 +25,13 @@ type Watcher struct {
 	resolver *auth.MapResolver
 	watcher  *fsnotify.Watcher
 	seed     uint32
+	log      *log.Logger
 
 	mu      sync.Mutex
 	tracked map[string][common.VNetIDLen]byte // filename -> vnetID currently loaded
 }
 
-func NewWatcher(ctx context.Context, dir string, pools *VNetPoolMap, resolver *auth.MapResolver) (*Watcher, error) {
+func NewWatcher(ctx context.Context, dir string, pools *VNetPoolMap, resolver *auth.MapResolver, logger *log.Logger) (*Watcher, error) {
 	fw, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
@@ -38,12 +39,16 @@ func NewWatcher(ctx context.Context, dir string, pools *VNetPoolMap, resolver *a
 
 	seed, _ := rand.Int(rand.Reader, big.NewInt(1<<32))
 
+	if logger == nil {
+		logger = log.StandardLogger()
+	}
 	w := &Watcher{
 		dir:      dir,
 		pools:    pools,
 		resolver: resolver,
 		watcher:  fw,
 		seed:     uint32(seed.Int64()),
+		log:      logger,
 		tracked:  make(map[string][common.VNetIDLen]byte),
 	}
 
@@ -96,7 +101,7 @@ func (w *Watcher) loop(ctx context.Context) {
 			if !ok {
 				return
 			}
-			log.Errorf("fswatch: %v", err)
+			w.log.Errorf("fswatch: %v", err)
 		}
 	}
 }
@@ -104,13 +109,13 @@ func (w *Watcher) loop(ctx context.Context) {
 func (w *Watcher) loadFile(path string) {
 	cfg, err := common.LoadVNetConfig(path)
 	if err != nil {
-		log.Errorf("fswatch: %v", err)
+		w.log.Errorf("fswatch: %v", err)
 		return
 	}
 
 	prefix, err := netip.ParsePrefix(cfg.CIDR)
 	if err != nil {
-		log.Errorf("fswatch: invalid cidr in %s: %v", path, err)
+		w.log.Errorf("fswatch: invalid cidr in %s: %v", path, err)
 		return
 	}
 
@@ -121,7 +126,7 @@ func (w *Watcher) loadFile(path string) {
 	if oldID, ok := w.tracked[name]; ok && oldID != vnetID {
 		w.pools.Remove(oldID)
 		w.resolver.Remove(oldID)
-		log.Infof("fswatch: removed old vnet %x from %s", oldID, name)
+		w.log.Infof("fswatch: removed old vnet %x from %s", oldID, name)
 	}
 	w.tracked[name] = vnetID
 	w.mu.Unlock()
@@ -136,7 +141,7 @@ func (w *Watcher) loadFile(path string) {
 	if authStr != "" {
 		serverAuth, err := auth.ParseServerAuth(authStr)
 		if err != nil {
-			log.Errorf("fswatch: auth in %s: %v", path, err)
+			w.log.Errorf("fswatch: auth in %s: %v", path, err)
 		} else {
 			w.resolver.Set(vnetID, serverAuth)
 		}
@@ -144,7 +149,7 @@ func (w *Watcher) loadFile(path string) {
 		w.resolver.Remove(vnetID)
 	}
 
-	log.Infof("fswatch: loaded vnet %d (%x) cidr=%s from %s", cfg.VNet, vnetID, prefix, name)
+	w.log.Infof("fswatch: loaded vnet %d (%x) cidr=%s from %s", cfg.VNet, vnetID, prefix, name)
 }
 
 func (w *Watcher) removeFile(name string) {
@@ -161,7 +166,7 @@ func (w *Watcher) removeFile(name string) {
 
 	w.pools.Remove(vnetID)
 	w.resolver.Remove(vnetID)
-	log.Infof("fswatch: removed vnet %x (file %s deleted)", vnetID, name)
+	w.log.Infof("fswatch: removed vnet %x (file %s deleted)", vnetID, name)
 }
 
 func isVNetFile(name string) bool {

@@ -30,6 +30,7 @@ import (
 type Operator struct {
 	ctx    context.Context
 	cancel context.CancelFunc
+	log    *log.Logger
 
 	Ctrl *ctrl.ControlPlane
 
@@ -44,6 +45,14 @@ type Operator struct {
 }
 
 func New(cfg *common.OperatorConfig) (*Operator, error) {
+	logger := log.New()
+	if cfg.LogLevel != "" {
+		lvl, err := log.ParseLevel(cfg.LogLevel)
+		if err == nil {
+			logger.SetLevel(lvl)
+		}
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	var pools *VNetPoolMap
@@ -58,7 +67,7 @@ func New(cfg *common.OperatorConfig) (*Operator, error) {
 			return nil, fmt.Errorf("network: %w", err)
 		}
 		for vnetID, pool := range pools.All() {
-			log.Infof("VNet %x: %s", vnetID, pool.Prefix)
+			logger.Infof("VNet %x: %s", vnetID, pool.Prefix)
 		}
 
 		serverPriv, err := protocol.NewPrivateKey()
@@ -67,7 +76,7 @@ func New(cfg *common.OperatorConfig) (*Operator, error) {
 			return nil, fmt.Errorf("generate server key: %w", err)
 		}
 		serverPub := serverPriv.PublicKey()
-		log.Infof("Server public key: %s", serverPub.ToBase64())
+		logger.Infof("Server public key: %s", serverPub.ToBase64())
 
 		defaultAuth, err := auth.ParseServerAuth(cfg.AuthStr)
 		if err != nil {
@@ -95,6 +104,7 @@ func New(cfg *common.OperatorConfig) (*Operator, error) {
 	op := &Operator{
 		ctx:            ctx,
 		cancel:         cancel,
+		log:            logger,
 		clientListener: clientListener,
 		clients:        NewClientTable(),
 		Stats:          stats.New(cfg.StatsAddr),
@@ -106,6 +116,7 @@ func New(cfg *common.OperatorConfig) (*Operator, error) {
 		ListenAddr:    cfg.OpListenAddr,
 		ExternalAddr:  cfg.OpExternalAddr,
 		DiscoverAddrs: cfg.DiscoverAddrs,
+		Log:           logger,
 	}
 	if pools != nil {
 		ctrlCfg.OnSessionSync = func(vnetID [16]byte, ip netip.Addr) {
@@ -126,6 +137,7 @@ func New(cfg *common.OperatorConfig) (*Operator, error) {
 
 func (o *Operator) UUID() [16]byte          { return o.Ctrl.UUID() }
 func (o *Operator) GRPCAddr() string        { return o.Ctrl.GRPCAddr() }
+func (o *Operator) ClientAddr() string      { if o.clientListener != nil { return o.clientListener.Addr() }; return "" }
 func (o *Operator) ConnectedClients() int   { return o.clients.Len() }
 func (o *Operator) ConnectedOperators() int { return o.Ctrl.Peers.Len() }
 
@@ -145,12 +157,12 @@ func (o *Operator) Start() error {
 			return fmt.Errorf("data udp listen on %s: %w", grpcAddr, err)
 		}
 		o.framePool = NewFramePool(256)
-		log.Infof("Data plane UDP listening on %s", o.dataConn.LocalAddr())
+		o.log.Infof("Data plane UDP listening on %s", o.dataConn.LocalAddr())
 		go o.routineDataRecv()
 	}
 
 	if o.clientListener != nil {
-		log.Infof("Client endpoint listening on %s", o.clientListener.Addr())
+		o.log.Infof("Client endpoint listening on %s", o.clientListener.Addr())
 		go o.routineAcceptClients()
 	}
 
@@ -195,7 +207,7 @@ func (o *Operator) routineDataRecv() {
 			select {
 			case <-o.ctx.Done():
 			default:
-				log.Errorf("Data recv: %v", err)
+				o.log.Errorf("Data recv: %v", err)
 			}
 			return
 		}
@@ -261,10 +273,10 @@ func (o *Operator) forwardToRemote(srcVNetID [16]byte, dstAddr netip.Addr, packe
 	n, err := o.dataConn.WriteToUDP(wire, udpAddr)
 	o.framePool.Put(df)
 	if err != nil {
-		log.Errorf("forwardToRemote WriteToUDP: %v", err)
+		o.log.Errorf("forwardToRemote WriteToUDP: %v", err)
 		return false
 	}
-	log.Debugf("Forwarded %d bytes to %s for %s", n, udpAddr, dstAddr)
+	o.log.Debugf("Forwarded %d bytes to %s for %s", n, udpAddr, dstAddr)
 	return true
 }
 
@@ -278,7 +290,7 @@ func (o *Operator) routineAcceptClients() {
 			case <-o.ctx.Done():
 				return
 			default:
-				log.Errorf("Client accept failed: %v", err)
+				o.log.Errorf("Client accept failed: %v", err)
 				continue
 			}
 		}
@@ -300,7 +312,7 @@ func (o *Operator) routineAcceptClients() {
 		o.Stats.Recorder.Register(cp.SessionID, cp.VNetID, "", conn.RemoteAddr())
 		o.Ctrl.BroadcastSessionSync(cp.SessionID, cp.VNetID, cp.IP.Addr())
 
-		log.Infof("Client %x connected, assigned %s from %s",
+		o.log.Infof("Client %x connected, assigned %s from %s",
 			result.ClientID, result.Config.IPPrefix, conn.RemoteAddr())
 		go o.routineReadFromClient(cp)
 	}
@@ -312,7 +324,7 @@ func (o *Operator) routineReadFromClient(cp *ClientPeer) {
 		o.Stats.Recorder.Unregister(cp.SessionID)
 		o.Ctrl.BroadcastSessionRevoke(cp.SessionID, cp.VNetID)
 		cp.Conn.Close()
-		log.Infof("Client %x disconnected", cp.SessionID)
+		o.log.Infof("Client %x disconnected", cp.SessionID)
 	}()
 
 	bufPtr := common.GetBuffer()
@@ -327,7 +339,7 @@ func (o *Operator) routineReadFromClient(cp *ClientPeer) {
 
 		n, err := cp.Conn.ReadPacket(readBuf)
 		if err != nil {
-			log.Errorf("Read from client %x: %v", cp.SessionID, err)
+			o.log.Errorf("Read from client %x: %v", cp.SessionID, err)
 			return
 		}
 		if n < 1 {
@@ -343,14 +355,14 @@ func (o *Operator) routineReadFromClient(cp *ClientPeer) {
 
 		switch pktType {
 		case common.PacketKeepalive:
-			log.Debugf("Keepalive from client %x", cp.SessionID)
+			o.log.Debugf("Keepalive from client %x", cp.SessionID)
 			continue
 
 		case common.PacketData:
 			// fall through to routing
 
 		default:
-			log.Debugf("Unknown packet type 0x%02x from client %x", pktType, cp.SessionID)
+			o.log.Debugf("Unknown packet type 0x%02x from client %x", pktType, cp.SessionID)
 			continue
 		}
 
@@ -384,7 +396,7 @@ func (o *Operator) routineReadFromClient(cp *ClientPeer) {
 			continue
 		}
 
-		log.Debugf("No route for %s from client %x", dstAddr, cp.SessionID)
+		o.log.Debugf("No route for %s from client %x", dstAddr, cp.SessionID)
 	}
 }
 
@@ -411,7 +423,7 @@ func (o *Operator) routineReaper() {
 		o.clients.mu.RUnlock()
 
 		for _, cp := range stale {
-			log.Warnf("Reaping idle client %x (idle %v)", cp.SessionID, cp.IdleDuration().Round(time.Second))
+			o.log.Warnf("Reaping idle client %x (idle %v)", cp.SessionID, cp.IdleDuration().Round(time.Second))
 			cp.Conn.Close() // triggers routineReadFromClient to exit and clean up
 		}
 	}

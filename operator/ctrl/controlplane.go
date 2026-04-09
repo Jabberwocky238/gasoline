@@ -19,6 +19,7 @@ type Config struct {
 	ListenAddr   string    // gRPC listen address
 	ExternalAddr string    // address peers use to reach us
 	DiscoverAddrs []string // seed addresses for bootstrap
+	Log          *log.Logger // optional, defaults to logrus standard logger
 
 	// Callbacks for side effects outside ctrl's domain.
 	// Called synchronously from gRPC handlers — keep them fast.
@@ -31,6 +32,7 @@ type Config struct {
 type ControlPlane struct {
 	ctx    context.Context
 	cancel context.CancelFunc
+	log    *log.Logger
 
 	cfg *Config
 
@@ -50,10 +52,16 @@ func New(cfg *Config) *ControlPlane {
 		rand.Read(uuid[:])
 	}
 
+	logger := cfg.Log
+	if logger == nil {
+		logger = log.StandardLogger()
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	return &ControlPlane{
 		ctx:      ctx,
 		cancel:   cancel,
+		log:      logger,
 		cfg:      cfg,
 		uuid:     uuid,
 		Peers:    NewPeerTable(),
@@ -86,7 +94,7 @@ func (c *ControlPlane) Start() error {
 		c.grpcListener = ln
 		c.grpcServer = grpc.NewServer()
 		RegisterOperatorServiceServer(c.grpcServer, &server{cp: c})
-		log.Infof("Control plane gRPC listening on %s", ln.Addr())
+		c.log.Infof("Control plane gRPC listening on %s", ln.Addr())
 		go c.grpcServer.Serve(ln)
 	}
 
@@ -125,7 +133,7 @@ func (c *ControlPlane) DialOperator(addr string) error {
 	copy(remoteUUID[:], resp.Uuid)
 	c.Peers.Add(NewPeer(remoteUUID, resp.ExternalAddr, conn))
 	c.Registry.SetOperator(remoteUUID, &OperatorInfo{Addr: resp.ExternalAddr})
-	log.Infof("Registered with operator %x at %s", remoteUUID, resp.ExternalAddr)
+	c.log.Infof("Registered with operator %x at %s", remoteUUID, resp.ExternalAddr)
 	return nil
 }
 
@@ -139,7 +147,7 @@ func (c *ControlPlane) dialBack(addr string, uuid [16]byte) error {
 		return err
 	}
 	c.Peers.Add(NewPeer(uuid, addr, conn))
-	log.Infof("Dial-back to %x at %s", uuid, addr)
+	c.log.Infof("Dial-back to %x at %s", uuid, addr)
 	return nil
 }
 
@@ -160,7 +168,7 @@ func (c *ControlPlane) PingOperator(uuid [16]byte) error {
 		info.LastPing = time.Now()
 		c.Registry.SetOperator(uuid, info)
 	}
-	log.Infof("Pong from %x: RTT=%v", uuid, rtt)
+	c.log.Infof("Pong from %x: RTT=%v", uuid, rtt)
 	return nil
 }
 
@@ -180,7 +188,7 @@ func (c *ControlPlane) BroadcastSessionSync(sessionID, vnetID [16]byte, ip netip
 	}
 	for _, peer := range c.Peers.All() {
 		if _, err := peer.Client.NotifySession(c.ctx, event); err != nil {
-			log.Errorf("SessionSync to %x: %v", peer.UUID, err)
+			c.log.Errorf("SessionSync to %x: %v", peer.UUID, err)
 		}
 	}
 }
@@ -197,7 +205,7 @@ func (c *ControlPlane) BroadcastSessionRevoke(sessionID, vnetID [16]byte) {
 	}
 	for _, peer := range c.Peers.All() {
 		if _, err := peer.Client.NotifySession(c.ctx, event); err != nil {
-			log.Errorf("SessionRevoke to %x: %v", peer.UUID, err)
+			c.log.Errorf("SessionRevoke to %x: %v", peer.UUID, err)
 		}
 	}
 }
@@ -218,15 +226,15 @@ func (c *ControlPlane) bootstrap() {
 		if addr == "" {
 			continue
 		}
-		log.Infof("Bootstrapping from seed %s", addr)
+		c.log.Infof("Bootstrapping from seed %s", addr)
 		if err := c.DialOperator(addr); err != nil {
-			log.Errorf("Bootstrap dial %s: %v", addr, err)
+			c.log.Errorf("Bootstrap dial %s: %v", addr, err)
 		}
 	}
 	for _, peer := range c.Peers.All() {
 		resp, err := peer.Client.Discover(c.ctx, &DiscoverReq{})
 		if err != nil {
-			log.Errorf("Discover from %x: %v", peer.UUID, err)
+			c.log.Errorf("Discover from %x: %v", peer.UUID, err)
 			continue
 		}
 		c.processDiscoverResp(resp)
@@ -243,10 +251,10 @@ func (c *ControlPlane) processDiscoverResp(resp *DiscoverResp) {
 		if _, ok := c.Peers.Get(uuid); ok {
 			continue
 		}
-		log.Infof("Discovered operator %x at %s, connecting...", uuid, e.Addr)
+		c.log.Infof("Discovered operator %x at %s, connecting...", uuid, e.Addr)
 		go func(addr string) {
 			if err := c.DialOperator(addr); err != nil {
-				log.Errorf("Discover dial %s: %v", addr, err)
+				c.log.Errorf("Discover dial %s: %v", addr, err)
 			}
 		}(e.Addr)
 	}

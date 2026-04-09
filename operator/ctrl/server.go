@@ -3,8 +3,6 @@ package ctrl
 import (
 	"context"
 	"net/netip"
-
-	log "github.com/sirupsen/logrus"
 )
 
 // server implements OperatorServiceServer. Lives entirely within ctrl.
@@ -18,13 +16,13 @@ func (s *server) Register(ctx context.Context, req *RegisterReq) (*RegisterResp,
 	copy(remoteUUID[:], req.Uuid)
 
 	s.cp.Registry.SetOperator(remoteUUID, &OperatorInfo{Addr: req.ExternalAddr})
-	log.Infof("Operator %x registered, external %s", remoteUUID, req.ExternalAddr)
+	s.cp.log.Infof("Operator %x registered, external %s", remoteUUID, req.ExternalAddr)
 
 	// Dial back so we have a gRPC client to the caller
 	if _, ok := s.cp.Peers.Get(remoteUUID); !ok && req.ExternalAddr != "" {
 		go func() {
 			if err := s.cp.dialBack(req.ExternalAddr, remoteUUID); err != nil {
-				log.Errorf("Dial-back to %x at %s: %v", remoteUUID, req.ExternalAddr, err)
+				s.cp.log.Errorf("Dial-back to %x at %s: %v", remoteUUID, req.ExternalAddr, err)
 			}
 		}()
 	}
@@ -77,7 +75,7 @@ func (s *server) handleSync(msg *SessionSync) {
 
 	vnet := s.cp.Registry.GetOrCreateVNet(vnetID)
 	vnet.Add(sessionID, &SessionInfo{OperatorUUID: opUUID, IP: ip})
-	log.Infof("SessionSync: %x on operator %x at %s (vnet %x)", sessionID, opUUID, ip, vnetID)
+	s.cp.log.Infof("SessionSync: %x on operator %x at %s (vnet %x)", sessionID, opUUID, ip, vnetID)
 
 	if s.cp.cfg.OnSessionSync != nil {
 		s.cp.cfg.OnSessionSync(vnetID, ip)
@@ -96,7 +94,7 @@ func (s *server) handleRevoke(msg *SessionRevoke) {
 		}
 		vnet.Remove(sessionID)
 	}
-	log.Infof("SessionRevoke: %x (vnet %x)", sessionID, vnetID)
+	s.cp.log.Infof("SessionRevoke: %x (vnet %x)", sessionID, vnetID)
 
 	if s.cp.cfg.OnSessionRevoke != nil && revokedIP.IsValid() {
 		s.cp.cfg.OnSessionRevoke(vnetID, sessionID, revokedIP)

@@ -173,10 +173,11 @@ func (p *Plane) RxLoop() {
 		}
 
 		// Learn (vni, srcMAC) → srcAddr from every frame we receive.
-		p.table.LearnRemote(df.VNI, df.SrcMAC, srcAddr)
+		vni := df.VNI()
+		p.table.LearnRemote(vni, df.SrcMAC(), srcAddr)
 
 		// Dispatch the inner Ethernet frame through the local plane.
-		_ = p.Forward(df.VNI, df.Frame())
+		_ = p.Forward(vni, df.Frame())
 		common.PutFrame(df)
 	}
 }

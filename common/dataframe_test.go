@@ -55,20 +55,20 @@ func TestDataFrameVXLANEncodeDecode(t *testing.T) {
 		t.Fatalf("Decode: %v", err)
 	}
 
-	if !bytes.Equal(dst.Packet, packet) {
-		t.Errorf("packet mismatch:\n  got:  %x\n  want: %x", dst.Packet, packet)
+	if !bytes.Equal(dst.Packet(), packet) {
+		t.Errorf("packet mismatch:\n  got:  %x\n  want: %x", dst.Packet(), packet)
 	}
-	if dst.VNI != vni {
-		t.Errorf("recovered VNI = %s, want %s", dst.VNI, vni)
+	if dst.VNI() != vni {
+		t.Errorf("recovered VNI = %s, want %s", dst.VNI(), vni)
 	}
-	if dst.EtherType != EtherTypeIPv4 {
-		t.Errorf("recovered EtherType = 0x%04x, want 0x0800", dst.EtherType)
+	if dst.EtherType() != EtherTypeIPv4 {
+		t.Errorf("recovered EtherType = 0x%04x, want 0x0800", dst.EtherType())
 	}
-	if dst.SrcMAC != srcMAC {
-		t.Errorf("recovered SrcMAC = %x, want %x", dst.SrcMAC, srcMAC)
+	if dst.SrcMAC() != srcMAC {
+		t.Errorf("recovered SrcMAC = %x, want %x", dst.SrcMAC(), srcMAC)
 	}
-	if dst.DstMAC != dstMAC {
-		t.Errorf("recovered DstMAC = %x, want %x", dst.DstMAC, dstMAC)
+	if dst.DstMAC() != dstMAC {
+		t.Errorf("recovered DstMAC = %x, want %x", dst.DstMAC(), dstMAC)
 	}
 }
 
@@ -91,8 +91,8 @@ func TestDataFrameVXLANIPv6(t *testing.T) {
 	if err := dst.Decode(wire); err != nil {
 		t.Fatalf("Decode: %v", err)
 	}
-	if dst.EtherType != EtherTypeIPv6 {
-		t.Errorf("EtherType = 0x%04x, want 0x86DD", dst.EtherType)
+	if dst.EtherType() != EtherTypeIPv6 {
+		t.Errorf("EtherType = 0x%04x, want 0x86DD", dst.EtherType())
 	}
 }
 

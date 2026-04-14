@@ -64,7 +64,12 @@ func (s *server) handleSync(msg *SessionSync) {
 	var sessionID, opUUID [16]byte
 	copy(sessionID[:], msg.SessionId)
 	copy(opUUID[:], msg.OperatorUuid)
-	vni := common.VNI(msg.Vni)
+	vni := vniFromBytes(msg.Vni)
+
+	var cid common.ClientID
+	if len(msg.Cid) == common.ClientIDLen {
+		copy(cid[:], msg.Cid)
+	}
 
 	var ip netip.Addr
 	if len(msg.IpAddr) == 4 {
@@ -76,29 +81,31 @@ func (s *server) handleSync(msg *SessionSync) {
 	}
 
 	vnet := s.cp.Registry.GetOrCreateVNet(vni)
-	vnet.Add(sessionID, &SessionInfo{OperatorUUID: opUUID, IP: ip})
-	s.cp.log.Infof("SessionSync: %x on operator %x at %s (vni %s)", sessionID, opUUID, ip, vni)
+	vnet.Add(sessionID, &SessionInfo{OperatorUUID: opUUID, ClientID: cid, IP: ip})
+	s.cp.log.Infof("SessionSync: %x cid=%x on operator %x at %s (vni %s)", sessionID, cid, opUUID, ip, vni)
 
 	if s.cp.cfg.OnSessionSync != nil {
-		s.cp.cfg.OnSessionSync(vni, ip)
+		s.cp.cfg.OnSessionSync(vni, cid, ip)
 	}
 }
 
 func (s *server) handleRevoke(msg *SessionRevoke) {
 	var sessionID [16]byte
 	copy(sessionID[:], msg.SessionId)
-	vni := common.VNI(msg.Vni)
+	vni := vniFromBytes(msg.Vni)
 
 	var revokedIP netip.Addr
+	var revokedCID common.ClientID
 	if vnet, ok := s.cp.Registry.GetVNet(vni); ok {
 		if info, ok := vnet.Get(sessionID); ok {
 			revokedIP = info.IP
+			revokedCID = info.ClientID
 		}
 		vnet.Remove(sessionID)
 	}
 	s.cp.log.Infof("SessionRevoke: %x (vni %s)", sessionID, vni)
 
 	if s.cp.cfg.OnSessionRevoke != nil && revokedIP.IsValid() {
-		s.cp.cfg.OnSessionRevoke(vni, sessionID, revokedIP)
+		s.cp.cfg.OnSessionRevoke(vni, sessionID, revokedCID, revokedIP)
 	}
 }

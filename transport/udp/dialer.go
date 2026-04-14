@@ -10,12 +10,12 @@ import (
 )
 
 type Dialer struct {
-	clientID [16]byte
+	clientID common.ClientID
 	vni      common.VNI
 	auth     auth.ClientAuthenticator
 }
 
-func NewDialer(clientID [16]byte, vni common.VNI, auth auth.ClientAuthenticator) *Dialer {
+func NewDialer(clientID common.ClientID, vni common.VNI, auth auth.ClientAuthenticator) *Dialer {
 	return &Dialer{clientID: clientID, vni: vni, auth: auth}
 }
 

@@ -120,12 +120,12 @@ func New(cfg *common.OperatorConfig) (*Operator, error) {
 		Log:           logger,
 	}
 	if pools != nil {
-		ctrlCfg.OnSessionSync = func(vni common.VNI, ip netip.Addr) {
+		ctrlCfg.OnSessionSync = func(vni common.VNI, _ common.ClientID, ip netip.Addr) {
 			if pool, ok := pools.Get(vni); ok {
 				pool.ReserveIP(ip)
 			}
 		}
-		ctrlCfg.OnSessionRevoke = func(vni common.VNI, _ [16]byte, ip netip.Addr) {
+		ctrlCfg.OnSessionRevoke = func(vni common.VNI, _ [16]byte, _ common.ClientID, ip netip.Addr) {
 			if pool, ok := pools.Get(vni); ok {
 				pool.UnreserveIP(ip)
 			}
@@ -218,18 +218,8 @@ func (o *Operator) routineDataRecv() {
 			continue
 		}
 
-		dstIP, err := packetDstIP(df.Packet)
-		if err != nil {
-			common.PutFrame(df)
-			continue
-		}
-		dstAddr, ok := netip.AddrFromSlice(dstIP)
-		if !ok {
-			common.PutFrame(df)
-			continue
-		}
-
-		target := o.clients.LookupByIP(dstAddr)
+		// Pure (VNI, dstCID) forwarding — no inner IP parsing.
+		target := o.clients.LookupByCID(df.VNI, df.DstCID)
 		if target == nil {
 			common.PutFrame(df)
 			continue
@@ -241,17 +231,14 @@ func (o *Operator) routineDataRecv() {
 	}
 }
 
-// forwardToRemote looks up the remote operator for dstAddr and enqueues the packet for UDP send.
-// srcSessionID is the originating client's session, embedded into the inner Ethernet src MAC;
-// the destination session ID is resolved from the registry for the inner dst MAC.
-func (o *Operator) forwardToRemote(srcVNI common.VNI, srcSessionID [16]byte, dstAddr netip.Addr, packet []byte) bool {
-	if len(packet) > common.TunMTU {
-		o.log.Warnf("forwardToRemote: oversize packet %d > %d, dropping", len(packet), common.TunMTU)
-		return false
-	}
-
-	dstSessionID, opUUID, found := o.Ctrl.LookupRemoteSession(srcVNI, dstAddr)
-	if !found {
+// forwardToRemote wraps the packet in VXLAN (inner Eth dst MAC = dstClientID)
+// and sends it to the owning operator. Caller provides srcClientID & dstClientID —
+// no packet-payload inspection happens here.
+func (o *Operator) forwardToRemote(srcVNI common.VNI, srcClientID, dstClientID common.ClientID, opUUID [16]byte, packet []byte) bool {
+	version := common.InnerIPVersion(packet)
+	mtu := common.MTUFor(version)
+	if mtu == 0 || len(packet) > mtu {
+		o.log.Warnf("forwardToRemote: invalid/oversize IPv%d packet %d, dropping", version, len(packet))
 		return false
 	}
 	if opUUID == o.Ctrl.UUID() {
@@ -264,7 +251,7 @@ func (o *Operator) forwardToRemote(srcVNI common.VNI, srcSessionID [16]byte, dst
 	}
 
 	df := common.GetFrame()
-	wire := df.Encode(srcVNI, srcSessionID, dstSessionID, packet)
+	wire := df.Encode(srcVNI, srcClientID, dstClientID, packet)
 	_, err := o.dataConn.WriteToUDP(wire, peer.UDPAddr)
 	common.PutFrame(df)
 	if err != nil {
@@ -295,6 +282,7 @@ func (o *Operator) routineAcceptClients() {
 		cp := &ClientPeer{
 			Conn:       conn,
 			SessionID:  result.Config.SessionID,
+			ClientID:   result.ClientID,
 			VNI:        result.Config.VNI,
 			OperatorID: o.Ctrl.UUID(),
 			IP:         result.Config.IPPrefix,
@@ -303,7 +291,7 @@ func (o *Operator) routineAcceptClients() {
 
 		o.clients.Add(cp)
 		o.Stats.Recorder.Register(cp.SessionID, cp.VNI, "", conn.RemoteAddr())
-		o.Ctrl.BroadcastSessionSync(cp.SessionID, cp.VNI, cp.IP.Addr())
+		o.Ctrl.BroadcastSessionSync(cp.SessionID, cp.VNI, cp.ClientID, cp.IP.Addr())
 
 		o.log.Infof("Client %x connected, assigned %s from %s",
 			result.ClientID, result.Config.IPPrefix, conn.RemoteAddr())
@@ -338,36 +326,49 @@ func (o *Operator) routineReadFromClient(cp *ClientPeer) {
 		if n < 1 {
 			continue
 		}
-		if n > common.TunMTU {
-			o.log.Warnf("Client %x sent oversize packet %d > %d, dropping", cp.SessionID, n, common.TunMTU)
+		payload := readBuf[:n]
+		version := common.InnerIPVersion(payload)
+		mtu := common.MTUFor(version)
+		if mtu == 0 {
+			o.log.Warnf("Client %x sent packet with bad IP version 0x%02x, dropping", cp.SessionID, payload[0])
 			continue
 		}
-		payload := readBuf[:n]
+		if n > mtu {
+			o.log.Warnf("Client %x sent oversize IPv%d packet %d > %d, dropping", cp.SessionID, version, n, mtu)
+			continue
+		}
 
 		o.Stats.Recorder.RecordRx(cp.SessionID, uint64(len(payload)))
 		if !o.Stats.RateLimiter.Allow(cp.VNI, uint64(len(payload))) {
 			continue
 		}
 
-		dstIP, err := packetDstIP(payload)
+		// Ingress-time translation: client sends raw IP, operator resolves
+		// dstIP → dstClientID once via the registry. After that point, all
+		// forwarding is pure (VNI, ClientID) — inner IP payload is never
+		// inspected again.
+		dstIPRaw, err := packetDstIP(payload)
 		if err != nil {
 			continue
 		}
-		dstAddr, ok := netip.AddrFromSlice(dstIP)
+		dstAddr, ok := netip.AddrFromSlice(dstIPRaw)
 		if !ok {
 			continue
 		}
 
-		// Local delivery
+		// Local delivery (fast path: local ClientTable by IP).
 		if target := o.clients.LookupByIP(dstAddr); target != nil {
 			o.Stats.Recorder.RecordTx(target.SessionID, uint64(len(payload)))
 			target.Conn.WritePacket(payload)
 			continue
 		}
 
-		// Remote forwarding via UDP (inter-operator)
-		if o.dataConn != nil && o.forwardToRemote(cp.VNI, cp.SessionID, dstAddr, payload) {
-			continue
+		// Remote delivery: find dstClientID + owning operator, forward via VXLAN.
+		if o.dataConn != nil {
+			_, dstCID, opUUID, found := o.Ctrl.LookupRemoteSessionByIP(cp.VNI, dstAddr)
+			if found && o.forwardToRemote(cp.VNI, cp.ClientID, dstCID, opUUID, payload) {
+				continue
+			}
 		}
 
 		o.log.Debugf("No route for %s from client %x", dstAddr, cp.SessionID)
@@ -391,7 +392,7 @@ func (o *Operator) routineReaper() {
 		now := time.Now()
 		o.clients.mu.RLock()
 		var stale []*ClientPeer
-		for _, cp := range o.clients.peers {
+		for _, cp := range o.clients.byIP {
 			idle := now.Sub(cp.Conn.LastActive())
 			if idle > idleTimeout {
 				stale = append(stale, cp)
@@ -410,19 +411,12 @@ func (o *Operator) routineReaper() {
 // --------------- Helpers ---------------
 
 func makeConfigFunc(pools *VNetPoolMap, serverPub encryption.PublicKey) protocol.ConfigFunc {
-	return func(clientID [16]byte, vni common.VNI) (*protocol.SessionConfig, error) {
+	return func(clientID common.ClientID, vni common.VNI) (*protocol.SessionConfig, error) {
 		pool, ok := pools.Get(vni)
 		if !ok {
 			return nil, fmt.Errorf("unknown vni %s", vni)
 		}
-		clientIP, err := pool.AllocateIP()
-		if err != nil {
-			return nil, err
-		}
-		clientPriv, err := encryption.NewPrivateKey()
-		if err != nil {
-			return nil, err
-		}
+		// Generate sessionID BEFORE allocating IP — IPv6 derivation needs it.
 		h := sha256.New()
 		h.Write(clientID[:])
 		var ts [8]byte
@@ -430,12 +424,27 @@ func makeConfigFunc(pools *VNetPoolMap, serverPub encryption.PublicKey) protocol
 		h.Write(ts[:])
 		var sessionID [16]byte
 		copy(sessionID[:], h.Sum(nil)[:16])
+
+		clientIP, err := pool.AllocateIP(sessionID)
+		if err != nil {
+			return nil, err
+		}
+		clientPriv, err := encryption.NewPrivateKey()
+		if err != nil {
+			return nil, err
+		}
+
+		// Host prefix bits: /32 for v4, /128 for v6
+		hostBits := 32
+		if !clientIP.Is4() {
+			hostBits = 128
+		}
 		return &protocol.SessionConfig{
 			SessionID:        sessionID,
 			VNI:              vni,
 			ClientPrivateKey: clientPriv,
 			ServerPublicKey:  serverPub,
-			IPPrefix:         netip.PrefixFrom(clientIP, 32),
+			IPPrefix:         netip.PrefixFrom(clientIP, hostBits),
 			AllowedRanges:    []netip.Prefix{pool.Prefix},
 		}, nil
 	}

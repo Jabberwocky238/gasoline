@@ -33,7 +33,7 @@ func TestVNetPoolRecycle(t *testing.T) {
 		// Allocate 100
 		ips := make([]netip.Addr, 0, 100)
 		for i := 0; i < 100; i++ {
-			ip, err := pool.AllocateIP()
+			ip, err := pool.AllocateIP([16]byte{})
 			if err != nil {
 				t.Fatalf("round %d, alloc %d: %v (inUse=%d)", round, i, err, pool.InUseCount())
 			}
@@ -76,7 +76,7 @@ func TestVNetPoolExhaust(t *testing.T) {
 	// But our pool doesn't exclude broadcast, so .2~.15 = 14 usable
 	ips := make([]netip.Addr, 0, 14)
 	for i := 0; i < 14; i++ {
-		ip, err := pool.AllocateIP()
+		ip, err := pool.AllocateIP([16]byte{})
 		if err != nil {
 			t.Fatalf("alloc %d: %v", i, err)
 		}
@@ -84,14 +84,14 @@ func TestVNetPoolExhaust(t *testing.T) {
 	}
 
 	// Next alloc should fail
-	_, err = pool.AllocateIP()
+	_, err = pool.AllocateIP([16]byte{})
 	if err == nil {
 		t.Fatal("expected exhaustion error")
 	}
 
 	// Release one, alloc again should succeed
 	pool.ReleaseIP(ips[0])
-	ip, err := pool.AllocateIP()
+	ip, err := pool.AllocateIP([16]byte{})
 	if err != nil {
 		t.Fatalf("alloc after release: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestVNetPoolDuplicateRelease(t *testing.T) {
 		break
 	}
 
-	ip, err := pool.AllocateIP()
+	ip, err := pool.AllocateIP([16]byte{})
 	if err != nil {
 		t.Fatalf("alloc: %v", err)
 	}
@@ -129,11 +129,11 @@ func TestVNetPoolDuplicateRelease(t *testing.T) {
 	}
 
 	// Allocate twice — should get two different IPs (the freed one + a new one)
-	ip1, err := pool.AllocateIP()
+	ip1, err := pool.AllocateIP([16]byte{})
 	if err != nil {
 		t.Fatalf("alloc1: %v", err)
 	}
-	ip2, err := pool.AllocateIP()
+	ip2, err := pool.AllocateIP([16]byte{})
 	if err != nil {
 		t.Fatalf("alloc2: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestVNetPoolConcurrentOperators(t *testing.T) {
 			pool, _ := pools[opIdx].Get(vni)
 
 			for j := 0; j < allocPerOp; j++ {
-				ip, err := pool.AllocateIP()
+				ip, err := pool.AllocateIP([16]byte{})
 				if err != nil {
 					t.Errorf("op%d alloc %d: %v", opIdx, j, err)
 					return
@@ -244,7 +244,7 @@ func TestVNetPoolConcurrentAllocRelease(t *testing.T) {
 			defer wg.Done()
 			var local []netip.Addr
 			for i := 0; i < opsPerGoroutine; i++ {
-				ip, err := pool.AllocateIP()
+				ip, err := pool.AllocateIP([16]byte{})
 				if err != nil {
 					t.Errorf("alloc: %v", err)
 					return
@@ -266,4 +266,46 @@ func TestVNetPoolConcurrentAllocRelease(t *testing.T) {
 	close(allIPs)
 
 	t.Logf("Concurrent alloc/release OK: pool inUse=%d", pool.InUseCount())
+}
+
+// TestVNetPoolIPv6Deterministic verifies that IPv6 allocation is stateless
+// and deterministic from (SessionID, VNI).
+func TestVNetPoolIPv6Deterministic(t *testing.T) {
+	pools, err := ParseVNetPools("42:fd00:abcd::/64", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool, _ := pools.Get(common.VNI(42))
+	if pool.IsV4() {
+		t.Fatal("expected v6 pool")
+	}
+
+	sid1 := [16]byte{0x01, 0x02, 0x03, 0x04}
+	sid2 := [16]byte{0xAA, 0xBB, 0xCC, 0xDD}
+
+	ip1a, _ := pool.AllocateIP(sid1)
+	ip1b, _ := pool.AllocateIP(sid1)
+	ip2, _ := pool.AllocateIP(sid2)
+
+	// Same session → same IP (deterministic)
+	if ip1a != ip1b {
+		t.Errorf("deterministic: sid1 → %s then %s, want identical", ip1a, ip1b)
+	}
+	// Different sessions → different IPs
+	if ip1a == ip2 {
+		t.Errorf("different sessions should yield different IPs: both got %s", ip1a)
+	}
+	// Inside the prefix
+	if !pool.Prefix.Contains(ip1a) {
+		t.Errorf("allocated IP %s not in prefix %s", ip1a, pool.Prefix)
+	}
+	if !pool.Prefix.Contains(ip2) {
+		t.Errorf("allocated IP %s not in prefix %s", ip2, pool.Prefix)
+	}
+	// Stateless — InUseCount is always 0
+	if pool.InUseCount() != 0 {
+		t.Errorf("v6 pool InUseCount = %d, want 0 (stateless)", pool.InUseCount())
+	}
+
+	t.Logf("IPv6 deterministic OK: sid1→%s, sid2→%s", ip1a, ip2)
 }

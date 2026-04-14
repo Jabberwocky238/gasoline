@@ -48,8 +48,7 @@ func New(cfg *common.ClientConfig) (*Client, error) {
 		return nil, fmt.Errorf("auth: %w", err)
 	}
 
-	var sessionID [16]byte
-	dialer, err := createDialer(cfg.Transport, sessionID, cfg.VNI, clientAuth)
+	dialer, err := createDialer(cfg.Transport, cfg.ClientID, cfg.VNI, clientAuth)
 	if err != nil {
 		return nil, fmt.Errorf("dialer: %w", err)
 	}
@@ -222,14 +221,14 @@ func (c *Client) startSocks5() error {
 
 // --------------- Helpers ---------------
 
-func createDialer(transportType string, sessionID [16]byte, vni common.VNI, clientAuth auth.ClientAuthenticator) (transport.Dialer, error) {
+func createDialer(transportType string, clientID common.ClientID, vni common.VNI, clientAuth auth.ClientAuthenticator) (transport.Dialer, error) {
 	switch transportType {
 	case "tcp":
-		return tcp.NewDialer(sessionID, vni, clientAuth), nil
+		return tcp.NewDialer(clientID, vni, clientAuth), nil
 	case "udp":
-		return udp.NewDialer(sessionID, vni, clientAuth), nil
+		return udp.NewDialer(clientID, vni, clientAuth), nil
 	case "quic":
-		return quic.NewDialer(sessionID, vni, clientAuth, quic.InsecureClientTLS()), nil
+		return quic.NewDialer(clientID, vni, clientAuth, quic.InsecureClientTLS()), nil
 	default:
 		return nil, fmt.Errorf("unknown transport: %s", transportType)
 	}

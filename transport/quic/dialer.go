@@ -13,13 +13,13 @@ import (
 )
 
 type Dialer struct {
-	clientID [16]byte
+	clientID common.ClientID
 	vni      common.VNI
 	auth     auth.ClientAuthenticator
 	tlsConf  *tls.Config
 }
 
-func NewDialer(clientID [16]byte, vni common.VNI, auth auth.ClientAuthenticator, tlsConf *tls.Config) *Dialer {
+func NewDialer(clientID common.ClientID, vni common.VNI, auth auth.ClientAuthenticator, tlsConf *tls.Config) *Dialer {
 	return &Dialer{clientID: clientID, vni: vni, auth: auth, tlsConf: tlsConf}
 }
 

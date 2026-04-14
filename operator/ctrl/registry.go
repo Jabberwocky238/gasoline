@@ -16,6 +16,7 @@ type OperatorInfo struct {
 
 type SessionInfo struct {
 	OperatorUUID [16]byte
+	ClientID     common.ClientID
 	IP           netip.Addr
 }
 
@@ -48,15 +49,28 @@ func (v *VNetSessions) Get(sessionID [16]byte) (*SessionInfo, bool) {
 }
 
 // LookupByIP finds a session matching the given IP address.
-func (v *VNetSessions) LookupByIP(ip netip.Addr) (sessionID, operatorUUID [16]byte, found bool) {
+func (v *VNetSessions) LookupByIP(ip netip.Addr) (sessionID [16]byte, info *SessionInfo, found bool) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 	for sid, s := range v.Sessions {
 		if s.IP == ip {
-			return sid, s.OperatorUUID, true
+			return sid, s, true
 		}
 	}
-	return [16]byte{}, [16]byte{}, false
+	return [16]byte{}, nil, false
+}
+
+// LookupByClientID finds a session by ClientID. Primary forwarding path
+// on the data plane — does not touch inner packet payload.
+func (v *VNetSessions) LookupByClientID(cid common.ClientID) (sessionID [16]byte, info *SessionInfo, found bool) {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	for sid, s := range v.Sessions {
+		if s.ClientID == cid {
+			return sid, s, true
+		}
+	}
+	return [16]byte{}, nil, false
 }
 
 // Registry holds cluster state: known operators and remote sessions.
@@ -65,7 +79,7 @@ type Registry struct {
 	operators map[[16]byte]*OperatorInfo
 
 	vnetMu sync.RWMutex
-	vnets  map[common.VNI]*VNetSessions // VNI -> sessions
+	vnets  map[common.VNI]*VNetSessions
 }
 
 func NewRegistry() *Registry {

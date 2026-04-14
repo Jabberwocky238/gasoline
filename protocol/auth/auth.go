@@ -1,6 +1,10 @@
 package auth
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/jabberwocky238/gasoline/common"
+)
 
 // Type identifies the authentication method on the wire.
 type Type byte
@@ -37,5 +41,5 @@ type ServerAuthenticator interface {
 	// GenerateChallenge creates a nonce/salt for the client.
 	GenerateChallenge() ([]byte, error)
 	// VerifyResponse checks the client's auth response.
-	VerifyResponse(clientID [16]byte, challenge, response []byte) error
+	VerifyResponse(clientID common.ClientID, challenge, response []byte) error
 }

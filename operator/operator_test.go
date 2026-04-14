@@ -206,7 +206,7 @@ func TestSessionSyncAndRevoke(t *testing.T) {
 	vni := common.VNI(200)
 	ip := netip.MustParseAddr("10.0.0.5")
 
-	opA.Ctrl.BroadcastSessionSync(sessionID, vni, ip)
+	opA.Ctrl.BroadcastSessionSync(sessionID, vni, common.ClientID{}, ip)
 	time.Sleep(100 * time.Millisecond)
 
 	vnet, ok := opB.Ctrl.Registry.GetVNet(vni)
@@ -264,12 +264,13 @@ func TestDataForwarding(t *testing.T) {
 	clientA := &ClientPeer{
 		Conn:       connA,
 		SessionID:  sessionA,
+		ClientID:   common.ClientID{0x02, 0xA0, 0, 0, 0, 0x01},
 		VNI:        vni,
 		OperatorID: uuidA,
 		IP:         netip.MustParsePrefix("10.0.0.2/32"),
 	}
 	opA.clients.Add(clientA)
-	opA.Ctrl.BroadcastSessionSync(sessionA, vni, clientA.IP.Addr())
+	opA.Ctrl.BroadcastSessionSync(sessionA, vni, clientA.ClientID, clientA.IP.Addr())
 	// Start the read loop so OpA processes packets from ClientA through the real path
 	go opA.routineReadFromClient(clientA)
 	time.Sleep(50 * time.Millisecond) // let goroutine start
@@ -280,20 +281,21 @@ func TestDataForwarding(t *testing.T) {
 	clientB := &ClientPeer{
 		Conn:       connB,
 		SessionID:  sessionB,
+		ClientID:   common.ClientID{0x02, 0xB0, 0, 0, 0, 0x02},
 		VNI:        vni,
 		OperatorID: uuidB,
 		IP:         netip.MustParsePrefix("10.0.0.3/32"),
 	}
 	opB.clients.Add(clientB)
-	opB.Ctrl.BroadcastSessionSync(sessionB, vni, clientB.IP.Addr())
+	opB.Ctrl.BroadcastSessionSync(sessionB, vni, clientB.ClientID, clientB.IP.Addr())
 
 	time.Sleep(200 * time.Millisecond)
 
 	// Verify both operators see both sessions in registry
-	if _, _, found := opA.Ctrl.LookupRemoteSession(vni, netip.MustParseAddr("10.0.0.3")); !found {
+	if _, _, _, found := opA.Ctrl.LookupRemoteSessionByIP(vni, netip.MustParseAddr("10.0.0.3")); !found {
 		t.Fatal("OpA doesn't know about ClientB's session")
 	}
-	if _, _, found := opB.Ctrl.LookupRemoteSession(vni, netip.MustParseAddr("10.0.0.2")); !found {
+	if _, _, _, found := opB.Ctrl.LookupRemoteSessionByIP(vni, netip.MustParseAddr("10.0.0.2")); !found {
 		t.Fatal("OpB doesn't know about ClientA's session")
 	}
 

@@ -18,9 +18,11 @@ import (
 const (
 	benchVNetNum  = 200
 	benchVNetCIDR = "10.0.200.0/24"
-	benchPayload  = 1400
-	benchRoundSz  = 10 * 1024 * 1024
-	benchRounds   = 10
+	// benchPayload is the inner UDP payload size; total IP packet is this + 20-byte
+	// IPv4 header, capped at TunMTU (1400). 1380 → 1400-byte IP packet.
+	benchPayload = 1380
+	benchRoundSz = 10 * 1024 * 1024
+	benchRounds  = 10
 )
 
 func startBenchOperator(t *testing.T, uuid [16]byte, tp string) *operator.Operator {

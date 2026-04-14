@@ -18,7 +18,7 @@ func testConfigFn() protocol.ConfigFunc {
 	serverPriv, _ := encryption.NewPrivateKey()
 	serverPub := serverPriv.PublicKey()
 
-	return func(clientID [16]byte, vni common.VNI) (*protocol.SessionConfig, error) {
+	return func(clientID common.ClientID, vni common.VNI) (*protocol.SessionConfig, error) {
 		clientPriv, _ := encryption.NewPrivateKey()
 		return &protocol.SessionConfig{
 			ClientPrivateKey: clientPriv,
@@ -43,7 +43,7 @@ func TestTCPHandshakeAndPacket(t *testing.T) {
 	defer ln.Close()
 
 	addr := ln.Addr()
-	clientID := [16]byte{0x01, 0x02, 0x03}
+	clientID := common.ClientID{0x02, 0x01, 0x02, 0x03, 0x04, 0x05}
 	dialer := NewDialer(clientID, common.VNI(0), &auth.NoAuthClient{})
 
 	var wg sync.WaitGroup
@@ -160,7 +160,7 @@ func TestTCPMultiplePackets(t *testing.T) {
 	}
 	defer ln.Close()
 
-	dialer := NewDialer([16]byte{}, common.VNI(0), &auth.NoAuthClient{})
+	dialer := NewDialer(common.ClientID{}, common.VNI(0), &auth.NoAuthClient{})
 
 	var wg sync.WaitGroup
 	var sConn *Conn
@@ -213,7 +213,7 @@ func TestTCPMultiplePackets(t *testing.T) {
 }
 
 func TestTCPHMACAuth(t *testing.T) {
-	clientID := [16]byte{0xAA, 0xBB}
+	clientID := common.ClientID{0x02, 0xAA, 0xBB, 0, 0, 0}
 
 	serverAuth := &auth.HMACServer{
 		Secrets: map[string][]byte{
@@ -273,7 +273,7 @@ func TestTCPUserPassAuth(t *testing.T) {
 	}
 	defer ln.Close()
 
-	dialer := NewDialer([16]byte{0x01}, common.VNI(0), clientAuth)
+	dialer := NewDialer(common.ClientID{0x02, 0, 0, 0, 0, 0x01}, common.VNI(0), clientAuth)
 
 	var wg sync.WaitGroup
 	wg.Add(1)

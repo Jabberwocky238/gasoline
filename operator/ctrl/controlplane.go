@@ -3,6 +3,7 @@ package ctrl
 import (
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"net"
 	"net/netip"
@@ -15,6 +16,21 @@ import (
 	"github.com/jabberwocky238/gasoline/common"
 )
 
+// vniToBytes / vniFromBytes serialize the 24-bit VNI as a 4-byte big-endian
+// slice on the wire (legacy proto field is `bytes vnet_id`).
+func vniToBytes(vni common.VNI) []byte {
+	var b [4]byte
+	binary.BigEndian.PutUint32(b[:], uint32(vni))
+	return b[:]
+}
+
+func vniFromBytes(b []byte) common.VNI {
+	if len(b) != 4 {
+		return 0
+	}
+	return common.VNI(binary.BigEndian.Uint32(b))
+}
+
 // Config for the control plane.
 type Config struct {
 	UUID         *[16]byte // optional, random if nil
@@ -25,8 +41,8 @@ type Config struct {
 
 	// Callbacks for side effects outside ctrl's domain.
 	// Called synchronously from gRPC handlers — keep them fast.
-	OnSessionSync   func(vni common.VNI, ip netip.Addr)
-	OnSessionRevoke func(vni common.VNI, sessionID [16]byte, ip netip.Addr)
+	OnSessionSync   func(vni common.VNI, cid common.ClientID, ip netip.Addr)
+	OnSessionRevoke func(vni common.VNI, sessionID [16]byte, cid common.ClientID, ip netip.Addr)
 }
 
 // ControlPlane manages inter-operator gRPC communication, peer connections,
@@ -175,16 +191,24 @@ func (c *ControlPlane) PingOperator(uuid [16]byte) error {
 }
 
 // BroadcastSessionSync notifies all peers about a new client session.
-func (c *ControlPlane) BroadcastSessionSync(sessionID [16]byte, vni common.VNI, ip netip.Addr) {
-	ip4 := ip.As4()
+func (c *ControlPlane) BroadcastSessionSync(sessionID [16]byte, vni common.VNI, cid common.ClientID, ip netip.Addr) {
+	var ipBytes []byte
+	if ip.Is4() {
+		a4 := ip.As4()
+		ipBytes = a4[:]
+	} else {
+		a16 := ip.As16()
+		ipBytes = a16[:]
+	}
 	event := &SessionEvent{
 		Event: &SessionEvent_Sync{
 			Sync: &SessionSync{
 				SessionId:    sessionID[:],
-				Vni:          uint32(vni),
+				Vni:          vniToBytes(vni),
 				OperatorUuid: c.uuid[:],
-				IpAddr:       ip4[:],
-				PrefixBits:   32,
+				IpAddr:       ipBytes,
+				PrefixBits:   uint32(ip.BitLen()),
+				Cid:          append([]byte(nil), cid[:]...),
 			},
 		},
 	}
@@ -201,7 +225,7 @@ func (c *ControlPlane) BroadcastSessionRevoke(sessionID [16]byte, vni common.VNI
 		Event: &SessionEvent_Revoke{
 			Revoke: &SessionRevoke{
 				SessionId: sessionID[:],
-				Vni:       uint32(vni),
+				Vni:       vniToBytes(vni),
 			},
 		},
 	}
@@ -212,14 +236,32 @@ func (c *ControlPlane) BroadcastSessionRevoke(sessionID [16]byte, vni common.VNI
 	}
 }
 
-// LookupRemoteSession finds which operator owns a destination IP in a given VNet.
-// Returns the target session ID and operator UUID.
-func (c *ControlPlane) LookupRemoteSession(vni common.VNI, dstIP netip.Addr) (sessionID, operatorUUID [16]byte, found bool) {
+// LookupRemoteClient finds which operator owns a given (VNI, ClientID).
+// Primary forwarding lookup on the data plane — no IP parsing involved.
+func (c *ControlPlane) LookupRemoteClient(vni common.VNI, cid common.ClientID) (sessionID, operatorUUID [16]byte, found bool) {
 	vnet, ok := c.Registry.GetVNet(vni)
 	if !ok {
 		return [16]byte{}, [16]byte{}, false
 	}
-	return vnet.LookupByIP(dstIP)
+	sid, info, ok := vnet.LookupByClientID(cid)
+	if !ok {
+		return [16]byte{}, [16]byte{}, false
+	}
+	return sid, info.OperatorUUID, true
+}
+
+// LookupRemoteSessionByIP resolves a destination IP to (sessionID, clientID, operatorUUID).
+// Used on client ingress to translate IP → ClientID before handing to the MAC-based data plane.
+func (c *ControlPlane) LookupRemoteSessionByIP(vni common.VNI, dstIP netip.Addr) (sessionID [16]byte, cid common.ClientID, operatorUUID [16]byte, found bool) {
+	vnet, ok := c.Registry.GetVNet(vni)
+	if !ok {
+		return [16]byte{}, common.ClientID{}, [16]byte{}, false
+	}
+	sid, info, ok := vnet.LookupByIP(dstIP)
+	if !ok {
+		return [16]byte{}, common.ClientID{}, [16]byte{}, false
+	}
+	return sid, info.ClientID, info.OperatorUUID, true
 }
 
 // --------------- bootstrap / discover ---------------

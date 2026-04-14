@@ -3,6 +3,7 @@ package tests
 import (
 	"testing"
 
+	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/transport/udp"
 )
@@ -11,13 +12,13 @@ func TestCSC_UDP(t *testing.T) {
 	op, vni := setupSingleOperator(t, "udp")
 	defer op.Close()
 
-	connA, resultA, err := udp.NewDialer([16]byte{0x01}, vni, &auth.NoAuthClient{}).Dial(op.ClientAddr())
+	connA, resultA, err := udp.NewDialer(common.ClientID{0x02, 0, 0, 0, 0, 0x01}, vni, &auth.NoAuthClient{}).Dial(op.ClientAddr())
 	if err != nil {
 		t.Fatalf("ClientA dial: %v", err)
 	}
 	defer connA.Close()
 
-	connB, resultB, err := udp.NewDialer([16]byte{0x02}, vni, &auth.NoAuthClient{}).Dial(op.ClientAddr())
+	connB, resultB, err := udp.NewDialer(common.ClientID{0x02, 0, 0, 0, 0, 0x02}, vni, &auth.NoAuthClient{}).Dial(op.ClientAddr())
 	if err != nil {
 		t.Fatalf("ClientB dial: %v", err)
 	}

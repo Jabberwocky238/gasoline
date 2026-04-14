@@ -9,7 +9,13 @@ import (
 const (
 	SessionIDLen    = 16
 	OperatorUUIDLen = 16
+	ClientIDLen     = 6 // MAC-sized; used directly as inner Ethernet MAC
 )
+
+// ClientID is a 6-byte identifier that doubles as the client's inner
+// Ethernet MAC. Should be a locally-administered unicast address
+// (bit 0 of byte 0 clear, bit 1 set) but this is not enforced.
+type ClientID = [ClientIDLen]byte
 
 // VNI is a 24-bit VXLAN Network Identifier.
 // Only the lower 24 bits are used; values 0x01000000 and above are invalid.
@@ -68,10 +74,11 @@ func ParseVNI(s string) (VNI, error) {
 	return VNIFromBytes3(padded), nil
 }
 
-// MTU budget.
+// MTU budget — dual stack.
 //
-// Client TUN MTU is fixed at 1400 bytes. This leaves headroom on a standard
-// 1500-byte underlay for any encapsulation we add on top:
+// We allow different inner-IP sizes per address family so that L4 payload
+// space stays close across stacks while the whole VXLAN-encapsulated frame
+// still fits in a 1500-byte underlay:
 //
 //	Underlay MTU:              1500
 //	- Outer Ethernet:            14
@@ -80,16 +87,50 @@ func ParseVNI(s string) (VNI, error) {
 //	- VXLAN header:               8
 //	- Inner Ethernet:            14
 //	─────────────────────────────────
-//	- Available for inner IP:  1436  (≥ our 1400 TUN MTU)
+//	- Available for inner IP:  1436
 //
-// Any packet handed to the operator data plane that exceeds TunMTU is dropped.
+// Conservative per-family inner IP caps:
+//
+//	IPv4 packet (20B hdr): ≤ 1420  →  L4 payload ≤ 1400
+//	IPv6 packet (40B hdr): ≤ 1400  →  L4 payload ≤ 1360
+//
+// The TUN device is configured with MTU = TunMTUv4 (1420); IPv6 senders
+// must self-limit (or rely on PMTUD) to stay under TunMTUv6 (1400).
 const (
-	TunMTU = 1400
+	TunMTUv4 = 1420
+	TunMTUv6 = 1400
+
+	// TunMTU is the Linux TUN interface MTU (single value, must cover
+	// the larger of the two family caps).
+	TunMTU = TunMTUv4
 
 	// VxlanOverhead = VXLAN header (8) + inner Ethernet (14).
 	VxlanOverhead = 8 + 14
 
 	// MaxVxlanPayload is the maximum UDP datagram payload we will ever emit
-	// on the inter-operator data plane.
-	MaxVxlanPayload = TunMTU + VxlanOverhead // 1422
+	// on the inter-operator data plane (sized to the larger family cap).
+	MaxVxlanPayload = 1500
 )
+
+// InnerIPVersion returns the IP version (4 or 6) of an inner packet, or 0 if invalid.
+func InnerIPVersion(packet []byte) int {
+	if len(packet) < 1 {
+		return 0
+	}
+	v := packet[0] >> 4
+	if v == 4 || v == 6 {
+		return int(v)
+	}
+	return 0
+}
+
+// MTUFor returns the per-family inner-IP cap.
+func MTUFor(version int) int {
+	switch version {
+	case 4:
+		return TunMTUv4
+	case 6:
+		return TunMTUv6
+	}
+	return 0
+}

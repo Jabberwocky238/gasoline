@@ -19,12 +19,12 @@ const (
 	HandshakeFail byte = 0x01
 )
 
-// ConfigFunc generates a SessionConfig for a clientID and VNI after auth succeeds.
-type ConfigFunc func(clientID [16]byte, vni common.VNI) (*SessionConfig, error)
+// ConfigFunc generates a SessionConfig for a ClientID and VNI after auth succeeds.
+type ConfigFunc func(clientID common.ClientID, vni common.VNI) (*SessionConfig, error)
 
 // HandshakeResult is returned after a successful handshake.
 type HandshakeResult struct {
-	ClientID [16]byte
+	ClientID common.ClientID
 	Config   SessionConfig
 	Keypair  *encryption.SessionKeypair
 }
@@ -38,7 +38,7 @@ type HandshakeResult struct {
 //  3. C→S: ClientRequest(auth response)
 //  4. S→C: ServerResponse(status + config)
 //  5. derive AEAD keypair via ECDH
-func ClientHandshake(rw io.ReadWriter, clientID [16]byte, vni common.VNI, authenticator auth.ClientAuthenticator) (*HandshakeResult, error) {
+func ClientHandshake(rw io.ReadWriter, clientID common.ClientID, vni common.VNI, authenticator auth.ClientAuthenticator) (*HandshakeResult, error) {
 	hello := &messages.ClientHello{Version: HandshakeVersion, AuthType: authenticator.Type(), ClientID: clientID, VNI: vni}
 	if err := hello.Encode(rw); err != nil {
 		return nil, fmt.Errorf("send ClientHello: %w", err)

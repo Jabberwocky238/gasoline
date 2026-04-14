@@ -14,56 +14,57 @@ import (
 //   bytes 4-6: VNI   — 24-bit Virtual Network Identifier
 //   byte  7:   reserved
 //
-// Inner Ethernet MAC layout:
-//   byte  0:   (VNI[0] & 0xFE) | 0x02  — unicast + locally-administered
-//   bytes 1-2: lower 16 bits of VNI verbatim
-//   bytes 3-5: first 3 bytes of the peer's SessionID
+// Inner Ethernet:
+//   bytes 0-5:   destination MAC = destination ClientID (6B, verbatim)
+//   bytes 6-11:  source MAC      = source ClientID      (6B, verbatim)
+//   bytes 12-13: EtherType       (0x0800 IPv4 | 0x86DD IPv6)
+//
+// Forwarding decisions are keyed on (VNI, destination ClientID) — the inner
+// IP payload is never inspected by the data plane.
 
 const (
-	maxDatagramSize = 65535
-
 	VxlanHeaderSize = 8
 	EthHeaderSize   = 14
 
 	vxlanFlagsValid = 0x08 // I bit — VNI present
 
-	innerEthType = 0x0800 // IPv4
+	EtherTypeIPv4 = 0x0800
+	EtherTypeIPv6 = 0x86DD
 )
-
-// MACFor synthesises the inner Ethernet MAC for a (VNI, SessionID) pair.
-func MACFor(vni VNI, sessionID [16]byte) [6]byte {
-	v := vni.Bytes3()
-	return [6]byte{
-		(v[0] & 0xFE) | 0x02, // unicast + locally-administered
-		v[1],
-		v[2],
-		sessionID[0],
-		sessionID[1],
-		sessionID[2],
-	}
-}
 
 // DataFrame is a pooled, reusable VXLAN frame buffer.
 type DataFrame struct {
-	buf    [maxDatagramSize]byte
-	VNI    VNI
-	Packet []byte  // slice into buf — inner IP packet
-	Size   int     // total wire size
-	SrcSID [3]byte // first 3 bytes of source SessionID, decoded from inner src MAC
-	DstSID [3]byte // first 3 bytes of destination SessionID, decoded from inner dst MAC
+	buf       [MaxPacketSize]byte
+	VNI       VNI
+	EtherType uint16   // 0x0800 (IPv4) or 0x86DD (IPv6)
+	Packet    []byte   // slice into buf — inner IP packet
+	Size      int      // total wire size
+	SrcCID    ClientID // source client MAC, decoded from inner src MAC
+	DstCID    ClientID // destination client MAC, decoded from inner dst MAC
 }
 
 // Encode writes [VXLAN][Ethernet][IP packet] into the frame's buffer.
-// srcSessionID / dstSessionID are the originating and target client session IDs —
-// their first 3 bytes are embedded in the inner Ethernet src/dst MACs.
-// Panics if packet exceeds TunMTU.
-func (f *DataFrame) Encode(vni VNI, srcSessionID, dstSessionID [16]byte, packet []byte) []byte {
-	if len(packet) > TunMTU {
-		panic(fmt.Sprintf("dataframe: inner packet %d > TunMTU %d", len(packet), TunMTU))
+// srcClientID / dstClientID are placed verbatim into the inner Ethernet
+// source/destination MAC fields. EtherType is derived from the IP version
+// nibble of packet[0] (IPv4 → 0x0800, IPv6 → 0x86DD).
+func (f *DataFrame) Encode(vni VNI, srcClientID, dstClientID ClientID, packet []byte) []byte {
+	version := InnerIPVersion(packet)
+	mtu := MTUFor(version)
+	if mtu == 0 {
+		panic(fmt.Sprintf("dataframe: unknown IP version for packet[0]=0x%02x", packet[0]))
 	}
+	if len(packet) > mtu {
+		panic(fmt.Sprintf("dataframe: inner IPv%d packet %d > mtu %d", version, len(packet), mtu))
+	}
+
 	f.VNI = vni
-	copy(f.SrcSID[:], srcSessionID[:3])
-	copy(f.DstSID[:], dstSessionID[:3])
+	f.SrcCID = srcClientID
+	f.DstCID = dstClientID
+	if version == 6 {
+		f.EtherType = EtherTypeIPv6
+	} else {
+		f.EtherType = EtherTypeIPv4
+	}
 
 	// VXLAN header
 	f.buf[0] = vxlanFlagsValid
@@ -77,11 +78,9 @@ func (f *DataFrame) Encode(vni VNI, srcSessionID, dstSessionID [16]byte, packet 
 	f.buf[7] = 0
 
 	// Inner Ethernet: dst MAC, src MAC, ethertype
-	dstMAC := MACFor(vni, dstSessionID)
-	srcMAC := MACFor(vni, srcSessionID)
-	copy(f.buf[VxlanHeaderSize:], dstMAC[:])
-	copy(f.buf[VxlanHeaderSize+6:], srcMAC[:])
-	binary.BigEndian.PutUint16(f.buf[VxlanHeaderSize+12:], innerEthType)
+	copy(f.buf[VxlanHeaderSize:], dstClientID[:])
+	copy(f.buf[VxlanHeaderSize+6:], srcClientID[:])
+	binary.BigEndian.PutUint16(f.buf[VxlanHeaderSize+12:], f.EtherType)
 
 	// Inner IP packet
 	payloadOffset := VxlanHeaderSize + EthHeaderSize
@@ -110,9 +109,10 @@ func (f *DataFrame) Decode(data []byte) error {
 
 	f.VNI = VNIFromBytes3([3]byte{f.buf[4], f.buf[5], f.buf[6]})
 
-	// Inner Ethernet: recover SessionID prefixes from dst/src MACs (bytes 3-5).
-	copy(f.DstSID[:], f.buf[VxlanHeaderSize+3:VxlanHeaderSize+6])
-	copy(f.SrcSID[:], f.buf[VxlanHeaderSize+6+3:VxlanHeaderSize+6+6])
+	// Inner Ethernet: full 6-byte MACs (= ClientIDs) + EtherType
+	copy(f.DstCID[:], f.buf[VxlanHeaderSize:VxlanHeaderSize+6])
+	copy(f.SrcCID[:], f.buf[VxlanHeaderSize+6:VxlanHeaderSize+12])
+	f.EtherType = binary.BigEndian.Uint16(f.buf[VxlanHeaderSize+12:])
 
 	payloadOffset := VxlanHeaderSize + EthHeaderSize
 	f.Packet = f.buf[payloadOffset:f.Size]
@@ -123,6 +123,7 @@ func (f *DataFrame) Decode(data []byte) error {
 func (f *DataFrame) Reset() {
 	f.Packet = nil
 	f.Size = 0
-	f.SrcSID = [3]byte{}
-	f.DstSID = [3]byte{}
+	f.SrcCID = ClientID{}
+	f.DstCID = ClientID{}
+	f.EtherType = 0
 }

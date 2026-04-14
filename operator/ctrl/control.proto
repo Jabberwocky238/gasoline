@@ -59,13 +59,14 @@ message SessionEvent {
 
 message SessionSync {
   bytes  session_id    = 1; // 16 bytes
-  uint32 vni           = 2; // 24-bit VXLAN Network Identifier
+  bytes  vni       = 2; // 4 bytes big-endian VNI
   bytes  operator_uuid = 3; // 16 bytes
   bytes  ip_addr       = 4; // 4 bytes (IPv4) or 16 bytes (IPv6)
   uint32 prefix_bits   = 5;
+  bytes  cid     = 6; // 6 bytes, MAC-sized forwarding identity
 }
 
 message SessionRevoke {
   bytes  session_id = 1; // 16 bytes
-  uint32 vni        = 2; // 24-bit VNI
+  bytes  vni    = 2; // 4 bytes big-endian VNI
 }

@@ -1,6 +1,7 @@
 package operator
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"net/netip"
 	"strings"
@@ -10,11 +11,17 @@ import (
 )
 
 // VNetPool manages IP allocation for a single VNet.
+//
+// IPv4: sequential pool with recycle list (state-tracking).
+// IPv6: deterministic derivation from (SessionID, VNI) — no state required.
+//       ReserveIP / UnreserveIP / ReleaseIP are no-ops on v6 pools since
+//       there is no shared allocation table to coordinate.
 type VNetPool struct {
 	VNI      common.VNI
 	Prefix   netip.Prefix
 	baseAddr netip.Addr
 
+	// IPv4-only state
 	mu      sync.Mutex
 	next    uint32          // next sequence to try
 	freed   []uint32        // recycled sequences
@@ -22,9 +29,20 @@ type VNetPool struct {
 	maxHost uint32          // max usable host count
 }
 
-// AllocateIP returns the next available IP in this pool.
-// Wraps around the pool to find a free slot.
-func (p *VNetPool) AllocateIP() (netip.Addr, error) {
+// IsV4 reports whether this pool allocates IPv4 addresses.
+func (p *VNetPool) IsV4() bool { return p.Prefix.Addr().Is4() }
+
+// AllocateIP returns an IP for the given session.
+// For IPv4 pools, the sessionID is ignored (sequential allocation).
+// For IPv6 pools, the IP is deterministically derived from (sessionID, VNI).
+func (p *VNetPool) AllocateIP(sessionID [16]byte) (netip.Addr, error) {
+	if !p.IsV4() {
+		return p.deriveV6(sessionID), nil
+	}
+	return p.allocateV4()
+}
+
+func (p *VNetPool) allocateV4() (netip.Addr, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -33,7 +51,7 @@ func (p *VNetPool) AllocateIP() (netip.Addr, error) {
 		seq := p.freed[len(p.freed)-1]
 		p.freed = p.freed[:len(p.freed)-1]
 		if !p.inUse[seq] {
-			ip := addToAddr(p.baseAddr, seq)
+			ip := addToAddrV4(p.baseAddr, seq)
 			p.inUse[seq] = true
 			return ip, nil
 		}
@@ -60,7 +78,7 @@ func (p *VNetPool) AllocateIP() (netip.Addr, error) {
 			continue
 		}
 
-		ip := addToAddr(p.baseAddr, seq)
+		ip := addToAddrV4(p.baseAddr, seq)
 		if !p.Prefix.Contains(ip) {
 			continue
 		}
@@ -70,12 +88,53 @@ func (p *VNetPool) AllocateIP() (netip.Addr, error) {
 	}
 }
 
-// ReleaseIP returns an IP back to the pool for reuse (local allocations only).
+// deriveV6 computes a stateless IPv6 address for a session:
+//
+//	host bits = sha256(SessionID || VNI[3bytes])[: hostBits/8]
+//	result    = prefix | host bits
+//
+// Because the host-bit space is sparse (≥ 64 bits for typical /64 prefixes),
+// collision probability across ~10^9 concurrent sessions is negligible.
+func (p *VNetPool) deriveV6(sessionID [16]byte) netip.Addr {
+	base := p.baseAddr.As16()
+	bits := p.Prefix.Bits()
+
+	// Hash input = sessionID (16B) + VNI (3B big-endian)
+	h := sha256.New()
+	h.Write(sessionID[:])
+	vb := p.VNI.Bytes3()
+	h.Write(vb[:])
+	sum := h.Sum(nil)
+
+	// Overwrite host portion of base with hash bytes.
+	// networkBytes = bits/8; networkBitRemainder handles non-byte-aligned prefixes.
+	networkBytes := bits / 8
+	remainder := bits % 8
+
+	if networkBytes < 16 {
+		// Preserve any partial byte at the boundary.
+		if remainder != 0 {
+			mask := byte(0xFF << (8 - remainder))
+			base[networkBytes] = (base[networkBytes] & mask) | (sum[networkBytes] &^ mask)
+			networkBytes++
+		}
+		// Fill full host bytes from hash.
+		for i := networkBytes; i < 16; i++ {
+			base[i] = sum[i-(bits/8)]
+		}
+	}
+	return netip.AddrFrom16(base)
+}
+
+// ReleaseIP returns an IPv4 address back to the pool. No-op for IPv6.
 func (p *VNetPool) ReleaseIP(ip netip.Addr) {
+	if !ip.Is4() {
+		return
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	seq := p.ipToSeq(ip)
+	seq := p.ipToSeqV4(ip)
 	if !p.inUse[seq] {
 		return
 	}
@@ -83,28 +142,35 @@ func (p *VNetPool) ReleaseIP(ip netip.Addr) {
 	p.freed = append(p.freed, seq)
 }
 
-// ReserveIP marks an IP as in-use (allocated by a remote operator).
+// ReserveIP marks an IPv4 address as in-use. No-op for IPv6 (stateless).
 func (p *VNetPool) ReserveIP(ip netip.Addr) {
+	if !ip.Is4() {
+		return
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.inUse[p.ipToSeq(ip)] = true
+	p.inUse[p.ipToSeqV4(ip)] = true
 }
 
-// UnreserveIP removes a remote reservation.
+// UnreserveIP removes an IPv4 reservation. No-op for IPv6.
 func (p *VNetPool) UnreserveIP(ip netip.Addr) {
+	if !ip.Is4() {
+		return
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	delete(p.inUse, p.ipToSeq(ip))
+	delete(p.inUse, p.ipToSeqV4(ip))
 }
 
-// InUseCount returns the number of currently allocated IPs.
+// InUseCount returns the number of currently allocated IPv4 addresses.
+// Always 0 for IPv6 pools (stateless).
 func (p *VNetPool) InUseCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return len(p.inUse)
 }
 
-func (p *VNetPool) ipToSeq(ip netip.Addr) uint32 {
+func (p *VNetPool) ipToSeqV4(ip netip.Addr) uint32 {
 	b4 := ip.As4()
 	ipVal := uint32(b4[0])<<24 | uint32(b4[1])<<16 | uint32(b4[2])<<8 | uint32(b4[3])
 	base4 := p.baseAddr.As4()
@@ -112,8 +178,20 @@ func (p *VNetPool) ipToSeq(ip netip.Addr) uint32 {
 	return ipVal - baseVal
 }
 
-// NewVNetPool creates a single VNet pool for the given VNI, CIDR prefix, and seed offset.
+// NewVNetPool creates a single VNet pool for the given VNI and CIDR prefix.
+// For v4 prefixes, seed controls the starting offset to spread allocations
+// across operators. For v6, seed is ignored.
 func NewVNetPool(vni common.VNI, prefix netip.Prefix, seed uint32) *VNetPool {
+	p := &VNetPool{
+		VNI:      vni,
+		Prefix:   prefix,
+		baseAddr: prefix.Addr(),
+	}
+	if !prefix.Addr().Is4() {
+		// IPv6: no state needed
+		return p
+	}
+
 	hostBits := 32 - prefix.Bits()
 	usable := uint32(1<<hostBits) - 2
 	offset := uint32(2)
@@ -132,14 +210,10 @@ func NewVNetPool(vni common.VNI, prefix netip.Prefix, seed uint32) *VNetPool {
 	if offset > maxHost {
 		offset = 2
 	}
-	return &VNetPool{
-		VNI:      vni,
-		Prefix:   prefix,
-		baseAddr: prefix.Addr(),
-		next:     offset,
-		inUse:    make(map[uint32]bool),
-		maxHost:  maxHost,
-	}
+	p.next = offset
+	p.inUse = make(map[uint32]bool)
+	p.maxHost = maxHost
+	return p
 }
 
 // --------------- VNetPoolMap ---------------
@@ -154,7 +228,7 @@ func NewVNetPoolMap() *VNetPoolMap {
 }
 
 // ParseVNetPools parses "vni:CIDR;vni:CIDR;..." into a VNetPoolMap.
-// seed is used to spread starting offsets across operators.
+// seed is used to spread starting offsets across operators (IPv4 only).
 func ParseVNetPools(network string, seed uint32) (*VNetPoolMap, error) {
 	m := &VNetPoolMap{pools: make(map[common.VNI]*VNetPool)}
 
@@ -221,7 +295,7 @@ func (m *VNetPoolMap) All() map[common.VNI]*VNetPool {
 	return cp
 }
 
-func addToAddr(base netip.Addr, offset uint32) netip.Addr {
+func addToAddrV4(base netip.Addr, offset uint32) netip.Addr {
 	b4 := base.As4()
 	val := uint32(b4[0])<<24 | uint32(b4[1])<<16 | uint32(b4[2])<<8 | uint32(b4[3])
 	val += offset

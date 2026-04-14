@@ -6,6 +6,8 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
+
+	"github.com/jabberwocky238/gasoline/common"
 )
 
 const saltSize = 32
@@ -60,7 +62,7 @@ func (a *UserPassServer) GenerateChallenge() ([]byte, error) {
 }
 
 // VerifyResponse parses [idLen:1][userid:N][hash:32] and verifies SHA256(stored_pw_hash + nonce).
-func (a *UserPassServer) VerifyResponse(_ [16]byte, challenge, response []byte) error {
+func (a *UserPassServer) VerifyResponse(_ common.ClientID, challenge, response []byte) error {
 	if len(response) < 1 {
 		return fmt.Errorf("userpass: empty response")
 	}

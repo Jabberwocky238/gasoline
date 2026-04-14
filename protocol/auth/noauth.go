@@ -1,7 +1,8 @@
 package auth
 
+import "github.com/jabberwocky238/gasoline/common"
+
 // NoAuthClient sends device fingerprint during handshake.
-// VNI is now sent in the ClientHello, not in the auth payload.
 type NoAuthClient struct {
 	Fingerprint []byte
 }
@@ -16,10 +17,10 @@ func (a *NoAuthClient) Respond(_ []byte) ([]byte, error) {
 // NoAuthServer accepts any client without verification.
 type NoAuthServer struct{}
 
-func (a *NoAuthServer) Type() Type                        { return TypeNoAuth }
+func (a *NoAuthServer) Type() Type                         { return TypeNoAuth }
 func (a *NoAuthServer) GenerateChallenge() ([]byte, error) { return nil, nil }
 
 // VerifyResponse always succeeds for NoAuth.
-func (a *NoAuthServer) VerifyResponse(_ [16]byte, _, _ []byte) error {
+func (a *NoAuthServer) VerifyResponse(_ common.ClientID, _, _ []byte) error {
 	return nil
 }

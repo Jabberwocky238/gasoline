@@ -103,10 +103,7 @@ func runTransfer(t *testing.T, label string, connA, connB transport.Conn, srcIP,
 	for i := range payload {
 		payload[i] = byte(i)
 	}
-	ipPkt := makeIPv4Packet(srcIP, dstIP, payload)
-	wire := make([]byte, 1+len(ipPkt))
-	wire[0] = common.PacketData
-	copy(wire[1:], ipPkt)
+	wire := makeIPv4Packet(srcIP, dstIP, payload)
 
 	// CPU profile — output to project root
 	profilePath := fmt.Sprintf("../cpu_%s.prof", label)

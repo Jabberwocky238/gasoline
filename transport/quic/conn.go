@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"io"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol/encryption"
@@ -22,12 +24,15 @@ type Conn struct {
 	keypair    *encryption.SessionKeypair
 	remoteAddr string
 
-	readMu  sync.Mutex
-	writeMu sync.Mutex
+	readMu     sync.Mutex
+	writeMu    sync.Mutex
+	lastActive atomic.Int64 // UnixNano
 }
 
 func newConn(stream Stream, keypair *encryption.SessionKeypair, remoteAddr string) *Conn {
-	return &Conn{stream: stream, keypair: keypair, remoteAddr: remoteAddr}
+	c := &Conn{stream: stream, keypair: keypair, remoteAddr: remoteAddr}
+	c.lastActive.Store(time.Now().UnixNano())
+	return c
 }
 
 func (c *Conn) WritePacket(data []byte) error {
@@ -44,6 +49,9 @@ func (c *Conn) WritePacket(data []byte) error {
 		return err
 	}
 	_, err := c.stream.Write(encrypted)
+	if err == nil {
+		c.lastActive.Store(time.Now().UnixNano())
+	}
 	return err
 }
 
@@ -69,8 +77,12 @@ func (c *Conn) ReadPacket(buf []byte) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	c.lastActive.Store(time.Now().UnixNano())
 	return len(plain), nil
 }
 
 func (c *Conn) Close() error      { return c.stream.Close() }
 func (c *Conn) RemoteAddr() string { return c.remoteAddr }
+func (c *Conn) LastActive() time.Time {
+	return time.Unix(0, c.lastActive.Load())
+}

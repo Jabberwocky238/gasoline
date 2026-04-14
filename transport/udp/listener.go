@@ -3,8 +3,10 @@ package udp
 import (
 	"fmt"
 	"net"
-	"sync"
+	"net/netip"
+	"sync/atomic"
 
+	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/transport"
@@ -15,16 +17,17 @@ type Listener struct {
 	resolver auth.AuthResolver
 	configFn protocol.ConfigFunc
 
-	mu    sync.RWMutex
-	peers map[string]*virtualPeer // remote addr → peer state
+	// peers is guarded by MutexGuard: map[netip.AddrPort]*virtualPeer
+	// Using netip.AddrPort as key avoids per-packet string allocation from remoteAddr.String().
+	peers *common.MutexGuard[map[netip.AddrPort]*virtualPeer]
 
 	acceptCh chan acceptResult
-	closeCh  chan struct{}
+	closed   atomic.Bool
 }
 
 type virtualPeer struct {
-	incoming   chan []byte // datagrams routed here by muxer
-	conn       *Conn      // set after handshake completes
+	incoming   chan pooledDatagram
+	conn       *Conn
 	remoteAddr *net.UDPAddr
 }
 
@@ -46,102 +49,114 @@ func NewListener(addr string, resolver auth.AuthResolver, configFn protocol.Conf
 		rawConn:  rawConn,
 		resolver: resolver,
 		configFn: configFn,
-		peers:    make(map[string]*virtualPeer),
+		peers:    common.WithGuard(make(map[netip.AddrPort]*virtualPeer)),
 		acceptCh: make(chan acceptResult, 16),
-		closeCh:  make(chan struct{}),
 	}
 	go l.readLoop()
 	return l, nil
 }
 
-// readLoop reads datagrams and demuxes them to virtual peers.
+// readLoop reads datagrams into pool buffers and demuxes them to virtual peers.
+// Inspired by OVS dpif-netdev readLoop: single reader thread, per-flow dispatch.
 func (l *Listener) readLoop() {
-	buf := make([]byte, 65535)
 	for {
-		select {
-		case <-l.closeCh:
+		if l.closed.Load() {
 			return
-		default:
 		}
 
-		n, remoteAddr, err := l.rawConn.ReadFromUDP(buf[:])
+		tmp := common.GetBuffer()
+		n, remoteAddr, err := l.rawConn.ReadFromUDP((*tmp)[:cap(*tmp)])
 		if err != nil {
-			select {
-			case <-l.closeCh:
-			default:
-			}
+			common.PutBuffer(tmp)
 			return
 		}
 
-		key := remoteAddr.String()
-		data := make([]byte, n)
-		copy(data, buf[:n])
+		dg := pooledDatagram{
+			data: (*tmp)[:n],
+			buf:  tmp,
+		}
 
-		l.mu.RLock()
-		vp, exists := l.peers[key]
-		l.mu.RUnlock()
+		// netip.AddrPort is a value type — zero-alloc map key (vs remoteAddr.String())
+		key := remoteAddr.AddrPort()
+
+		// Fast path: existing peer (read lock)
+		var vp *virtualPeer
+		var exists bool
+		l.peers.Read(func(m map[netip.AddrPort]*virtualPeer) {
+			vp, exists = m[key]
+		})
 
 		if exists {
 			select {
-			case vp.incoming <- data:
+			case vp.incoming <- dg:
 			default:
+				dg.release()
 			}
 			continue
 		}
 
-		// New peer — create virtual peer and start handshake
+		// Slow path: new peer (write lock)
 		vp = &virtualPeer{
-			incoming:   make(chan []byte, 64),
+			incoming:   make(chan pooledDatagram, 64),
 			remoteAddr: remoteAddr,
 		}
-		l.mu.Lock()
-		l.peers[key] = vp
-		l.mu.Unlock()
+		l.peers.Write(func(m *map[netip.AddrPort]*virtualPeer) {
+			(*m)[key] = vp
+		})
 
-		vp.incoming <- data
+		vp.incoming <- dg
 
-		go func(vp *virtualPeer) {
-			// Handshake over stream adapter
-			adapter := newVirtualStreamAdapter(l.rawConn, vp.remoteAddr, vp.incoming)
-			result, err := protocol.ServerHandshake(adapter, l.resolver, l.configFn)
-			if err != nil {
-				l.mu.Lock()
-				delete(l.peers, vp.remoteAddr.String())
-				l.mu.Unlock()
-				close(vp.incoming)
-				return
-			}
-
-			// Handshake done — create data conn backed by the same incoming channel
-			conn := newVirtualConn(l.rawConn, vp.remoteAddr, result.Keypair)
-			conn.incoming = vp.incoming // reuse the channel
-			vp.conn = conn
-
-			l.acceptCh <- acceptResult{conn: conn, result: result}
-		}(vp)
+		go l.handshakePeer(vp, key)
 	}
+}
+
+// handshakePeer runs the gasoline handshake for a new peer.
+// On failure, cleans up the peer entry.
+func (l *Listener) handshakePeer(vp *virtualPeer, key netip.AddrPort) {
+	adapter := newVirtualStreamAdapter(l.rawConn, vp.remoteAddr, vp.incoming)
+	result, err := protocol.ServerHandshake(adapter, l.resolver, l.configFn)
+	if err != nil {
+		l.peers.Write(func(m *map[netip.AddrPort]*virtualPeer) {
+			delete(*m, key)
+		})
+		close(vp.incoming)
+		return
+	}
+
+	conn := newVirtualConn(l.rawConn, vp.remoteAddr, result.Keypair)
+	conn.incoming = vp.incoming
+	vp.conn = conn
+
+	l.acceptCh <- acceptResult{conn: conn, result: result}
 }
 
 func (l *Listener) Accept() (transport.Conn, *protocol.HandshakeResult, error) {
-	select {
-	case <-l.closeCh:
+	res, ok := <-l.acceptCh
+	if !ok {
 		return nil, nil, fmt.Errorf("listener closed")
-	case res := <-l.acceptCh:
-		return res.conn, res.result, nil
 	}
+	return res.conn, res.result, nil
 }
 
 func (l *Listener) Close() error {
-	close(l.closeCh)
-	return l.rawConn.Close()
+	if !l.closed.CompareAndSwap(false, true) {
+		return nil
+	}
+	err := l.rawConn.Close()
+	// Close acceptCh so Accept() unblocks.
+	// Any in-flight handshakePeer goroutines will recover from the send-on-closed panic
+	// via the closed flag check, but since rawConn is closed they will fail the handshake
+	// and never reach the send.
+	close(l.acceptCh)
+	return err
 }
 
 func (l *Listener) Addr() string {
 	return l.rawConn.LocalAddr().String()
 }
 
-func (l *Listener) RemoveConn(remoteAddr string) {
-	l.mu.Lock()
-	delete(l.peers, remoteAddr)
-	l.mu.Unlock()
+func (l *Listener) RemoveConn(addr netip.AddrPort) {
+	l.peers.Write(func(m *map[netip.AddrPort]*virtualPeer) {
+		delete(*m, addr)
+	})
 }

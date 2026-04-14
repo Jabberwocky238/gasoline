@@ -54,7 +54,8 @@ func (c *mockConn) Close() error {
 	return nil
 }
 
-func (c *mockConn) RemoteAddr() string { return c.addr }
+func (c *mockConn) RemoteAddr() string    { return c.addr }
+func (c *mockConn) LastActive() time.Time { return time.Now() }
 
 func (c *mockConn) getReceived() [][]byte {
 	c.mu.Lock()
@@ -267,7 +268,6 @@ func TestDataForwarding(t *testing.T) {
 		OperatorID: uuidA,
 		IP:         netip.MustParsePrefix("10.0.0.2/32"),
 	}
-	clientA.Touch()
 	opA.clients.Add(clientA)
 	opA.Ctrl.BroadcastSessionSync(sessionA, vnetID, clientA.IP.Addr())
 	// Start the read loop so OpA processes packets from ClientA through the real path
@@ -284,7 +284,6 @@ func TestDataForwarding(t *testing.T) {
 		OperatorID: uuidB,
 		IP:         netip.MustParsePrefix("10.0.0.3/32"),
 	}
-	clientB.Touch()
 	opB.clients.Add(clientB)
 	opB.Ctrl.BroadcastSessionSync(sessionB, vnetID, clientB.IP.Addr())
 
@@ -299,19 +298,14 @@ func TestDataForwarding(t *testing.T) {
 	}
 
 	// --- ClientA sends a packet destined for ClientB ---
-	// Build raw IP packet, then wrap with data prefix (as a real client would)
 	ipPacket := makeIPv4Packet(
 		netip.MustParseAddr("10.0.0.2"),
 		netip.MustParseAddr("10.0.0.3"),
 		[]byte("hello!!!"),
 	)
-	// Inject with type prefix: [PacketData][IP packet...]
-	wire := make([]byte, 1+len(ipPacket))
-	wire[0] = common.PacketData
-	copy(wire[1:], ipPacket)
-	connA.incoming <- wire
+	connA.incoming <- ipPacket
 
-	// Wait for full path: OpA read → strip prefix → forward UDP → OpB recv → add prefix → deliver to ClientB
+	// Wait for full path: OpA read → forward UDP → OpB recv → deliver to ClientB
 	deadline = time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if len(connB.getReceived()) > 0 {
@@ -324,12 +318,8 @@ func TestDataForwarding(t *testing.T) {
 	if len(received) == 0 {
 		t.Fatal("ClientB received no packets")
 	}
-	// ClientB receives [PacketData][IP packet...] — same as what ClientA sent
-	if len(received[0]) < 2 || received[0][0] != common.PacketData {
-		t.Fatalf("expected data prefix, got: %x", received[0][:min(len(received[0]), 4)])
-	}
-	if !bytes.Equal(received[0][1:], ipPacket) {
-		t.Fatalf("packet payload mismatch:\n  got:  %x\n  want: %x", received[0][1:], ipPacket)
+	if !bytes.Equal(received[0], ipPacket) {
+		t.Fatalf("packet payload mismatch:\n  got:  %x\n  want: %x", received[0], ipPacket)
 	}
 	t.Logf("Data forwarding OK: C(10.0.0.2)→S(A)→S(B)→C(10.0.0.3), %d bytes", len(ipPacket))
 }

@@ -237,15 +237,8 @@ func (o *Operator) routineDataRecv() {
 			continue
 		}
 
-		// Wrap with data prefix before sending to local client
-		pBuf := common.GetBuffer()
-		prefixed := (*pBuf)[:1+len(df.Packet)]
-		prefixed[0] = common.PacketData
-		copy(prefixed[1:], df.Packet)
-
 		o.Stats.Recorder.RecordTx(target.SessionID, uint64(len(df.Packet)))
-		target.Conn.WritePacket(prefixed)
-		common.PutBuffer(pBuf)
+		target.Conn.WritePacket(df.Packet)
 		o.framePool.Put(df)
 	}
 }
@@ -303,7 +296,6 @@ func (o *Operator) routineAcceptClients() {
 			AllowedIPs: result.Config.AllowedRanges,
 		}
 
-		cp.Touch()
 		o.clients.Add(cp)
 		o.Stats.Recorder.Register(cp.SessionID, cp.VNetID, "", conn.RemoteAddr())
 		o.Ctrl.BroadcastSessionSync(cp.SessionID, cp.VNetID, cp.IP.Addr())
@@ -341,30 +333,7 @@ func (o *Operator) routineReadFromClient(cp *ClientPeer) {
 		if n < 1 {
 			continue
 		}
-		data := readBuf[:n]
-
-		// Every packet (data or keepalive) refreshes the session
-		cp.Touch()
-
-		pktType := data[0]
-		payload := data[1:]
-
-		switch pktType {
-		case common.PacketKeepalive:
-			o.log.Debugf("Keepalive from client %x", cp.SessionID)
-			continue
-
-		case common.PacketData:
-			// fall through to routing
-
-		default:
-			o.log.Debugf("Unknown packet type 0x%02x from client %x", pktType, cp.SessionID)
-			continue
-		}
-
-		if len(payload) == 0 {
-			continue
-		}
+		payload := readBuf[:n]
 
 		o.Stats.Recorder.RecordRx(cp.SessionID, uint64(len(payload)))
 		if !o.Stats.RateLimiter.Allow(cp.VNetID, uint64(len(payload))) {
@@ -380,14 +349,14 @@ func (o *Operator) routineReadFromClient(cp *ClientPeer) {
 			continue
 		}
 
-		// Local delivery — add data prefix before sending to peer client
+		// Local delivery
 		if target := o.clients.LookupByIP(dstAddr); target != nil {
 			o.Stats.Recorder.RecordTx(target.SessionID, uint64(len(payload)))
-			target.Conn.WritePacket(data) // data already has prefix
+			target.Conn.WritePacket(payload)
 			continue
 		}
 
-		// Remote forwarding via UDP (inter-operator, no prefix — raw IP)
+		// Remote forwarding via UDP (inter-operator)
 		if o.dataConn != nil && o.forwardToRemote(cp.VNetID, dstAddr, payload) {
 			continue
 		}
@@ -397,9 +366,10 @@ func (o *Operator) routineReadFromClient(cp *ClientPeer) {
 }
 
 // routineReaper periodically scans for idle clients and disconnects them.
+// Session liveness is determined by transport.Conn.LastActive().
 func (o *Operator) routineReaper() {
-	timeout := time.Duration(common.KeepaliveTimeout) * time.Second
-	ticker := time.NewTicker(timeout / 2)
+	const idleTimeout = 60 * time.Second
+	ticker := time.NewTicker(idleTimeout / 2)
 	defer ticker.Stop()
 
 	for {
@@ -409,18 +379,21 @@ func (o *Operator) routineReaper() {
 		case <-ticker.C:
 		}
 
+		now := time.Now()
 		o.clients.mu.RLock()
 		var stale []*ClientPeer
 		for _, cp := range o.clients.peers {
-			if cp.IdleDuration() > timeout {
+			idle := now.Sub(cp.Conn.LastActive())
+			if idle > idleTimeout {
 				stale = append(stale, cp)
 			}
 		}
 		o.clients.mu.RUnlock()
 
 		for _, cp := range stale {
-			o.log.Warnf("Reaping idle client %x (idle %v)", cp.SessionID, cp.IdleDuration().Round(time.Second))
-			cp.Conn.Close() // triggers routineReadFromClient to exit and clean up
+			idle := now.Sub(cp.Conn.LastActive())
+			o.log.Warnf("Reaping idle client %x (idle %v)", cp.SessionID, idle.Round(time.Second))
+			cp.Conn.Close()
 		}
 	}
 }

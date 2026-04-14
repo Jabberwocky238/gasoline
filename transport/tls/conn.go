@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"io"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol/encryption"
@@ -21,12 +23,15 @@ type Conn struct {
 	raw     *tls.Conn
 	keypair *encryption.SessionKeypair
 
-	readMu  sync.Mutex
-	writeMu sync.Mutex
+	readMu     sync.Mutex
+	writeMu    sync.Mutex
+	lastActive atomic.Int64 // UnixNano
 }
 
 func newConn(raw *tls.Conn, keypair *encryption.SessionKeypair) *Conn {
-	return &Conn{raw: raw, keypair: keypair}
+	c := &Conn{raw: raw, keypair: keypair}
+	c.lastActive.Store(time.Now().UnixNano())
+	return c
 }
 
 // WritePacket encrypts one IP packet and writes it as a framed message.
@@ -44,6 +49,9 @@ func (c *Conn) WritePacket(data []byte) error {
 		return err
 	}
 	_, err := c.raw.Write(encrypted)
+	if err == nil {
+		c.lastActive.Store(time.Now().UnixNano())
+	}
 	return err
 }
 
@@ -73,8 +81,12 @@ func (c *Conn) ReadPacket(buf []byte) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	c.lastActive.Store(time.Now().UnixNano())
 	return len(plain), nil
 }
 
 func (c *Conn) Close() error      { return c.raw.Close() }
 func (c *Conn) RemoteAddr() string { return c.raw.RemoteAddr().String() }
+func (c *Conn) LastActive() time.Time {
+	return time.Unix(0, c.lastActive.Load())
+}

@@ -16,14 +16,6 @@ type mockStream struct {
 	mu       sync.Mutex
 }
 
-func newMockStreamPair() (*mockStream, *mockStream) {
-	buf1 := &bytes.Buffer{}
-	buf2 := &bytes.Buffer{}
-	a := &mockStream{readBuf: buf1, writeBuf: buf2}
-	b := &mockStream{readBuf: buf2, writeBuf: buf1}
-	return a, b
-}
-
 func (m *mockStream) Read(p []byte) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -6,7 +6,6 @@ import (
 	"net"
 	"net/netip"
 	"sync"
-	"time"
 
 	log "github.com/sirupsen/logrus"
 	socks5 "github.com/things-go/go-socks5"
@@ -116,7 +115,6 @@ func (c *Client) Start() error {
 
 	go c.routineTUNToConn()
 	go c.routineConnToTUN()
-	go c.routineKeepalive()
 
 	if c.cfg.Socks5Port > 0 {
 		if err := c.startSocks5(); err != nil {
@@ -138,7 +136,7 @@ func (c *Client) routineTUNToConn() {
 		}
 
 		buf := common.GetBuffer()
-		n, err := c.tun.Read((*buf)[1:])
+		n, err := c.tun.Read(*buf)
 		if err != nil {
 			common.PutBuffer(buf)
 			log.Errorf("TUN read: %v", err)
@@ -149,8 +147,7 @@ func (c *Client) routineTUNToConn() {
 			continue
 		}
 
-		(*buf)[0] = common.PacketData
-		if err := c.conn.WritePacket((*buf)[:1+n]); err != nil {
+		if err := c.conn.WritePacket((*buf)[:n]); err != nil {
 			common.PutBuffer(buf)
 			log.Errorf("Conn write: %v", err)
 			return
@@ -180,39 +177,10 @@ func (c *Client) routineConnToTUN() {
 		if n < 1 {
 			continue
 		}
-		data := (*buf)[:n]
-
-		switch data[0] {
-		case common.PacketData:
-			if n < 2 {
-				continue
-			}
-			if _, err := c.tun.Write(data[1:]); err != nil {
-				log.Errorf("TUN write: %v", err)
-				return
-			}
-		case common.PacketKeepalive:
-			// nothing
-		}
-	}
-}
-
-func (c *Client) routineKeepalive() {
-	ticker := time.NewTicker(time.Duration(common.KeepaliveInterval) * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-c.ctx.Done():
-			return
-		case <-ticker.C:
-		}
-
-		if err := c.conn.WritePacket([]byte{common.PacketKeepalive}); err != nil {
-			log.Errorf("Keepalive send failed: %v", err)
+		if _, err := c.tun.Write((*buf)[:n]); err != nil {
+			log.Errorf("TUN write: %v", err)
 			return
 		}
-		log.Debugf("Keepalive sent")
 	}
 }
 

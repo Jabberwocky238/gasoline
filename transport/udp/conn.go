@@ -5,10 +5,26 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol/encryption"
 )
+
+// pooledDatagram carries a datagram backed by a pool buffer.
+// The receiver must call release() after processing.
+type pooledDatagram struct {
+	data []byte  // sub-slice of *buf
+	buf  *[]byte // pool buffer to return
+}
+
+func (d *pooledDatagram) release() {
+	if d.buf != nil {
+		common.PutBuffer(d.buf)
+		d.buf = nil
+	}
+}
 
 // Conn wraps a UDP connection with AEAD encryption.
 // Each datagram = one encrypted packet, no framing needed.
@@ -21,45 +37,52 @@ type Conn struct {
 	keypair    *encryption.SessionKeypair
 
 	// virtual conn fields (server side)
-	incoming  chan []byte
+	incoming  chan pooledDatagram
 	isVirtual bool
-	closed    bool
+	closed    atomic.Bool
 
-	readMu  sync.Mutex
-	writeMu sync.Mutex
+	readMu     sync.Mutex
+	lastActive atomic.Int64 // UnixNano
 }
 
 func newClientConn(rawConn *net.UDPConn, keypair *encryption.SessionKeypair) *Conn {
-	return &Conn{
+	c := &Conn{
 		rawConn:    rawConn,
 		remoteAddr: rawConn.RemoteAddr().(*net.UDPAddr),
 		keypair:    keypair,
 	}
+	c.lastActive.Store(time.Now().UnixNano())
+	return c
 }
 
 func newVirtualConn(rawConn *net.UDPConn, remoteAddr *net.UDPAddr, keypair *encryption.SessionKeypair) *Conn {
-	return &Conn{
+	c := &Conn{
 		rawConn:    rawConn,
 		remoteAddr: remoteAddr,
 		keypair:    keypair,
-		incoming:   make(chan []byte, 64),
+		incoming:   make(chan pooledDatagram, 1024),
 		isVirtual:  true,
 	}
+	c.lastActive.Store(time.Now().UnixNano())
+	return c
 }
 
 // WritePacket encrypts and sends one IP packet as a single UDP datagram.
+// No mutex needed: UDP writes are atomic per datagram, and nonce is atomic.
 func (c *Conn) WritePacket(data []byte) error {
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-
 	tmp := common.GetBuffer()
 	encrypted := c.keypair.Send.Seal(*tmp, data)
-	defer common.PutBuffer(tmp)
+
+	var err error
 	if c.isVirtual {
-		_, err := c.rawConn.WriteToUDP(encrypted, c.remoteAddr)
-		return err
+		_, err = c.rawConn.WriteToUDP(encrypted, c.remoteAddr)
+	} else {
+		_, err = c.rawConn.Write(encrypted)
 	}
-	_, err := c.rawConn.Write(encrypted)
+	if err == nil {
+		c.lastActive.Store(time.Now().UnixNano())
+	}
+	common.PutBuffer(tmp)
 	return err
 }
 
@@ -69,36 +92,40 @@ func (c *Conn) ReadPacket(buf []byte) (int, error) {
 	c.readMu.Lock()
 	defer c.readMu.Unlock()
 
-	var datagram []byte
 	if c.isVirtual {
-		d, ok := <-c.incoming
+		dg, ok := <-c.incoming
 		if !ok {
 			return 0, fmt.Errorf("connection closed")
 		}
-		datagram = d
-	} else {
-		tmp := common.GetBuffer()
-		n, err := c.rawConn.Read(*tmp)
+		plain, err := c.keypair.Receive.Open(buf, dg.data)
+		dg.release()
 		if err != nil {
-			common.PutBuffer(tmp)
 			return 0, err
 		}
-		datagram = (*tmp)[:n]
-		defer common.PutBuffer(tmp)
+		c.lastActive.Store(time.Now().UnixNano())
+		return len(plain), nil
 	}
 
-	plain, err := c.keypair.Receive.Open(buf, datagram)
+	// Client side: read directly into pool buffer
+	tmp := common.GetBuffer()
+	n, err := c.rawConn.Read(*tmp)
+	if err != nil {
+		common.PutBuffer(tmp)
+		return 0, err
+	}
+	plain, err := c.keypair.Receive.Open(buf, (*tmp)[:n])
+	common.PutBuffer(tmp)
 	if err != nil {
 		return 0, err
 	}
+	c.lastActive.Store(time.Now().UnixNano())
 	return len(plain), nil
 }
 
 func (c *Conn) Close() error {
-	if c.closed {
+	if !c.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-	c.closed = true
 	if c.isVirtual {
 		close(c.incoming)
 		return nil
@@ -108,6 +135,10 @@ func (c *Conn) Close() error {
 
 func (c *Conn) RemoteAddr() string {
 	return c.remoteAddr.String()
+}
+
+func (c *Conn) LastActive() time.Time {
+	return time.Unix(0, c.lastActive.Load())
 }
 
 // --------------- Stream adapter for handshake phase ---------------
@@ -155,13 +186,18 @@ func newClientStreamAdapter(raw *net.UDPConn) *streamAdapter {
 }
 
 // newVirtualStreamAdapter wraps a virtual conn's incoming channel for handshake.
-func newVirtualStreamAdapter(rawConn *net.UDPConn, remoteAddr *net.UDPAddr, incoming chan []byte) *streamAdapter {
+// During handshake, pool buffers are released immediately after reading.
+func newVirtualStreamAdapter(rawConn *net.UDPConn, remoteAddr *net.UDPAddr, incoming chan pooledDatagram) *streamAdapter {
 	return &streamAdapter{
 		readDatagram: func() ([]byte, error) {
-			data, ok := <-incoming
+			dg, ok := <-incoming
 			if !ok {
 				return nil, fmt.Errorf("connection closed")
 			}
+			// Copy out during handshake (small messages), release pool buffer immediately
+			data := make([]byte, len(dg.data))
+			copy(data, dg.data)
+			dg.release()
 			return data, nil
 		},
 		writeDatagram: func(p []byte) error {

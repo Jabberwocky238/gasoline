@@ -18,7 +18,7 @@ func RegisterClientFlags(fs *flag.FlagSet) func() *ClientConfig {
 	transportType := fs.String("transport", "quic", "transport type: tcp, udp, quic")
 	authStr := fs.String("auth", "noauth", "auth config string")
 	vniStr := fs.String("vni", "", "VXLAN Network Identifier (decimal, e.g. 200)")
-	clientIDStr := fs.String("client-id", "", "6-byte MAC-style client ID, e.g. 02:00:00:aa:bb:cc (random if empty)")
+	vmacStr := fs.String("vmac", "", "6-byte virtual MAC, e.g. 02:00:00:aa:bb:cc (random if empty)")
 	tunName := fs.String("tun-name", "", "TUN device name")
 	socks5Port := fs.Int("quick-socks5", 0, "SOCKS5 proxy port (0=disabled, must be >1024)")
 
@@ -66,9 +66,9 @@ func RegisterClientFlags(fs *flag.FlagSet) func() *ClientConfig {
 			os.Exit(1)
 		}
 
-		cid, err := resolveClientID(*clientIDStr)
+		vmac, err := resolveVMAC(*vmacStr)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Invalid --client-id %q: %v\n", *clientIDStr, err)
+			fmt.Fprintf(os.Stderr, "Invalid --vmac %q: %v\n", *vmacStr, err)
 			os.Exit(1)
 		}
 
@@ -77,32 +77,32 @@ func RegisterClientFlags(fs *flag.FlagSet) func() *ClientConfig {
 			Transport:  *transportType,
 			AuthStr:    *authStr,
 			VNI:        vni,
-			ClientID:   cid,
+			VMAC:       vmac,
 			TUNName:    *tunName,
 			Socks5Port: *socks5Port,
 		}
 	}
 }
 
-// resolveClientID parses a MAC-formatted client ID (e.g. "02:00:00:aa:bb:cc"
-// or "020000aabbcc") or generates a random one if empty.
-func resolveClientID(s string) (ClientID, error) {
-	var cid ClientID
+// resolveVMAC parses a MAC-formatted address (e.g. "02:00:00:aa:bb:cc"
+// or "020000aabbcc") or generates a random locally-administered one if empty.
+func resolveVMAC(s string) (VMAC, error) {
+	var v VMAC
 	if s == "" {
-		if _, err := rand.Read(cid[:]); err != nil {
-			return cid, err
+		if _, err := rand.Read(v[:]); err != nil {
+			return v, err
 		}
-		cid[0] = (cid[0] & 0xFE) | 0x02 // unicast + locally-administered
-		return cid, nil
+		v[0] = (v[0] & 0xFE) | 0x02 // unicast + locally-administered
+		return v, nil
 	}
 	hexStr := strings.ReplaceAll(strings.ReplaceAll(s, ":", ""), "-", "")
 	b, err := hex.DecodeString(hexStr)
 	if err != nil {
-		return cid, err
+		return v, err
 	}
-	if len(b) != ClientIDLen {
-		return cid, fmt.Errorf("must be %d bytes, got %d", ClientIDLen, len(b))
+	if len(b) != VMACLen {
+		return v, fmt.Errorf("must be %d bytes, got %d", VMACLen, len(b))
 	}
-	copy(cid[:], b)
-	return cid, nil
+	copy(v[:], b)
+	return v, nil
 }

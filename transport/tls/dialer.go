@@ -10,14 +10,14 @@ import (
 )
 
 type Dialer struct {
-	clientID common.ClientID
+	vmac common.VMAC
 	vni      common.VNI
 	auth     auth.ClientAuthenticator
 	tlsConf  *tls.Config
 }
 
-func NewDialer(clientID common.ClientID, vni common.VNI, auth auth.ClientAuthenticator, tlsConf *tls.Config) *Dialer {
-	return &Dialer{clientID: clientID, vni: vni, auth: auth, tlsConf: tlsConf}
+func NewDialer(vmac common.VMAC, vni common.VNI, auth auth.ClientAuthenticator, tlsConf *tls.Config) *Dialer {
+	return &Dialer{vmac:     vmac, vni: vni, auth: auth, tlsConf: tlsConf}
 }
 
 func (d *Dialer) Dial(endpoint string) (transport.Conn, *protocol.HandshakeResult, error) {
@@ -25,7 +25,7 @@ func (d *Dialer) Dial(endpoint string) (transport.Conn, *protocol.HandshakeResul
 	if err != nil {
 		return nil, nil, err
 	}
-	result, err := protocol.ClientHandshake(raw, d.clientID, d.vni, d.auth)
+	result, err := protocol.ClientHandshake(raw, d.vmac, d.vni, d.auth)
 	if err != nil {
 		raw.Close()
 		return nil, nil, err

@@ -16,7 +16,7 @@ func testConfigFn() protocol.ConfigFunc {
 	serverPriv, _ := encryption.NewPrivateKey()
 	serverPub := serverPriv.PublicKey()
 
-	return func(clientID common.ClientID, vni common.VNI) (*protocol.SessionConfig, error) {
+	return func(vmac common.VMAC, vni common.VNI) (*protocol.SessionConfig, error) {
 		clientPriv, _ := encryption.NewPrivateKey()
 		return &protocol.SessionConfig{
 			ClientPrivateKey: clientPriv,
@@ -41,8 +41,8 @@ func TestUDPHandshakeAndPacket(t *testing.T) {
 	defer ln.Close()
 
 	addr := ln.Addr()
-	clientID := common.ClientID{0x02, 0x10, 0x20, 0x30, 0, 0}
-	dialer := NewDialer(clientID, common.VNI(0), &auth.NoAuthClient{})
+	vmac := common.VMAC{0x02, 0x10, 0x20, 0x30, 0, 0}
+	dialer := NewDialer(vmac, common.VNI(0), &auth.NoAuthClient{})
 
 	var wg sync.WaitGroup
 	var serverConn *Conn
@@ -75,10 +75,10 @@ func TestUDPHandshakeAndPacket(t *testing.T) {
 	}
 
 	// Verify handshake
-	if clientResult.ClientID != clientID {
+	if clientResult.VMAC != vmac {
 		t.Errorf("client ID mismatch")
 	}
-	if serverResult.ClientID != clientID {
+	if serverResult.VMAC != vmac {
 		t.Errorf("server got wrong client ID")
 	}
 	if clientResult.Config.IPPrefix.String() != "10.0.0.2/24" {
@@ -157,7 +157,7 @@ func TestUDPMultiplePackets(t *testing.T) {
 	}
 	defer ln.Close()
 
-	dialer := NewDialer(common.ClientID{}, common.VNI(0), &auth.NoAuthClient{})
+	dialer := NewDialer(common.VMAC{}, common.VNI(0), &auth.NoAuthClient{})
 
 	var wg sync.WaitGroup
 	var sConn *Conn
@@ -212,7 +212,7 @@ func TestUDPMultiplePackets(t *testing.T) {
 func TestUDPMultipleClients(t *testing.T) {
 	serverAuth := &auth.NoAuthServer{}
 	clientCount := 0
-	configFn := func(clientID common.ClientID, vni common.VNI) (*protocol.SessionConfig, error) {
+	configFn := func(vmac common.VMAC, vni common.VNI) (*protocol.SessionConfig, error) {
 		clientCount++
 		clientPriv, _ := encryption.NewPrivateKey()
 		serverPriv, _ := encryption.NewPrivateKey()
@@ -252,7 +252,7 @@ func TestUDPMultipleClients(t *testing.T) {
 	// Dial from multiple clients
 	clientConns := make([]interface{}, numClients)
 	for i := 0; i < numClients; i++ {
-		id := common.ClientID{0x02, 0, 0, 0, 0, byte(i)}
+		id := common.VMAC{0x02, 0, 0, 0, 0, byte(i)}
 		d := NewDialer(id, common.VNI(0), &auth.NoAuthClient{})
 		c, _, err := d.Dial(addr)
 		if err != nil {

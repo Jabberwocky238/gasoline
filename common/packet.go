@@ -9,13 +9,16 @@ import (
 const (
 	SessionIDLen    = 16
 	OperatorUUIDLen = 16
-	ClientIDLen     = 6 // MAC-sized; used directly as inner Ethernet MAC
+	VMACLen         = 6 // virtual MAC; the client's inner Ethernet address
 )
 
-// ClientID is a 6-byte identifier that doubles as the client's inner
-// Ethernet MAC. Should be a locally-administered unicast address
-// (bit 0 of byte 0 clear, bit 1 set) but this is not enforced.
-type ClientID = [ClientIDLen]byte
+// VMAC is the client's 6-byte virtual MAC address — the forwarding identity
+// throughout the L2 overlay. Should be a locally-administered unicast address
+// (bit 0 of byte 0 clear, bit 1 set) but this is not enforced here.
+type VMAC = [VMACLen]byte
+
+// EthBroadcastMAC is FF:FF:FF:FF:FF:FF — used for ARP requests.
+var EthBroadcastMAC = VMAC{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}
 
 // VNI is a 24-bit VXLAN Network Identifier.
 // Only the lower 24 bits are used; values 0x01000000 and above are invalid.

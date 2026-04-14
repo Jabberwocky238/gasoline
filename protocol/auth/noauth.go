@@ -21,6 +21,6 @@ func (a *NoAuthServer) Type() Type                         { return TypeNoAuth }
 func (a *NoAuthServer) GenerateChallenge() ([]byte, error) { return nil, nil }
 
 // VerifyResponse always succeeds for NoAuth.
-func (a *NoAuthServer) VerifyResponse(_ common.ClientID, _, _ []byte) error {
+func (a *NoAuthServer) VerifyResponse(_ common.VMAC, _, _ []byte) error {
 	return nil
 }

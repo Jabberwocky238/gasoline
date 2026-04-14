@@ -8,6 +8,8 @@ import (
 	"github.com/jabberwocky238/gasoline/common"
 )
 
+// VNetSessions lives in vni-table.go — O(1) triple-indexed session table.
+
 type OperatorInfo struct {
 	Addr     string
 	PingCost time.Duration
@@ -16,61 +18,8 @@ type OperatorInfo struct {
 
 type SessionInfo struct {
 	OperatorUUID [16]byte
-	ClientID     common.ClientID
+	VMAC         common.VMAC
 	IP           netip.Addr
-}
-
-type VNetSessions struct {
-	mu       sync.RWMutex
-	Sessions map[[16]byte]*SessionInfo // sessionID -> info
-}
-
-func newVNetSessions() *VNetSessions {
-	return &VNetSessions{Sessions: make(map[[16]byte]*SessionInfo)}
-}
-
-func (v *VNetSessions) Add(sessionID [16]byte, info *SessionInfo) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	v.Sessions[sessionID] = info
-}
-
-func (v *VNetSessions) Remove(sessionID [16]byte) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	delete(v.Sessions, sessionID)
-}
-
-func (v *VNetSessions) Get(sessionID [16]byte) (*SessionInfo, bool) {
-	v.mu.RLock()
-	defer v.mu.RUnlock()
-	s, ok := v.Sessions[sessionID]
-	return s, ok
-}
-
-// LookupByIP finds a session matching the given IP address.
-func (v *VNetSessions) LookupByIP(ip netip.Addr) (sessionID [16]byte, info *SessionInfo, found bool) {
-	v.mu.RLock()
-	defer v.mu.RUnlock()
-	for sid, s := range v.Sessions {
-		if s.IP == ip {
-			return sid, s, true
-		}
-	}
-	return [16]byte{}, nil, false
-}
-
-// LookupByClientID finds a session by ClientID. Primary forwarding path
-// on the data plane — does not touch inner packet payload.
-func (v *VNetSessions) LookupByClientID(cid common.ClientID) (sessionID [16]byte, info *SessionInfo, found bool) {
-	v.mu.RLock()
-	defer v.mu.RUnlock()
-	for sid, s := range v.Sessions {
-		if s.ClientID == cid {
-			return sid, s, true
-		}
-	}
-	return [16]byte{}, nil, false
 }
 
 // Registry holds cluster state: known operators and remote sessions.

@@ -19,7 +19,7 @@ func testConfigFn() protocol.ConfigFunc {
 	serverPriv, _ := encryption.NewPrivateKey()
 	serverPub := serverPriv.PublicKey()
 
-	return func(clientID common.ClientID, vni common.VNI) (*protocol.SessionConfig, error) {
+	return func(vmac common.VMAC, vni common.VNI) (*protocol.SessionConfig, error) {
 		clientPriv, _ := encryption.NewPrivateKey()
 		return &protocol.SessionConfig{
 			ClientPrivateKey: clientPriv,
@@ -49,9 +49,9 @@ func TestTLSHandshakeAndPacket(t *testing.T) {
 	defer ln.Close()
 
 	addr := ln.Addr()
-	clientID := common.ClientID{0x02, 0x01, 0x02, 0x03, 0x04, 0x05}
+	vmac := common.VMAC{0x02, 0x01, 0x02, 0x03, 0x04, 0x05}
 	clientTLS := qtls.InsecureClientTLS()
-	dialer := NewDialer(clientID, common.VNI(0), &auth.NoAuthClient{}, clientTLS)
+	dialer := NewDialer(vmac, common.VNI(0), &auth.NoAuthClient{}, clientTLS)
 
 	var wg sync.WaitGroup
 	var serverConn *Conn
@@ -84,10 +84,10 @@ func TestTLSHandshakeAndPacket(t *testing.T) {
 	}
 
 	// Verify handshake results
-	if clientResult.ClientID != clientID {
+	if clientResult.VMAC != vmac {
 		t.Errorf("client ID mismatch")
 	}
-	if serverResult.ClientID != clientID {
+	if serverResult.VMAC != vmac {
 		t.Errorf("server got wrong client ID")
 	}
 	if clientResult.Config.IPPrefix.String() != "10.0.0.2/24" {
@@ -172,7 +172,7 @@ func TestTLSMultiplePackets(t *testing.T) {
 	defer ln.Close()
 
 	clientTLS := qtls.InsecureClientTLS()
-	dialer := NewDialer(common.ClientID{}, common.VNI(0), &auth.NoAuthClient{}, clientTLS)
+	dialer := NewDialer(common.VMAC{}, common.VNI(0), &auth.NoAuthClient{}, clientTLS)
 
 	var wg sync.WaitGroup
 	var sConn *Conn
@@ -225,7 +225,7 @@ func TestTLSMultiplePackets(t *testing.T) {
 }
 
 func TestTLSHMACAuth(t *testing.T) {
-	clientID := common.ClientID{0x02, 0xAA, 0xBB, 0, 0, 0}
+	vmac := common.VMAC{0x02, 0xAA, 0xBB, 0, 0, 0}
 
 	serverAuth := &auth.HMACServer{
 		Secrets: map[string][]byte{
@@ -247,7 +247,7 @@ func TestTLSHMACAuth(t *testing.T) {
 	defer ln.Close()
 
 	clientTLS := qtls.InsecureClientTLS()
-	dialer := NewDialer(clientID, common.VNI(0), clientAuth, clientTLS)
+	dialer := NewDialer(vmac, common.VNI(0), clientAuth, clientTLS)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -266,8 +266,8 @@ func TestTLSHMACAuth(t *testing.T) {
 	defer conn.Close()
 	wg.Wait()
 
-	if result.ClientID != clientID {
-		t.Errorf("clientID mismatch")
+	if result.VMAC != vmac {
+		t.Errorf("vmac mismatch")
 	}
 }
 
@@ -297,7 +297,7 @@ func TestTLSUserPassAuth(t *testing.T) {
 	defer ln.Close()
 
 	clientTLS := qtls.InsecureClientTLS()
-	dialer := NewDialer(common.ClientID{0x02, 0, 0, 0, 0, 0x01}, common.VNI(0), clientAuth, clientTLS)
+	dialer := NewDialer(common.VMAC{0x02, 0, 0, 0, 0, 0x01}, common.VNI(0), clientAuth, clientTLS)
 
 	var wg sync.WaitGroup
 	wg.Add(1)

@@ -14,6 +14,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/jabberwocky238/gasoline/common"
+	"github.com/jabberwocky238/gasoline/device/vxlan"
 	"github.com/jabberwocky238/gasoline/operator/ctrl"
 	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
@@ -24,11 +25,14 @@ import (
 	transportTcp "github.com/jabberwocky238/gasoline/transport/tcp"
 	transportTls "github.com/jabberwocky238/gasoline/transport/tls"
 	transportUdp "github.com/jabberwocky238/gasoline/transport/udp"
-
-	"golang.org/x/net/ipv4"
-	"golang.org/x/net/ipv6"
 )
 
+// Operator wires together: client transport listener, control plane (gRPC),
+// and a vxlan.Plane that handles all L2 forwarding (local + inter-operator).
+//
+// The data plane is now entirely owned by Plane; Operator only provides
+// orchestration (accept clients, register them as Ports on the Plane,
+// shovel client→Conn frames into Plane.Forward).
 type Operator struct {
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -41,9 +45,14 @@ type Operator struct {
 	Stats          *stats.Engine
 	VNetPools      *VNetPoolMap
 
-	// UDP data plane for inter-operator packet forwarding.
 	dataConn *net.UDPConn
+	plane    *vxlan.Plane
 }
+
+// connPort wraps a transport.Conn into a vxlan.Port.
+type connPort struct{ conn transport.Conn }
+
+func (p *connPort) SendFrame(frame []byte) error { return p.conn.WritePacket(frame) }
 
 func New(cfg *common.OperatorConfig) (*Operator, error) {
 	logger := log.New()
@@ -119,16 +128,31 @@ func New(cfg *common.OperatorConfig) (*Operator, error) {
 		DiscoverAddrs: cfg.DiscoverAddrs,
 		Log:           logger,
 	}
-	if pools != nil {
-		ctrlCfg.OnSessionSync = func(vni common.VNI, _ common.ClientID, ip netip.Addr) {
+
+	// Hook ctrl events into the VXLAN plane:
+	//   SessionSync(vmac on opUUID @ ip)  → seed plane MAC table with peer's UDPAddr
+	//   SessionRevoke(...)                → forget the remote MAC entry
+	ctrlCfg.OnSessionSync = func(vni common.VNI, opUUID [16]byte, vmac common.VMAC, ip netip.Addr) {
+		if pools != nil {
 			if pool, ok := pools.Get(vni); ok {
 				pool.ReserveIP(ip)
 			}
 		}
-		ctrlCfg.OnSessionRevoke = func(vni common.VNI, _ [16]byte, _ common.ClientID, ip netip.Addr) {
+		if op.plane == nil || opUUID == op.Ctrl.UUID() {
+			return
+		}
+		if peer, ok := op.Ctrl.Peers.Get(opUUID); ok && peer.UDPAddr != nil {
+			op.plane.Table().LearnRemote(vni, vmac, peer.UDPAddr)
+		}
+	}
+	ctrlCfg.OnSessionRevoke = func(vni common.VNI, _ [16]byte, _ [16]byte, vmac common.VMAC, ip netip.Addr) {
+		if pools != nil {
 			if pool, ok := pools.Get(vni); ok {
 				pool.UnreserveIP(ip)
 			}
+		}
+		if op.plane != nil {
+			op.plane.Table().ForgetRemote(vni, vmac)
 		}
 	}
 	op.Ctrl = ctrl.New(ctrlCfg)
@@ -136,18 +160,26 @@ func New(cfg *common.OperatorConfig) (*Operator, error) {
 	return op, nil
 }
 
-func (o *Operator) UUID() [16]byte          { return o.Ctrl.UUID() }
-func (o *Operator) GRPCAddr() string        { return o.Ctrl.GRPCAddr() }
-func (o *Operator) ClientAddr() string      { if o.clientListener != nil { return o.clientListener.Addr() }; return "" }
+func (o *Operator) UUID() [16]byte   { return o.Ctrl.UUID() }
+func (o *Operator) GRPCAddr() string { return o.Ctrl.GRPCAddr() }
+func (o *Operator) ClientAddr() string {
+	if o.clientListener != nil {
+		return o.clientListener.Addr()
+	}
+	return ""
+}
 func (o *Operator) ConnectedClients() int   { return o.clients.Len() }
 func (o *Operator) ConnectedOperators() int { return o.Ctrl.Peers.Len() }
+
+// Plane exposes the underlying VXLAN data plane (for tests/inspection).
+func (o *Operator) Plane() *vxlan.Plane { return o.plane }
 
 func (o *Operator) Start() error {
 	if err := o.Ctrl.Start(); err != nil {
 		return err
 	}
 
-	// UDP data plane: bind on same port as gRPC (TCP and UDP can share a port)
+	// UDP data plane bound on the same port as gRPC (TCP and UDP coexist).
 	if grpcAddr := o.Ctrl.GRPCAddr(); grpcAddr != "" {
 		udpAddr, err := net.ResolveUDPAddr("udp", grpcAddr)
 		if err != nil {
@@ -157,8 +189,9 @@ func (o *Operator) Start() error {
 		if err != nil {
 			return fmt.Errorf("data udp listen on %s: %w", grpcAddr, err)
 		}
-		o.log.Infof("Data plane UDP listening on %s", o.dataConn.LocalAddr())
-		go o.routineDataRecv()
+		o.plane = vxlan.New(o.dataConn)
+		o.plane.Start() // RxLoop: decap + Forward + remote MAC learning
+		o.log.Infof("VXLAN plane bound to %s", o.dataConn.LocalAddr())
 	}
 
 	if o.clientListener != nil {
@@ -166,7 +199,6 @@ func (o *Operator) Start() error {
 		go o.routineAcceptClients()
 	}
 
-	// Session reaper: periodically kick idle clients
 	go o.routineReaper()
 
 	if err := o.Stats.Start(); err != nil {
@@ -178,6 +210,9 @@ func (o *Operator) Start() error {
 func (o *Operator) Close() error {
 	o.cancel()
 	o.Ctrl.Stop()
+	if o.plane != nil {
+		o.plane.Close()
+	}
 	if o.dataConn != nil {
 		o.dataConn.Close()
 	}
@@ -187,78 +222,6 @@ func (o *Operator) Close() error {
 	o.clients.CloseAll()
 	o.Stats.Close()
 	return nil
-}
-
-// --------------- UDP data plane (inter-operator) ---------------
-
-// routineDataRecv reads data frames from other operators via UDP
-// and delivers packets to local clients.
-func (o *Operator) routineDataRecv() {
-	readBuf := make([]byte, common.MaxVxlanPayload)
-	for {
-		select {
-		case <-o.ctx.Done():
-			return
-		default:
-		}
-
-		n, _, err := o.dataConn.ReadFromUDP(readBuf)
-		if err != nil {
-			select {
-			case <-o.ctx.Done():
-			default:
-				o.log.Errorf("Data recv: %v", err)
-			}
-			return
-		}
-
-		df := common.GetFrame()
-		if err := df.Decode(readBuf[:n]); err != nil {
-			common.PutFrame(df)
-			continue
-		}
-
-		// Pure (VNI, dstCID) forwarding — no inner IP parsing.
-		target := o.clients.LookupByCID(df.VNI, df.DstCID)
-		if target == nil {
-			common.PutFrame(df)
-			continue
-		}
-
-		o.Stats.Recorder.RecordTx(target.SessionID, uint64(len(df.Packet)))
-		target.Conn.WritePacket(df.Packet)
-		common.PutFrame(df)
-	}
-}
-
-// forwardToRemote wraps the packet in VXLAN (inner Eth dst MAC = dstClientID)
-// and sends it to the owning operator. Caller provides srcClientID & dstClientID —
-// no packet-payload inspection happens here.
-func (o *Operator) forwardToRemote(srcVNI common.VNI, srcClientID, dstClientID common.ClientID, opUUID [16]byte, packet []byte) bool {
-	version := common.InnerIPVersion(packet)
-	mtu := common.MTUFor(version)
-	if mtu == 0 || len(packet) > mtu {
-		o.log.Warnf("forwardToRemote: invalid/oversize IPv%d packet %d, dropping", version, len(packet))
-		return false
-	}
-	if opUUID == o.Ctrl.UUID() {
-		return false
-	}
-
-	peer, ok := o.Ctrl.Peers.Get(opUUID)
-	if !ok || peer.UDPAddr == nil {
-		return false
-	}
-
-	df := common.GetFrame()
-	wire := df.Encode(srcVNI, srcClientID, dstClientID, packet)
-	_, err := o.dataConn.WriteToUDP(wire, peer.UDPAddr)
-	common.PutFrame(df)
-	if err != nil {
-		o.log.Errorf("forwardToRemote WriteToUDP: %v", err)
-		return false
-	}
-	return true
 }
 
 // --------------- Client data plane ---------------
@@ -282,7 +245,7 @@ func (o *Operator) routineAcceptClients() {
 		cp := &ClientPeer{
 			Conn:       conn,
 			SessionID:  result.Config.SessionID,
-			ClientID:   result.ClientID,
+			VMAC:       result.VMAC,
 			VNI:        result.Config.VNI,
 			OperatorID: o.Ctrl.UUID(),
 			IP:         result.Config.IPPrefix,
@@ -290,18 +253,28 @@ func (o *Operator) routineAcceptClients() {
 		}
 
 		o.clients.Add(cp)
+		// Register the client conn as a Port on the VXLAN plane.
+		if o.plane != nil {
+			o.plane.RegisterPort(cp.VNI, cp.VMAC, &connPort{conn: cp.Conn})
+		}
 		o.Stats.Recorder.Register(cp.SessionID, cp.VNI, "", conn.RemoteAddr())
-		o.Ctrl.BroadcastSessionSync(cp.SessionID, cp.VNI, cp.ClientID, cp.IP.Addr())
+		o.Ctrl.BroadcastSessionSync(cp.SessionID, cp.VNI, cp.VMAC, cp.IP.Addr())
 
 		o.log.Infof("Client %x connected, assigned %s from %s",
-			result.ClientID, result.Config.IPPrefix, conn.RemoteAddr())
+			result.VMAC, result.Config.IPPrefix, conn.RemoteAddr())
 		go o.routineReadFromClient(cp)
 	}
 }
 
+// routineReadFromClient reads Eth frames from the client and hands them to
+// the VXLAN plane for forwarding. The plane decides local-port delivery,
+// remote-operator VXLAN encap, or broadcast flood.
 func (o *Operator) routineReadFromClient(cp *ClientPeer) {
 	defer func() {
 		o.clients.Remove(cp)
+		if o.plane != nil {
+			o.plane.UnregisterPort(cp.VNI, cp.VMAC)
+		}
 		o.Stats.Recorder.Unregister(cp.SessionID)
 		o.Ctrl.BroadcastSessionRevoke(cp.SessionID, cp.VNI)
 		cp.Conn.Close()
@@ -323,55 +296,22 @@ func (o *Operator) routineReadFromClient(cp *ClientPeer) {
 			o.log.Errorf("Read from client %x: %v", cp.SessionID, err)
 			return
 		}
-		if n < 1 {
+		if n < common.EthHeaderSize {
 			continue
 		}
-		payload := readBuf[:n]
-		version := common.InnerIPVersion(payload)
-		mtu := common.MTUFor(version)
-		if mtu == 0 {
-			o.log.Warnf("Client %x sent packet with bad IP version 0x%02x, dropping", cp.SessionID, payload[0])
-			continue
-		}
-		if n > mtu {
-			o.log.Warnf("Client %x sent oversize IPv%d packet %d > %d, dropping", cp.SessionID, version, n, mtu)
+		if n > common.MaxVxlanPayload {
+			o.log.Warnf("Client %x oversize frame %d > %d, dropping", cp.SessionID, n, common.MaxVxlanPayload)
 			continue
 		}
 
-		o.Stats.Recorder.RecordRx(cp.SessionID, uint64(len(payload)))
-		if !o.Stats.RateLimiter.Allow(cp.VNI, uint64(len(payload))) {
+		o.Stats.Recorder.RecordRx(cp.SessionID, uint64(n))
+		if !o.Stats.RateLimiter.Allow(cp.VNI, uint64(n)) {
 			continue
 		}
 
-		// Ingress-time translation: client sends raw IP, operator resolves
-		// dstIP → dstClientID once via the registry. After that point, all
-		// forwarding is pure (VNI, ClientID) — inner IP payload is never
-		// inspected again.
-		dstIPRaw, err := packetDstIP(payload)
-		if err != nil {
-			continue
+		if o.plane != nil {
+			_ = o.plane.Forward(cp.VNI, readBuf[:n])
 		}
-		dstAddr, ok := netip.AddrFromSlice(dstIPRaw)
-		if !ok {
-			continue
-		}
-
-		// Local delivery (fast path: local ClientTable by IP).
-		if target := o.clients.LookupByIP(dstAddr); target != nil {
-			o.Stats.Recorder.RecordTx(target.SessionID, uint64(len(payload)))
-			target.Conn.WritePacket(payload)
-			continue
-		}
-
-		// Remote delivery: find dstClientID + owning operator, forward via VXLAN.
-		if o.dataConn != nil {
-			_, dstCID, opUUID, found := o.Ctrl.LookupRemoteSessionByIP(cp.VNI, dstAddr)
-			if found && o.forwardToRemote(cp.VNI, cp.ClientID, dstCID, opUUID, payload) {
-				continue
-			}
-		}
-
-		o.log.Debugf("No route for %s from client %x", dstAddr, cp.SessionID)
 	}
 }
 
@@ -411,14 +351,14 @@ func (o *Operator) routineReaper() {
 // --------------- Helpers ---------------
 
 func makeConfigFunc(pools *VNetPoolMap, serverPub encryption.PublicKey) protocol.ConfigFunc {
-	return func(clientID common.ClientID, vni common.VNI) (*protocol.SessionConfig, error) {
+	return func(vmac common.VMAC, vni common.VNI) (*protocol.SessionConfig, error) {
 		pool, ok := pools.Get(vni)
 		if !ok {
 			return nil, fmt.Errorf("unknown vni %s", vni)
 		}
 		// Generate sessionID BEFORE allocating IP — IPv6 derivation needs it.
 		h := sha256.New()
-		h.Write(clientID[:])
+		h.Write(vmac[:])
 		var ts [8]byte
 		binary.BigEndian.PutUint64(ts[:], uint64(time.Now().UnixNano()))
 		h.Write(ts[:])
@@ -434,7 +374,6 @@ func makeConfigFunc(pools *VNetPoolMap, serverPub encryption.PublicKey) protocol
 			return nil, err
 		}
 
-		// Host prefix bits: /32 for v4, /128 for v6
 		hostBits := 32
 		if !clientIP.Is4() {
 			hostBits = 128
@@ -470,25 +409,5 @@ func createClientListener(transportType, addr string, resolver auth.AuthResolver
 		return transportTls.NewListener(addr, resolver, configFn, tlsConf)
 	default:
 		return nil, fmt.Errorf("unknown transport: %s", transportType)
-	}
-}
-
-func packetDstIP(data []byte) ([]byte, error) {
-	if len(data) < 1 {
-		return nil, fmt.Errorf("empty packet")
-	}
-	switch data[0] >> 4 {
-	case 4:
-		if len(data) < ipv4.HeaderLen {
-			return nil, fmt.Errorf("short IPv4")
-		}
-		return data[16:20], nil
-	case 6:
-		if len(data) < ipv6.HeaderLen {
-			return nil, fmt.Errorf("short IPv6")
-		}
-		return data[24:40], nil
-	default:
-		return nil, fmt.Errorf("unknown IP version")
 	}
 }

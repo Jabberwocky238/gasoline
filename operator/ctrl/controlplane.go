@@ -41,8 +41,8 @@ type Config struct {
 
 	// Callbacks for side effects outside ctrl's domain.
 	// Called synchronously from gRPC handlers — keep them fast.
-	OnSessionSync   func(vni common.VNI, cid common.ClientID, ip netip.Addr)
-	OnSessionRevoke func(vni common.VNI, sessionID [16]byte, cid common.ClientID, ip netip.Addr)
+	OnSessionSync   func(vni common.VNI, opUUID [16]byte, vmac common.VMAC, ip netip.Addr)
+	OnSessionRevoke func(vni common.VNI, opUUID [16]byte, sessionID [16]byte, vmac common.VMAC, ip netip.Addr)
 }
 
 // ControlPlane manages inter-operator gRPC communication, peer connections,
@@ -191,7 +191,7 @@ func (c *ControlPlane) PingOperator(uuid [16]byte) error {
 }
 
 // BroadcastSessionSync notifies all peers about a new client session.
-func (c *ControlPlane) BroadcastSessionSync(sessionID [16]byte, vni common.VNI, cid common.ClientID, ip netip.Addr) {
+func (c *ControlPlane) BroadcastSessionSync(sessionID [16]byte, vni common.VNI, cid common.VMAC, ip netip.Addr) {
 	var ipBytes []byte
 	if ip.Is4() {
 		a4 := ip.As4()
@@ -236,32 +236,32 @@ func (c *ControlPlane) BroadcastSessionRevoke(sessionID [16]byte, vni common.VNI
 	}
 }
 
-// LookupRemoteClient finds which operator owns a given (VNI, ClientID).
+// LookupRemoteByVMAC finds which operator owns a given (VNI, ClientID).
 // Primary forwarding lookup on the data plane — no IP parsing involved.
-func (c *ControlPlane) LookupRemoteClient(vni common.VNI, cid common.ClientID) (sessionID, operatorUUID [16]byte, found bool) {
+func (c *ControlPlane) LookupRemoteByVMAC(vni common.VNI, cid common.VMAC) (sessionID, operatorUUID [16]byte, found bool) {
 	vnet, ok := c.Registry.GetVNet(vni)
 	if !ok {
 		return [16]byte{}, [16]byte{}, false
 	}
-	sid, info, ok := vnet.LookupByClientID(cid)
+	sid, info, ok := vnet.LookupByVMAC(cid)
 	if !ok {
 		return [16]byte{}, [16]byte{}, false
 	}
 	return sid, info.OperatorUUID, true
 }
 
-// LookupRemoteSessionByIP resolves a destination IP to (sessionID, clientID, operatorUUID).
+// LookupRemoteByIP resolves a destination IP to (sessionID, vmac, operatorUUID).
 // Used on client ingress to translate IP → ClientID before handing to the MAC-based data plane.
-func (c *ControlPlane) LookupRemoteSessionByIP(vni common.VNI, dstIP netip.Addr) (sessionID [16]byte, cid common.ClientID, operatorUUID [16]byte, found bool) {
+func (c *ControlPlane) LookupRemoteByIP(vni common.VNI, dstIP netip.Addr) (sessionID [16]byte, cid common.VMAC, operatorUUID [16]byte, found bool) {
 	vnet, ok := c.Registry.GetVNet(vni)
 	if !ok {
-		return [16]byte{}, common.ClientID{}, [16]byte{}, false
+		return [16]byte{}, common.VMAC{}, [16]byte{}, false
 	}
 	sid, info, ok := vnet.LookupByIP(dstIP)
 	if !ok {
-		return [16]byte{}, common.ClientID{}, [16]byte{}, false
+		return [16]byte{}, common.VMAC{}, [16]byte{}, false
 	}
-	return sid, info.ClientID, info.OperatorUUID, true
+	return sid, info.VMAC, info.OperatorUUID, true
 }
 
 // --------------- bootstrap / discover ---------------

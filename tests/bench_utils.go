@@ -87,7 +87,7 @@ func makeIPv4Packet(src, dst netip.Addr, payload []byte) []byte {
 	return pkt
 }
 
-func runTransfer(t *testing.T, label string, connA, connB transport.Conn, srcIP, dstIP netip.Addr) {
+func runTransfer(t *testing.T, label string, connA, connB transport.Conn, srcIP, dstIP netip.Addr, srcMAC, dstMAC common.VMAC) {
 	t.Helper()
 
 	pktsPerRound := benchRoundSz / benchPayload
@@ -105,7 +105,11 @@ func runTransfer(t *testing.T, label string, connA, connB transport.Conn, srcIP,
 	for i := range payload {
 		payload[i] = byte(i)
 	}
-	wire := makeIPv4Packet(srcIP, dstIP, payload)
+	ipPkt := makeIPv4Packet(srcIP, dstIP, payload)
+
+	// Operator data plane is L2 — wrap the IP packet in an Ethernet header
+	// (dstMAC = clientB's VMAC, srcMAC = clientA's VMAC) before sending.
+	wire := common.WrapEth(dstMAC, srcMAC, common.EtherTypeIPv4, ipPkt)
 
 	// CPU profile — output to project root
 	profilePath := fmt.Sprintf("../cpu_%s.prof", label)

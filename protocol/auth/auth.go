@@ -41,5 +41,5 @@ type ServerAuthenticator interface {
 	// GenerateChallenge creates a nonce/salt for the client.
 	GenerateChallenge() ([]byte, error)
 	// VerifyResponse checks the client's auth response.
-	VerifyResponse(clientID common.ClientID, challenge, response []byte) error
+	VerifyResponse(vmac common.VMAC, challenge, response []byte) error
 }

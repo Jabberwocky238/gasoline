@@ -20,11 +20,11 @@ const (
 )
 
 // ConfigFunc generates a SessionConfig for a ClientID and VNI after auth succeeds.
-type ConfigFunc func(clientID common.ClientID, vni common.VNI) (*SessionConfig, error)
+type ConfigFunc func(vmac common.VMAC, vni common.VNI) (*SessionConfig, error)
 
 // HandshakeResult is returned after a successful handshake.
 type HandshakeResult struct {
-	ClientID common.ClientID
+	VMAC         common.VMAC
 	Config   SessionConfig
 	Keypair  *encryption.SessionKeypair
 }
@@ -33,13 +33,13 @@ type HandshakeResult struct {
 
 // ClientHandshake performs the 4-step handshake on the client side.
 //
-//  1. C→S: ClientHello  (version + authType + clientID + vni)
+//  1. C→S: ClientHello  (version + authType + vmac + vni)
 //  2. S→C: ServerHello  (version + authType + challenge)
 //  3. C→S: ClientRequest(auth response)
 //  4. S→C: ServerResponse(status + config)
 //  5. derive AEAD keypair via ECDH
-func ClientHandshake(rw io.ReadWriter, clientID common.ClientID, vni common.VNI, authenticator auth.ClientAuthenticator) (*HandshakeResult, error) {
-	hello := &messages.ClientHello{Version: HandshakeVersion, AuthType: authenticator.Type(), ClientID: clientID, VNI: vni}
+func ClientHandshake(rw io.ReadWriter, vmac common.VMAC, vni common.VNI, authenticator auth.ClientAuthenticator) (*HandshakeResult, error) {
+	hello := &messages.ClientHello{Version: HandshakeVersion, AuthType: authenticator.Type(), VMAC:        vmac, VNI: vni}
 	if err := hello.Encode(rw); err != nil {
 		return nil, fmt.Errorf("send ClientHello: %w", err)
 	}
@@ -82,7 +82,7 @@ func ClientHandshake(rw io.ReadWriter, clientID common.ClientID, vni common.VNI,
 		return nil, fmt.Errorf("derive session keys: %w", err)
 	}
 
-	return &HandshakeResult{ClientID: clientID, Config: cfg, Keypair: keypair}, nil
+	return &HandshakeResult{VMAC:        vmac, Config: cfg, Keypair: keypair}, nil
 }
 
 // ServerHandshake performs the 4-step handshake on the server side.
@@ -127,13 +127,13 @@ func ServerHandshake(rw io.ReadWriter, resolver auth.AuthResolver, configFn Conf
 		return nil, fmt.Errorf("recv ClientRequest: %w", err)
 	}
 
-	if err := authenticator.VerifyResponse(hello.ClientID, challenge, req.Payload); err != nil {
+	if err := authenticator.VerifyResponse(hello.VMAC, challenge, req.Payload); err != nil {
 		fail := &messages.ServerResponse{Status: HandshakeFail}
 		fail.Encode(rw)
 		return nil, fmt.Errorf("auth verify: %w", err)
 	}
 
-	cfg, err := configFn(hello.ClientID, hello.VNI)
+	cfg, err := configFn(hello.VMAC, hello.VNI)
 	if err != nil {
 		fail := &messages.ServerResponse{Status: HandshakeFail}
 		fail.Encode(rw)
@@ -150,5 +150,5 @@ func ServerHandshake(rw io.ReadWriter, resolver auth.AuthResolver, configFn Conf
 		return nil, fmt.Errorf("derive session keys: %w", err)
 	}
 
-	return &HandshakeResult{ClientID: hello.ClientID, Config: *cfg, Keypair: keypair}, nil
+	return &HandshakeResult{VMAC:        hello.VMAC, Config: *cfg, Keypair: keypair}, nil
 }

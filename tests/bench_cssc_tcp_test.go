@@ -13,13 +13,13 @@ func TestCSSC_TCP(t *testing.T) {
 	defer opA.Close()
 	defer opB.Close()
 
-	connA, resultA, err := tcp.NewDialer(common.ClientID{0x02, 0, 0, 0, 0, 0x01}, vni, &auth.NoAuthClient{}).Dial(opA.ClientAddr())
+	connA, resultA, err := tcp.NewDialer(common.VMAC{0x02, 0, 0, 0, 0, 0x01}, vni, &auth.NoAuthClient{}).Dial(opA.ClientAddr())
 	if err != nil {
 		t.Fatalf("ClientA dial: %v", err)
 	}
 	defer connA.Close()
 
-	connB, resultB, err := tcp.NewDialer(common.ClientID{0x02, 0, 0, 0, 0, 0x02}, vni, &auth.NoAuthClient{}).Dial(opB.ClientAddr())
+	connB, resultB, err := tcp.NewDialer(common.VMAC{0x02, 0, 0, 0, 0, 0x02}, vni, &auth.NoAuthClient{}).Dial(opB.ClientAddr())
 	if err != nil {
 		t.Fatalf("ClientB dial: %v", err)
 	}
@@ -30,9 +30,9 @@ func TestCSSC_TCP(t *testing.T) {
 	t.Logf("ClientA=%s  ClientB=%s", clientAIP, clientBIP)
 
 	waitFor(t, 2e9, func() bool {
-		_, _, _, found := opA.Ctrl.LookupRemoteSessionByIP(vni, clientBIP)
+		_, _, _, found := opA.Ctrl.LookupRemoteByIP(vni, clientBIP)
 		return found
 	})
 
-	runTransfer(t, "CSSC-TCP", connA, connB, clientAIP, clientBIP)
+	runTransfer(t, "CSSC-TCP", connA, connB, clientAIP, clientBIP, resultA.VMAC, resultB.VMAC)
 }

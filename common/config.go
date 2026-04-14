@@ -171,7 +171,7 @@ type ClientConfig struct {
 	Transport  string   // "tcp", "udp", "quic"
 	AuthStr    string   // auth config string
 	VNI        VNI      // virtual network (24-bit VXLAN identifier)
-	ClientID   ClientID // 6-byte MAC-style forwarding identity
+	VMAC   VMAC // 6-byte MAC-style forwarding identity
 	TUNName    string   // TUN device name
 	Socks5Port int      // quick-socks5 port, 0 = disabled
 }

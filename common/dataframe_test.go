@@ -7,8 +7,8 @@ import (
 
 func TestDataFrameVXLANEncodeDecode(t *testing.T) {
 	vni := VNI(0xAABBCC)
-	srcCID := ClientID{0x02, 0x11, 0x22, 0x33, 0x44, 0x55}
-	dstCID := ClientID{0x02, 0x66, 0x77, 0x88, 0x99, 0xAA}
+	srcMAC := VMAC{0x02, 0x11, 0x22, 0x33, 0x44, 0x55}
+	dstMAC := VMAC{0x02, 0x66, 0x77, 0x88, 0x99, 0xAA}
 	packet := []byte{
 		0x45, 0x00, 0x00, 0x1c,
 		0x00, 0x01, 0x00, 0x00,
@@ -20,7 +20,7 @@ func TestDataFrameVXLANEncodeDecode(t *testing.T) {
 	}
 
 	src := &DataFrame{}
-	wire := src.Encode(vni, srcCID, dstCID, packet)
+	wire := src.Encode(vni, srcMAC, dstMAC, packet)
 
 	if len(wire) != VxlanHeaderSize+EthHeaderSize+len(packet) {
 		t.Fatalf("wire length = %d, want %d", len(wire), VxlanHeaderSize+EthHeaderSize+len(packet))
@@ -34,15 +34,15 @@ func TestDataFrameVXLANEncodeDecode(t *testing.T) {
 		t.Errorf("VNI mismatch: got %02x%02x%02x, want AABBCC", wire[4], wire[5], wire[6])
 	}
 
-	// Dst MAC = dstCID verbatim
-	if !bytes.Equal(wire[VxlanHeaderSize:VxlanHeaderSize+6], dstCID[:]) {
+	// Dst MAC = dstMAC verbatim
+	if !bytes.Equal(wire[VxlanHeaderSize:VxlanHeaderSize+6], dstMAC[:]) {
 		t.Errorf("dst MAC mismatch:\n  got:  %x\n  want: %x",
-			wire[VxlanHeaderSize:VxlanHeaderSize+6], dstCID)
+			wire[VxlanHeaderSize:VxlanHeaderSize+6], dstMAC)
 	}
-	// Src MAC = srcCID verbatim
-	if !bytes.Equal(wire[VxlanHeaderSize+6:VxlanHeaderSize+12], srcCID[:]) {
+	// Src MAC = srcMAC verbatim
+	if !bytes.Equal(wire[VxlanHeaderSize+6:VxlanHeaderSize+12], srcMAC[:]) {
 		t.Errorf("src MAC mismatch:\n  got:  %x\n  want: %x",
-			wire[VxlanHeaderSize+6:VxlanHeaderSize+12], srcCID)
+			wire[VxlanHeaderSize+6:VxlanHeaderSize+12], srcMAC)
 	}
 
 	if wire[VxlanHeaderSize+12] != 0x08 || wire[VxlanHeaderSize+13] != 0x00 {
@@ -64,23 +64,23 @@ func TestDataFrameVXLANEncodeDecode(t *testing.T) {
 	if dst.EtherType != EtherTypeIPv4 {
 		t.Errorf("recovered EtherType = 0x%04x, want 0x0800", dst.EtherType)
 	}
-	if dst.SrcCID != srcCID {
-		t.Errorf("recovered SrcCID = %x, want %x", dst.SrcCID, srcCID)
+	if dst.SrcMAC != srcMAC {
+		t.Errorf("recovered SrcMAC = %x, want %x", dst.SrcMAC, srcMAC)
 	}
-	if dst.DstCID != dstCID {
-		t.Errorf("recovered DstCID = %x, want %x", dst.DstCID, dstCID)
+	if dst.DstMAC != dstMAC {
+		t.Errorf("recovered DstMAC = %x, want %x", dst.DstMAC, dstMAC)
 	}
 }
 
 func TestDataFrameVXLANIPv6(t *testing.T) {
 	vni := VNI(0x123456)
-	srcCID := ClientID{0x02, 0x01, 0x02, 0x03, 0x04, 0x05}
-	dstCID := ClientID{0x02, 0x06, 0x07, 0x08, 0x09, 0x0A}
+	srcMAC := VMAC{0x02, 0x01, 0x02, 0x03, 0x04, 0x05}
+	dstMAC := VMAC{0x02, 0x06, 0x07, 0x08, 0x09, 0x0A}
 	packet := make([]byte, 40)
 	packet[0] = 0x60 // IPv6 version nibble
 
 	src := &DataFrame{}
-	wire := src.Encode(vni, srcCID, dstCID, packet)
+	wire := src.Encode(vni, srcMAC, dstMAC, packet)
 
 	if wire[VxlanHeaderSize+12] != 0x86 || wire[VxlanHeaderSize+13] != 0xDD {
 		t.Errorf("inner ethertype: got %02x%02x, want 86DD",

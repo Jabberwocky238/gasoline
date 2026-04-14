@@ -10,13 +10,13 @@ import (
 )
 
 type Dialer struct {
-	clientID common.ClientID
+	vmac common.VMAC
 	vni      common.VNI
 	auth     auth.ClientAuthenticator
 }
 
-func NewDialer(clientID common.ClientID, vni common.VNI, auth auth.ClientAuthenticator) *Dialer {
-	return &Dialer{clientID: clientID, vni: vni, auth: auth}
+func NewDialer(vmac common.VMAC, vni common.VNI, auth auth.ClientAuthenticator) *Dialer {
+	return &Dialer{vmac:     vmac, vni: vni, auth: auth}
 }
 
 func (d *Dialer) Dial(endpoint string) (transport.Conn, *protocol.HandshakeResult, error) {
@@ -30,7 +30,7 @@ func (d *Dialer) Dial(endpoint string) (transport.Conn, *protocol.HandshakeResul
 	}
 
 	adapter := newClientStreamAdapter(rawConn)
-	result, err := protocol.ClientHandshake(adapter, d.clientID, d.vni, d.auth)
+	result, err := protocol.ClientHandshake(adapter, d.vmac, d.vni, d.auth)
 	if err != nil {
 		rawConn.Close()
 		return nil, nil, err

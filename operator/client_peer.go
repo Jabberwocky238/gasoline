@@ -11,7 +11,7 @@ import (
 type ClientPeer struct {
 	Conn       transport.Conn
 	SessionID  [common.SessionIDLen]byte    // unique per-session ID
-	ClientID   common.ClientID              // 6-byte MAC = forwarding identity
+	VMAC         common.VMAC              // 6-byte MAC = forwarding identity
 	VNI        common.VNI                   // virtual network (24-bit VXLAN VNI)
 	OperatorID [common.OperatorUUIDLen]byte // UUID of the operator this client is on
 	IP         netip.Prefix                 // assigned IP

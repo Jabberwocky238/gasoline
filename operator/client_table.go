@@ -7,10 +7,10 @@ import (
 	"github.com/jabberwocky238/gasoline/common"
 )
 
-// vniCIDKey indexes the ClientTable by (VNI, ClientID).
-type vniCIDKey struct {
+// vniVMACKey indexes the ClientTable by (VNI, ClientID).
+type vniVMACKey struct {
 	vni common.VNI
-	cid common.ClientID
+	cid common.VMAC
 }
 
 // ClientTable manages connected client peers with dual indexes:
@@ -19,13 +19,13 @@ type vniCIDKey struct {
 type ClientTable struct {
 	mu    sync.RWMutex
 	byIP  map[netip.Addr]*ClientPeer
-	byCID map[vniCIDKey]*ClientPeer
+	byVMAC map[vniVMACKey]*ClientPeer
 }
 
 func NewClientTable() *ClientTable {
 	return &ClientTable{
 		byIP:  make(map[netip.Addr]*ClientPeer),
-		byCID: make(map[vniCIDKey]*ClientPeer),
+		byVMAC: make(map[vniVMACKey]*ClientPeer),
 	}
 }
 
@@ -33,7 +33,7 @@ func (ct *ClientTable) Add(cp *ClientPeer) {
 	ct.mu.Lock()
 	defer ct.mu.Unlock()
 	ct.byIP[cp.IP.Addr()] = cp
-	ct.byCID[vniCIDKey{cp.VNI, cp.ClientID}] = cp
+	ct.byVMAC[vniVMACKey{cp.VNI, cp.VMAC}] = cp
 }
 
 func (ct *ClientTable) Remove(cp *ClientPeer) {
@@ -43,9 +43,9 @@ func (ct *ClientTable) Remove(cp *ClientPeer) {
 	if existing, ok := ct.byIP[addr]; ok && existing == cp {
 		delete(ct.byIP, addr)
 	}
-	key := vniCIDKey{cp.VNI, cp.ClientID}
-	if existing, ok := ct.byCID[key]; ok && existing == cp {
-		delete(ct.byCID, key)
+	key := vniVMACKey{cp.VNI, cp.VMAC}
+	if existing, ok := ct.byVMAC[key]; ok && existing == cp {
+		delete(ct.byVMAC, key)
 	}
 }
 
@@ -56,12 +56,12 @@ func (ct *ClientTable) LookupByIP(addr netip.Addr) *ClientPeer {
 	return ct.byIP[addr]
 }
 
-// LookupByCID finds a client peer by (VNI, ClientID) — used by the data
+// LookupByVMAC finds a client peer by (VNI, ClientID) — used by the data
 // plane to forward without inspecting inner IP payloads.
-func (ct *ClientTable) LookupByCID(vni common.VNI, cid common.ClientID) *ClientPeer {
+func (ct *ClientTable) LookupByVMAC(vni common.VNI, cid common.VMAC) *ClientPeer {
 	ct.mu.RLock()
 	defer ct.mu.RUnlock()
-	return ct.byCID[vniCIDKey{vni, cid}]
+	return ct.byVMAC[vniVMACKey{vni, cid}]
 }
 
 func (ct *ClientTable) Len() int {

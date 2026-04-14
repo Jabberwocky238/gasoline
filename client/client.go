@@ -11,6 +11,7 @@ import (
 	socks5 "github.com/things-go/go-socks5"
 
 	"github.com/jabberwocky238/gasoline/common"
+	"github.com/jabberwocky238/gasoline/device/tap"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/transport"
 	"github.com/jabberwocky238/gasoline/transport/quic"
@@ -25,6 +26,8 @@ type TunOpener interface {
 	OpenTun(options singTun.Options) (int32, error)
 }
 
+// Client orchestrates the handshake then hands off the data plane to a
+// tap.Device that owns TUN ⇄ ARP/Eth ⇄ Conn for the lifetime of the session.
 type Client struct {
 	mu     sync.Mutex
 	ctx    context.Context
@@ -32,10 +35,11 @@ type Client struct {
 
 	cfg            *common.ClientConfig
 	dialer         transport.Dialer
-	tun            *tunPkg.Tun
-	conn           transport.Conn
 	tunOpener      TunOpener
 	socks5Listener net.Listener
+
+	tun *tunPkg.Tun
+	dev *tap.Device
 }
 
 func (c *Client) SetPlatformTunOpener(opener TunOpener) {
@@ -48,7 +52,7 @@ func New(cfg *common.ClientConfig) (*Client, error) {
 		return nil, fmt.Errorf("auth: %w", err)
 	}
 
-	dialer, err := createDialer(cfg.Transport, cfg.ClientID, cfg.VNI, clientAuth)
+	dialer, err := createDialer(cfg.Transport, cfg.VMAC, cfg.VNI, clientAuth)
 	if err != nil {
 		return nil, fmt.Errorf("dialer: %w", err)
 	}
@@ -66,15 +70,15 @@ func (c *Client) Start() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// 1. Handshake (independent phase).
 	conn, result, err := c.dialer.Dial(c.cfg.Endpoint)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
-	c.conn = conn
-
 	hsCfg := &result.Config
 	log.Infof("Handshake OK: assigned IP %s, allowed %v", hsCfg.IPPrefix.String(), hsCfg.AllowedRanges)
 
+	// 2. Open TUN device.
 	tunAddr := hsCfg.IPPrefix
 	for _, r := range hsCfg.AllowedRanges {
 		if r.Contains(hsCfg.IPPrefix.Addr()) {
@@ -83,7 +87,7 @@ func (c *Client) Start() error {
 		}
 	}
 
-	var tun *tunPkg.Tun
+	var tunDev *tunPkg.Tun
 	if c.tunOpener != nil {
 		tunOptions := buildTunOptions(c.cfg.TUNName, tunAddr, hsCfg.AllowedRanges)
 		fd, err := c.tunOpener.OpenTun(tunOptions)
@@ -91,29 +95,28 @@ func (c *Client) Start() error {
 			conn.Close()
 			return fmt.Errorf("platform open TUN: %w", err)
 		}
-		tun, err = tunPkg.NewFromFD(int(fd))
+		tunDev, err = tunPkg.NewFromFD(int(fd))
 		if err != nil {
 			conn.Close()
 			return fmt.Errorf("wrap TUN fd: %w", err)
 		}
 	} else {
-		var err error
-		tun, err = tunPkg.New(c.cfg.TUNName, tunAddr.String())
+		tunDev, err = tunPkg.New(c.cfg.TUNName, tunAddr.String())
 		if err != nil {
 			conn.Close()
 			return fmt.Errorf("create TUN: %w", err)
 		}
-		if err := tun.Start(); err != nil {
+		if err := tunDev.Start(); err != nil {
 			conn.Close()
 			return fmt.Errorf("start TUN: %w", err)
 		}
 	}
-	c.tun = tun
-
+	c.tun = tunDev
 	log.Infof("TUN interface up: %s", hsCfg.IPPrefix.String())
 
-	go c.routineTUNToConn()
-	go c.routineConnToTUN()
+	// 3. Build the TAP device (TUN ⇄ Conn) and start its loops.
+	c.dev = tap.New(tunDev, conn, c.cfg.VMAC, hsCfg.IPPrefix)
+	c.dev.Start()
 
 	if c.cfg.Socks5Port > 0 {
 		if err := c.startSocks5(); err != nil {
@@ -124,63 +127,12 @@ func (c *Client) Start() error {
 	return nil
 }
 
-func (c *Client) routineTUNToConn() {
-	defer log.Debugf("Routine: TUN→Conn stopped")
-
-	for {
-		select {
-		case <-c.ctx.Done():
-			return
-		default:
-		}
-
-		buf := common.GetBuffer()
-		n, err := c.tun.Read(*buf)
-		if err != nil {
-			common.PutBuffer(buf)
-			log.Errorf("TUN read: %v", err)
-			return
-		}
-		if n < 1 {
-			common.PutBuffer(buf)
-			continue
-		}
-
-		if err := c.conn.WritePacket((*buf)[:n]); err != nil {
-			common.PutBuffer(buf)
-			log.Errorf("Conn write: %v", err)
-			return
-		}
-		common.PutBuffer(buf)
+// ARP exposes the device-local ARP table for tooling/seeding.
+func (c *Client) ARP() *tap.ARPTable {
+	if c.dev == nil {
+		return nil
 	}
-}
-
-func (c *Client) routineConnToTUN() {
-	defer log.Debugf("Routine: Conn→TUN stopped")
-
-	buf := common.GetBuffer()
-	defer common.PutBuffer(buf)
-
-	for {
-		select {
-		case <-c.ctx.Done():
-			return
-		default:
-		}
-
-		n, err := c.conn.ReadPacket(*buf)
-		if err != nil {
-			log.Errorf("Conn read: %v", err)
-			return
-		}
-		if n < 1 {
-			continue
-		}
-		if _, err := c.tun.Write((*buf)[:n]); err != nil {
-			log.Errorf("TUN write: %v", err)
-			return
-		}
-	}
+	return c.dev.ARP()
 }
 
 func (c *Client) Close() error {
@@ -188,11 +140,8 @@ func (c *Client) Close() error {
 	if c.socks5Listener != nil {
 		c.socks5Listener.Close()
 	}
-	if c.conn != nil {
-		c.conn.Close()
-	}
-	if c.tun != nil {
-		c.tun.Close()
+	if c.dev != nil {
+		c.dev.Close()
 	}
 	return nil
 }
@@ -221,14 +170,14 @@ func (c *Client) startSocks5() error {
 
 // --------------- Helpers ---------------
 
-func createDialer(transportType string, clientID common.ClientID, vni common.VNI, clientAuth auth.ClientAuthenticator) (transport.Dialer, error) {
+func createDialer(transportType string, vmac common.VMAC, vni common.VNI, clientAuth auth.ClientAuthenticator) (transport.Dialer, error) {
 	switch transportType {
 	case "tcp":
-		return tcp.NewDialer(clientID, vni, clientAuth), nil
+		return tcp.NewDialer(vmac, vni, clientAuth), nil
 	case "udp":
-		return udp.NewDialer(clientID, vni, clientAuth), nil
+		return udp.NewDialer(vmac, vni, clientAuth), nil
 	case "quic":
-		return quic.NewDialer(clientID, vni, clientAuth, quic.InsecureClientTLS()), nil
+		return quic.NewDialer(vmac, vni, clientAuth, quic.InsecureClientTLS()), nil
 	default:
 		return nil, fmt.Errorf("unknown transport: %s", transportType)
 	}

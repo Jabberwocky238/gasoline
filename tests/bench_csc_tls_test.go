@@ -15,13 +15,13 @@ func TestCSC_TLS(t *testing.T) {
 
 	tlsConf := quic.InsecureClientTLS()
 
-	connA, resultA, err := tlstransport.NewDialer(common.ClientID{0x02, 0, 0, 0, 0, 0x01}, vni, &auth.NoAuthClient{}, tlsConf).Dial(op.ClientAddr())
+	connA, resultA, err := tlstransport.NewDialer(common.VMAC{0x02, 0, 0, 0, 0, 0x01}, vni, &auth.NoAuthClient{}, tlsConf).Dial(op.ClientAddr())
 	if err != nil {
 		t.Fatalf("ClientA dial: %v", err)
 	}
 	defer connA.Close()
 
-	connB, resultB, err := tlstransport.NewDialer(common.ClientID{0x02, 0, 0, 0, 0, 0x02}, vni, &auth.NoAuthClient{}, tlsConf).Dial(op.ClientAddr())
+	connB, resultB, err := tlstransport.NewDialer(common.VMAC{0x02, 0, 0, 0, 0, 0x02}, vni, &auth.NoAuthClient{}, tlsConf).Dial(op.ClientAddr())
 	if err != nil {
 		t.Fatalf("ClientB dial: %v", err)
 	}
@@ -31,5 +31,5 @@ func TestCSC_TLS(t *testing.T) {
 	clientBIP := resultB.Config.IPPrefix.Addr()
 	t.Logf("ClientA=%s  ClientB=%s", clientAIP, clientBIP)
 
-	runTransfer(t, "CSC-TLS", connA, connB, clientAIP, clientBIP)
+	runTransfer(t, "CSC-TLS", connA, connB, clientAIP, clientBIP, resultA.VMAC, resultB.VMAC)
 }

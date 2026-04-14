@@ -56,7 +56,7 @@ func (a *HMACServer) GenerateChallenge() ([]byte, error) {
 }
 
 // VerifyResponse parses [idLen:1][id:N][mac:32] and verifies HMAC.
-func (a *HMACServer) VerifyResponse(_ common.ClientID, challenge, response []byte) error {
+func (a *HMACServer) VerifyResponse(_ common.VMAC, challenge, response []byte) error {
 	if len(response) < 1 {
 		return fmt.Errorf("hmac: empty response")
 	}

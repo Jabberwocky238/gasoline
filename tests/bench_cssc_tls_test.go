@@ -16,13 +16,13 @@ func TestCSSC_TLS(t *testing.T) {
 
 	tlsConf := quic.InsecureClientTLS()
 
-	connA, resultA, err := tlstransport.NewDialer(common.ClientID{0x02, 0, 0, 0, 0, 0x01}, vni, &auth.NoAuthClient{}, tlsConf).Dial(opA.ClientAddr())
+	connA, resultA, err := tlstransport.NewDialer(common.VMAC{0x02, 0, 0, 0, 0, 0x01}, vni, &auth.NoAuthClient{}, tlsConf).Dial(opA.ClientAddr())
 	if err != nil {
 		t.Fatalf("ClientA dial: %v", err)
 	}
 	defer connA.Close()
 
-	connB, resultB, err := tlstransport.NewDialer(common.ClientID{0x02, 0, 0, 0, 0, 0x02}, vni, &auth.NoAuthClient{}, tlsConf).Dial(opB.ClientAddr())
+	connB, resultB, err := tlstransport.NewDialer(common.VMAC{0x02, 0, 0, 0, 0, 0x02}, vni, &auth.NoAuthClient{}, tlsConf).Dial(opB.ClientAddr())
 	if err != nil {
 		t.Fatalf("ClientB dial: %v", err)
 	}
@@ -33,9 +33,9 @@ func TestCSSC_TLS(t *testing.T) {
 	t.Logf("ClientA=%s  ClientB=%s", clientAIP, clientBIP)
 
 	waitFor(t, 2e9, func() bool {
-		_, _, _, found := opA.Ctrl.LookupRemoteSessionByIP(vni, clientBIP)
+		_, _, _, found := opA.Ctrl.LookupRemoteByIP(vni, clientBIP)
 		return found
 	})
 
-	runTransfer(t, "CSSC-TLS", connA, connB, clientAIP, clientBIP)
+	runTransfer(t, "CSSC-TLS", connA, connB, clientAIP, clientBIP, resultA.VMAC, resultB.VMAC)
 }

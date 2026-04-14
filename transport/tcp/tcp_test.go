@@ -18,7 +18,7 @@ func testConfigFn() protocol.ConfigFunc {
 	serverPriv, _ := encryption.NewPrivateKey()
 	serverPub := serverPriv.PublicKey()
 
-	return func(clientID common.ClientID, vni common.VNI) (*protocol.SessionConfig, error) {
+	return func(vmac common.VMAC, vni common.VNI) (*protocol.SessionConfig, error) {
 		clientPriv, _ := encryption.NewPrivateKey()
 		return &protocol.SessionConfig{
 			ClientPrivateKey: clientPriv,
@@ -43,8 +43,8 @@ func TestTCPHandshakeAndPacket(t *testing.T) {
 	defer ln.Close()
 
 	addr := ln.Addr()
-	clientID := common.ClientID{0x02, 0x01, 0x02, 0x03, 0x04, 0x05}
-	dialer := NewDialer(clientID, common.VNI(0), &auth.NoAuthClient{})
+	vmac := common.VMAC{0x02, 0x01, 0x02, 0x03, 0x04, 0x05}
+	dialer := NewDialer(vmac, common.VNI(0), &auth.NoAuthClient{})
 
 	var wg sync.WaitGroup
 	var serverConn *Conn
@@ -78,10 +78,10 @@ func TestTCPHandshakeAndPacket(t *testing.T) {
 	}
 
 	// Verify handshake results
-	if clientResult.ClientID != clientID {
+	if clientResult.VMAC != vmac {
 		t.Errorf("client ID mismatch")
 	}
-	if serverResult.ClientID != clientID {
+	if serverResult.VMAC != vmac {
 		t.Errorf("server got wrong client ID")
 	}
 	if clientResult.Config.IPPrefix.String() != "10.0.0.2/24" {
@@ -160,7 +160,7 @@ func TestTCPMultiplePackets(t *testing.T) {
 	}
 	defer ln.Close()
 
-	dialer := NewDialer(common.ClientID{}, common.VNI(0), &auth.NoAuthClient{})
+	dialer := NewDialer(common.VMAC{}, common.VNI(0), &auth.NoAuthClient{})
 
 	var wg sync.WaitGroup
 	var sConn *Conn
@@ -213,7 +213,7 @@ func TestTCPMultiplePackets(t *testing.T) {
 }
 
 func TestTCPHMACAuth(t *testing.T) {
-	clientID := common.ClientID{0x02, 0xAA, 0xBB, 0, 0, 0}
+	vmac := common.VMAC{0x02, 0xAA, 0xBB, 0, 0, 0}
 
 	serverAuth := &auth.HMACServer{
 		Secrets: map[string][]byte{
@@ -229,7 +229,7 @@ func TestTCPHMACAuth(t *testing.T) {
 	}
 	defer ln.Close()
 
-	dialer := NewDialer(clientID, common.VNI(0), clientAuth)
+	dialer := NewDialer(vmac, common.VNI(0), clientAuth)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -248,8 +248,8 @@ func TestTCPHMACAuth(t *testing.T) {
 	defer conn.Close()
 	wg.Wait()
 
-	if result.ClientID != clientID {
-		t.Errorf("clientID mismatch")
+	if result.VMAC != vmac {
+		t.Errorf("vmac mismatch")
 	}
 }
 
@@ -273,7 +273,7 @@ func TestTCPUserPassAuth(t *testing.T) {
 	}
 	defer ln.Close()
 
-	dialer := NewDialer(common.ClientID{0x02, 0, 0, 0, 0, 0x01}, common.VNI(0), clientAuth)
+	dialer := NewDialer(common.VMAC{0x02, 0, 0, 0, 0, 0x01}, common.VNI(0), clientAuth)
 
 	var wg sync.WaitGroup
 	wg.Add(1)

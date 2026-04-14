@@ -15,11 +15,11 @@ import (
 //   byte  7:   reserved
 //
 // Inner Ethernet:
-//   bytes 0-5:   destination MAC = destination ClientID (6B, verbatim)
-//   bytes 6-11:  source MAC      = source ClientID      (6B, verbatim)
+//   bytes 0-5:   destination MAC = destination VMAC (6B, verbatim)
+//   bytes 6-11:  source MAC      = source VMAC      (6B, verbatim)
 //   bytes 12-13: EtherType       (0x0800 IPv4 | 0x86DD IPv6)
 //
-// Forwarding decisions are keyed on (VNI, destination ClientID) — the inner
+// Forwarding decisions are keyed on (VNI, destination VMAC) — the inner
 // IP payload is never inspected by the data plane.
 
 const (
@@ -39,32 +39,28 @@ type DataFrame struct {
 	EtherType uint16   // 0x0800 (IPv4) or 0x86DD (IPv6)
 	Packet    []byte   // slice into buf — inner IP packet
 	Size      int      // total wire size
-	SrcCID    ClientID // source client MAC, decoded from inner src MAC
-	DstCID    ClientID // destination client MAC, decoded from inner dst MAC
+	SrcMAC    VMAC // source client MAC, decoded from inner src MAC
+	DstMAC    VMAC // destination client MAC, decoded from inner dst MAC
 }
 
-// Encode writes [VXLAN][Ethernet][IP packet] into the frame's buffer.
-// srcClientID / dstClientID are placed verbatim into the inner Ethernet
-// source/destination MAC fields. EtherType is derived from the IP version
-// nibble of packet[0] (IPv4 → 0x0800, IPv6 → 0x86DD).
-func (f *DataFrame) Encode(vni VNI, srcClientID, dstClientID ClientID, packet []byte) []byte {
-	version := InnerIPVersion(packet)
-	mtu := MTUFor(version)
-	if mtu == 0 {
-		panic(fmt.Sprintf("dataframe: unknown IP version for packet[0]=0x%02x", packet[0]))
+// EncodeFrame prepends an 8-byte VXLAN header to a pre-built Ethernet
+// frame. The caller (client-side VTun, or operator on ingress) is
+// responsible for constructing the inner Ethernet header — operator-side
+// VXLAN encap never inspects the inner payload.
+//
+// ethFrame layout: [dstMAC:6][srcMAC:6][ethType:2][payload...]
+func (f *DataFrame) EncodeFrame(vni VNI, ethFrame []byte) []byte {
+	if len(ethFrame) < EthHeaderSize {
+		panic(fmt.Sprintf("dataframe: eth frame too short %d", len(ethFrame)))
 	}
-	if len(packet) > mtu {
-		panic(fmt.Sprintf("dataframe: inner IPv%d packet %d > mtu %d", version, len(packet), mtu))
+	if len(ethFrame) > MaxVxlanPayload {
+		panic(fmt.Sprintf("dataframe: eth frame %d > MaxVxlanPayload %d", len(ethFrame), MaxVxlanPayload))
 	}
 
 	f.VNI = vni
-	f.SrcCID = srcClientID
-	f.DstCID = dstClientID
-	if version == 6 {
-		f.EtherType = EtherTypeIPv6
-	} else {
-		f.EtherType = EtherTypeIPv4
-	}
+	copy(f.DstMAC[:], ethFrame[0:6])
+	copy(f.SrcMAC[:], ethFrame[6:12])
+	f.EtherType = binary.BigEndian.Uint16(ethFrame[12:14])
 
 	// VXLAN header
 	f.buf[0] = vxlanFlagsValid
@@ -77,18 +73,45 @@ func (f *DataFrame) Encode(vni VNI, srcClientID, dstClientID ClientID, packet []
 	f.buf[6] = vb[2]
 	f.buf[7] = 0
 
-	// Inner Ethernet: dst MAC, src MAC, ethertype
-	copy(f.buf[VxlanHeaderSize:], dstClientID[:])
-	copy(f.buf[VxlanHeaderSize+6:], srcClientID[:])
-	binary.BigEndian.PutUint16(f.buf[VxlanHeaderSize+12:], f.EtherType)
+	// Inner Ethernet + payload — verbatim from caller.
+	copy(f.buf[VxlanHeaderSize:], ethFrame)
 
-	// Inner IP packet
-	payloadOffset := VxlanHeaderSize + EthHeaderSize
-	copy(f.buf[payloadOffset:], packet)
-
-	f.Size = payloadOffset + len(packet)
-	f.Packet = f.buf[payloadOffset:f.Size]
+	f.Size = VxlanHeaderSize + len(ethFrame)
+	f.Packet = f.buf[VxlanHeaderSize+EthHeaderSize : f.Size]
 	return f.buf[:f.Size]
+}
+
+// Encode (legacy) constructs an Ethernet frame from (srcMAC, dstMAC, ipPacket)
+// then VXLAN-wraps it. Kept for tests/back-compat; new code should build the
+// Eth frame upstream and call EncodeFrame.
+func (f *DataFrame) Encode(vni VNI, srcVMAC, dstVMAC VMAC, packet []byte) []byte {
+	version := InnerIPVersion(packet)
+	mtu := MTUFor(version)
+	if mtu == 0 {
+		panic(fmt.Sprintf("dataframe: unknown IP version for packet[0]=0x%02x", packet[0]))
+	}
+	if len(packet) > mtu {
+		panic(fmt.Sprintf("dataframe: inner IPv%d packet %d > mtu %d", version, len(packet), mtu))
+	}
+	ethType := EtherTypeIPv4
+	if version == 6 {
+		ethType = EtherTypeIPv6
+	}
+	tmpBuf := GetBuffer()
+	defer PutBuffer(tmpBuf)
+	tmp := (*tmpBuf)[:EthHeaderSize+len(packet)]
+	WriteEthHeader(tmp, dstVMAC, srcVMAC, uint16(ethType))
+	copy(tmp[EthHeaderSize:], packet)
+	return f.EncodeFrame(vni, tmp)
+}
+
+// Frame returns the inner Ethernet frame (without VXLAN header) of a
+// decoded DataFrame: [dstMAC:6][srcMAC:6][ethType:2][payload].
+func (f *DataFrame) Frame() []byte {
+	if f.Size < VxlanHeaderSize+EthHeaderSize {
+		return nil
+	}
+	return f.buf[VxlanHeaderSize:f.Size]
 }
 
 // Decode parses a received VXLAN-encapsulated datagram.
@@ -110,8 +133,8 @@ func (f *DataFrame) Decode(data []byte) error {
 	f.VNI = VNIFromBytes3([3]byte{f.buf[4], f.buf[5], f.buf[6]})
 
 	// Inner Ethernet: full 6-byte MACs (= ClientIDs) + EtherType
-	copy(f.DstCID[:], f.buf[VxlanHeaderSize:VxlanHeaderSize+6])
-	copy(f.SrcCID[:], f.buf[VxlanHeaderSize+6:VxlanHeaderSize+12])
+	copy(f.DstMAC[:], f.buf[VxlanHeaderSize:VxlanHeaderSize+6])
+	copy(f.SrcMAC[:], f.buf[VxlanHeaderSize+6:VxlanHeaderSize+12])
 	f.EtherType = binary.BigEndian.Uint16(f.buf[VxlanHeaderSize+12:])
 
 	payloadOffset := VxlanHeaderSize + EthHeaderSize
@@ -123,7 +146,7 @@ func (f *DataFrame) Decode(data []byte) error {
 func (f *DataFrame) Reset() {
 	f.Packet = nil
 	f.Size = 0
-	f.SrcCID = ClientID{}
-	f.DstCID = ClientID{}
+	f.SrcMAC = VMAC{}
+	f.DstMAC = VMAC{}
 	f.EtherType = 0
 }

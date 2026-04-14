@@ -44,6 +44,8 @@ func (p *WaitPool) Put(x any) {
 	p.cond.Signal()
 }
 
+// --------------- Byte-buffer pool ---------------
+
 // DefaultBufferPool is the global packet buffer pool.
 // max=0 means unbounded (same as sync.Pool), set via InitBufferPool for backpressure.
 var DefaultBufferPool = NewWaitPool(0, func() any {
@@ -68,4 +70,31 @@ func GetBuffer() *[]byte {
 // PutBuffer returns a buffer to the pool.
 func PutBuffer(buf *[]byte) {
 	DefaultBufferPool.Put(buf)
+}
+
+// --------------- DataFrame pool ---------------
+
+// DefaultFramePool is the global VXLAN DataFrame pool.
+// max=0 means unbounded; set via InitFramePool for backpressure.
+var DefaultFramePool = NewWaitPool(0, func() any {
+	return new(DataFrame)
+})
+
+// InitFramePool re-initializes the global frame pool with a bounded max.
+// Call once at startup before any GetFrame/PutFrame.
+func InitFramePool(max uint32) {
+	DefaultFramePool = NewWaitPool(max, func() any {
+		return new(DataFrame)
+	})
+}
+
+// GetFrame retrieves a DataFrame from the global pool.
+func GetFrame() *DataFrame {
+	return DefaultFramePool.Get().(*DataFrame)
+}
+
+// PutFrame returns a DataFrame to the global pool after resetting it.
+func PutFrame(f *DataFrame) {
+	f.Reset()
+	DefaultFramePool.Put(f)
 }

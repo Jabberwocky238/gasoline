@@ -3,6 +3,7 @@ package udp
 import (
 	"net"
 
+	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/transport"
@@ -10,12 +11,12 @@ import (
 
 type Dialer struct {
 	clientID [16]byte
-	vnetID   [16]byte
+	vni      common.VNI
 	auth     auth.ClientAuthenticator
 }
 
-func NewDialer(clientID [16]byte, vnetID [16]byte, auth auth.ClientAuthenticator) *Dialer {
-	return &Dialer{clientID: clientID, vnetID: vnetID, auth: auth}
+func NewDialer(clientID [16]byte, vni common.VNI, auth auth.ClientAuthenticator) *Dialer {
+	return &Dialer{clientID: clientID, vni: vni, auth: auth}
 }
 
 func (d *Dialer) Dial(endpoint string) (transport.Conn, *protocol.HandshakeResult, error) {
@@ -28,14 +29,12 @@ func (d *Dialer) Dial(endpoint string) (transport.Conn, *protocol.HandshakeResul
 		return nil, nil, err
 	}
 
-	// Handshake over stream adapter (buffers datagrams for io.ReadFull)
 	adapter := newClientStreamAdapter(rawConn)
-	result, err := protocol.ClientHandshake(adapter, d.clientID, d.vnetID, d.auth)
+	result, err := protocol.ClientHandshake(adapter, d.clientID, d.vni, d.auth)
 	if err != nil {
 		rawConn.Close()
 		return nil, nil, err
 	}
 
-	// After handshake: switch to datagram + AEAD mode
 	return newClientConn(rawConn, result.Keypair), result, nil
 }

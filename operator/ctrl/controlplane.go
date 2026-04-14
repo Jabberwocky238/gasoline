@@ -11,6 +11,8 @@ import (
 	log "github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+
+	"github.com/jabberwocky238/gasoline/common"
 )
 
 // Config for the control plane.
@@ -23,8 +25,8 @@ type Config struct {
 
 	// Callbacks for side effects outside ctrl's domain.
 	// Called synchronously from gRPC handlers — keep them fast.
-	OnSessionSync   func(vnetID [16]byte, ip netip.Addr)
-	OnSessionRevoke func(vnetID [16]byte, sessionID [16]byte, ip netip.Addr)
+	OnSessionSync   func(vni common.VNI, ip netip.Addr)
+	OnSessionRevoke func(vni common.VNI, sessionID [16]byte, ip netip.Addr)
 }
 
 // ControlPlane manages inter-operator gRPC communication, peer connections,
@@ -173,13 +175,13 @@ func (c *ControlPlane) PingOperator(uuid [16]byte) error {
 }
 
 // BroadcastSessionSync notifies all peers about a new client session.
-func (c *ControlPlane) BroadcastSessionSync(sessionID, vnetID [16]byte, ip netip.Addr) {
+func (c *ControlPlane) BroadcastSessionSync(sessionID [16]byte, vni common.VNI, ip netip.Addr) {
 	ip4 := ip.As4()
 	event := &SessionEvent{
 		Event: &SessionEvent_Sync{
 			Sync: &SessionSync{
 				SessionId:    sessionID[:],
-				VnetId:       vnetID[:],
+				Vni:          uint32(vni),
 				OperatorUuid: c.uuid[:],
 				IpAddr:       ip4[:],
 				PrefixBits:   32,
@@ -194,12 +196,12 @@ func (c *ControlPlane) BroadcastSessionSync(sessionID, vnetID [16]byte, ip netip
 }
 
 // BroadcastSessionRevoke notifies all peers that a client disconnected.
-func (c *ControlPlane) BroadcastSessionRevoke(sessionID, vnetID [16]byte) {
+func (c *ControlPlane) BroadcastSessionRevoke(sessionID [16]byte, vni common.VNI) {
 	event := &SessionEvent{
 		Event: &SessionEvent_Revoke{
 			Revoke: &SessionRevoke{
 				SessionId: sessionID[:],
-				VnetId:    vnetID[:],
+				Vni:       uint32(vni),
 			},
 		},
 	}
@@ -211,10 +213,11 @@ func (c *ControlPlane) BroadcastSessionRevoke(sessionID, vnetID [16]byte) {
 }
 
 // LookupRemoteSession finds which operator owns a destination IP in a given VNet.
-func (c *ControlPlane) LookupRemoteSession(vnetID [16]byte, dstIP netip.Addr) (operatorUUID [16]byte, found bool) {
-	vnet, ok := c.Registry.GetVNet(vnetID)
+// Returns the target session ID and operator UUID.
+func (c *ControlPlane) LookupRemoteSession(vni common.VNI, dstIP netip.Addr) (sessionID, operatorUUID [16]byte, found bool) {
+	vnet, ok := c.Registry.GetVNet(vni)
 	if !ok {
-		return [16]byte{}, false
+		return [16]byte{}, [16]byte{}, false
 	}
 	return vnet.LookupByIP(dstIP)
 }

@@ -21,7 +21,7 @@ type AEADPayload struct {
 	Ciphertext []byte // the full Seal output: counter + ciphertext + tag
 }
 
-func (m *AEADPayload) WriteTo(w io.Writer) error {
+func (m *AEADPayload) Encode(w io.Writer) error {
 	header := make([]byte, 2)
 	binary.BigEndian.PutUint16(header, uint16(len(m.Ciphertext)))
 	if _, err := w.Write(header); err != nil {
@@ -34,7 +34,7 @@ func (m *AEADPayload) WriteTo(w io.Writer) error {
 	return nil
 }
 
-func (m *AEADPayload) ReadFrom(r io.Reader) error {
+func (m *AEADPayload) Decode(r io.Reader) error {
 	header := make([]byte, 2)
 	if _, err := io.ReadFull(r, header); err != nil {
 		return err

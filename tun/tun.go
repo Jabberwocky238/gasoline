@@ -6,12 +6,11 @@ import (
 	"net/netip"
 	"runtime"
 
+	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/tun/common/log"
 
 	singTun "github.com/sagernet/sing-tun"
 )
-
-const DefaultMTU = 1400
 
 type Tun struct {
 	tunIf singTun.Tun
@@ -32,7 +31,7 @@ func New(name string, address string) (*Tun, error) {
 func NewFromFD(fd int) (*Tun, error) {
 	tunIf, err := singTun.New(singTun.Options{
 		FileDescriptor: fd,
-		MTU:            DefaultMTU,
+		MTU:            common.TunMTU,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("wrap fd %d: %w", fd, err)
@@ -113,9 +112,9 @@ func newSingTun(tunName string, Address string) (singTun.Tun, error) {
 		Name:         tunName,
 		Inet4Address: Inet4Address,
 		Inet6Address: Inet6Address,
-		MTU:          DefaultMTU, // 使用标准MTU大小1400以避免分片问题
-		GSO:          false,      // 在Linux下禁用GSO以避免兼容性问题
-		AutoRoute:    false,      // 禁用自动路由配置，使用手动路由
+		MTU:          common.TunMTU, // 使用标准MTU大小1400以避免分片问题
+		GSO:          false,         // 在Linux下禁用GSO以避免兼容性问题
+		AutoRoute:    false,         // 禁用自动路由配置，使用手动路由
 		// Inet4Gateway: Inet4Gateway, // 模仿wireguard行为
 		// Inet6Gateway: Inet6Gateway, // 模仿wireguard行为
 		// DNSServers: []netip.Addr{},

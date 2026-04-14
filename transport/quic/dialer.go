@@ -6,6 +6,7 @@ import (
 
 	"github.com/quic-go/quic-go"
 
+	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/transport"
@@ -13,13 +14,13 @@ import (
 
 type Dialer struct {
 	clientID [16]byte
-	vnetID   [16]byte
+	vni      common.VNI
 	auth     auth.ClientAuthenticator
 	tlsConf  *tls.Config
 }
 
-func NewDialer(clientID [16]byte, vnetID [16]byte, auth auth.ClientAuthenticator, tlsConf *tls.Config) *Dialer {
-	return &Dialer{clientID: clientID, vnetID: vnetID, auth: auth, tlsConf: tlsConf}
+func NewDialer(clientID [16]byte, vni common.VNI, auth auth.ClientAuthenticator, tlsConf *tls.Config) *Dialer {
+	return &Dialer{clientID: clientID, vni: vni, auth: auth, tlsConf: tlsConf}
 }
 
 func (d *Dialer) Dial(endpoint string) (transport.Conn, *protocol.HandshakeResult, error) {
@@ -33,7 +34,7 @@ func (d *Dialer) Dial(endpoint string) (transport.Conn, *protocol.HandshakeResul
 		return nil, nil, err
 	}
 
-	result, err := protocol.ClientHandshake(stream, d.clientID, d.vnetID, d.auth)
+	result, err := protocol.ClientHandshake(stream, d.clientID, d.vni, d.auth)
 	if err != nil {
 		conn.CloseWithError(0, "handshake failed")
 		return nil, nil, err

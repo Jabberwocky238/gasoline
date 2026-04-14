@@ -11,7 +11,7 @@ type ServerResponse struct {
 	Config []byte
 }
 
-func (m *ServerResponse) WriteTo(w io.Writer) error {
+func (m *ServerResponse) Encode(w io.Writer) error {
 	header := make([]byte, 3)
 	header[0] = m.Status
 	binary.BigEndian.PutUint16(header[1:], uint16(len(m.Config)))
@@ -25,7 +25,7 @@ func (m *ServerResponse) WriteTo(w io.Writer) error {
 	return nil
 }
 
-func (m *ServerResponse) ReadFrom(r io.Reader) error {
+func (m *ServerResponse) Decode(r io.Reader) error {
 	header := make([]byte, 3)
 	if _, err := io.ReadFull(r, header); err != nil {
 		return err

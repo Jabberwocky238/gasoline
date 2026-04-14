@@ -1,7 +1,7 @@
 package auth
 
 // NoAuthClient sends device fingerprint during handshake.
-// VNetID is now sent in the ClientHello, not in the auth payload.
+// VNI is now sent in the ClientHello, not in the auth payload.
 type NoAuthClient struct {
 	Fingerprint []byte
 }

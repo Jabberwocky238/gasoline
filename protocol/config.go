@@ -6,29 +6,28 @@ import (
 	"io"
 	"net/netip"
 
+	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol/encryption"
 )
 
 // SessionConfig is the config the server sends to the client after successful auth.
 //
-// Wire format:
+// Wire format (fixed part = 101 bytes):
 //
-//	[clientPrivateKey:32][serverPublicKey:32][prefixAddr:16][prefixBits:1]
-//	[rangeCount:2][range0_addr:16][range0_bits:1]...[rangeN_addr:16][rangeN_bits:1]
-//
-// Fixed part = 81 bytes, each range = 17 bytes.
+//	[sessionID:16][vni:4][clientPrivateKey:32][serverPublicKey:32]
+//	[prefixAddr:16][prefixBits:1][rangeCount:2][ranges...]
 type SessionConfig struct {
-	SessionID        [16]byte       // Session ID assigned by server
-	VNetID           [16]byte       // Virtual network ID
+	SessionID        [16]byte              // Session ID assigned by server
+	VNI              common.VNI            // 24-bit virtual network identifier
 	ClientPrivateKey encryption.PrivateKey // WG private key assigned to client
 	ServerPublicKey  encryption.PublicKey  // Server's WG public key
-	IPPrefix         netip.Prefix   // Client's assigned IP (e.g. 10.0.0.2/24)
-	AllowedRanges    []netip.Prefix // Internal network ranges routable via VPN
+	IPPrefix         netip.Prefix          // Client's assigned IP (e.g. 10.0.0.2/24)
+	AllowedRanges    []netip.Prefix        // Internal network ranges routable via VPN
 }
 
 const (
-	configFixedSize = 16 + 16 + 32 + 32 + 16 + 1 // 113
-	prefixEntrySize = 16 + 1                 // 17 per prefix
+	configFixedSize = 16 + 4 + 32 + 32 + 16 + 1 // 101
+	prefixEntrySize = 16 + 1                    // 17 per prefix
 )
 
 func (c *SessionConfig) Marshal() []byte {
@@ -36,22 +35,22 @@ func (c *SessionConfig) Marshal() []byte {
 	totalSize := configFixedSize + 2 + rangeCount*prefixEntrySize
 	buf := make([]byte, totalSize)
 
-	// SessionID + VNetID
+	// SessionID + VNI
 	copy(buf[0:16], c.SessionID[:])
-	copy(buf[16:32], c.VNetID[:])
+	binary.BigEndian.PutUint32(buf[16:20], uint32(c.VNI))
 
 	// Keys
-	copy(buf[32:64], c.ClientPrivateKey[:])
-	copy(buf[64:96], c.ServerPublicKey[:])
+	copy(buf[20:52], c.ClientPrivateKey[:])
+	copy(buf[52:84], c.ServerPublicKey[:])
 
 	// Client IP prefix (always stored as 16-byte addr)
 	addr16 := c.IPPrefix.Addr().As16()
-	copy(buf[96:112], addr16[:])
-	buf[112] = byte(c.IPPrefix.Bits())
+	copy(buf[84:100], addr16[:])
+	buf[100] = byte(c.IPPrefix.Bits())
 
 	// Allowed ranges
-	binary.BigEndian.PutUint16(buf[113:115], uint16(rangeCount))
-	offset := 115
+	binary.BigEndian.PutUint16(buf[101:103], uint16(rangeCount))
+	offset := 103
 	for _, r := range c.AllowedRanges {
 		a16 := r.Addr().As16()
 		copy(buf[offset:offset+16], a16[:])
@@ -67,18 +66,18 @@ func (c *SessionConfig) Unmarshal(data []byte) error {
 		return fmt.Errorf("session config too short: %d bytes", len(data))
 	}
 
-	// SessionID + VNetID
+	// SessionID + VNI
 	copy(c.SessionID[:], data[0:16])
-	copy(c.VNetID[:], data[16:32])
+	c.VNI = common.VNI(binary.BigEndian.Uint32(data[16:20]))
 
 	// Keys
-	copy(c.ClientPrivateKey[:], data[32:64])
-	copy(c.ServerPublicKey[:], data[64:96])
+	copy(c.ClientPrivateKey[:], data[20:52])
+	copy(c.ServerPublicKey[:], data[52:84])
 
 	// Client IP prefix
 	var a16 [16]byte
-	copy(a16[:], data[96:112])
-	bits := int(data[112])
+	copy(a16[:], data[84:100])
+	bits := int(data[100])
 	addr := netip.AddrFrom16(a16)
 	if addr.Is4In6() {
 		addr = addr.Unmap()
@@ -86,7 +85,7 @@ func (c *SessionConfig) Unmarshal(data []byte) error {
 	c.IPPrefix = netip.PrefixFrom(addr, bits)
 
 	// Allowed ranges
-	rangeCount := int(binary.BigEndian.Uint16(data[113:115]))
+	rangeCount := int(binary.BigEndian.Uint16(data[101:103]))
 	expectedLen := configFixedSize + 2 + rangeCount*prefixEntrySize
 	if len(data) < expectedLen {
 		return fmt.Errorf("session config too short for %d ranges: need %d, got %d",
@@ -94,7 +93,7 @@ func (c *SessionConfig) Unmarshal(data []byte) error {
 	}
 
 	c.AllowedRanges = make([]netip.Prefix, rangeCount)
-	offset := 115
+	offset := 103
 	for i := 0; i < rangeCount; i++ {
 		var ra [16]byte
 		copy(ra[:], data[offset:offset+16])

@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/protocol/encryption"
@@ -18,7 +19,7 @@ func testConfigFn() protocol.ConfigFunc {
 	serverPriv, _ := encryption.NewPrivateKey()
 	serverPub := serverPriv.PublicKey()
 
-	return func(clientID [16]byte, vnetID [16]byte) (*protocol.SessionConfig, error) {
+	return func(clientID [16]byte, vni common.VNI) (*protocol.SessionConfig, error) {
 		clientPriv, _ := encryption.NewPrivateKey()
 		return &protocol.SessionConfig{
 			ClientPrivateKey: clientPriv,
@@ -50,7 +51,7 @@ func TestTLSHandshakeAndPacket(t *testing.T) {
 	addr := ln.Addr()
 	clientID := [16]byte{0x01, 0x02, 0x03}
 	clientTLS := qtls.InsecureClientTLS()
-	dialer := NewDialer(clientID, [16]byte{}, &auth.NoAuthClient{}, clientTLS)
+	dialer := NewDialer(clientID, common.VNI(0), &auth.NoAuthClient{}, clientTLS)
 
 	var wg sync.WaitGroup
 	var serverConn *Conn
@@ -171,7 +172,7 @@ func TestTLSMultiplePackets(t *testing.T) {
 	defer ln.Close()
 
 	clientTLS := qtls.InsecureClientTLS()
-	dialer := NewDialer([16]byte{}, [16]byte{}, &auth.NoAuthClient{}, clientTLS)
+	dialer := NewDialer([16]byte{}, common.VNI(0), &auth.NoAuthClient{}, clientTLS)
 
 	var wg sync.WaitGroup
 	var sConn *Conn
@@ -246,7 +247,7 @@ func TestTLSHMACAuth(t *testing.T) {
 	defer ln.Close()
 
 	clientTLS := qtls.InsecureClientTLS()
-	dialer := NewDialer(clientID, [16]byte{}, clientAuth, clientTLS)
+	dialer := NewDialer(clientID, common.VNI(0), clientAuth, clientTLS)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -296,7 +297,7 @@ func TestTLSUserPassAuth(t *testing.T) {
 	defer ln.Close()
 
 	clientTLS := qtls.InsecureClientTLS()
-	dialer := NewDialer([16]byte{0x01}, [16]byte{}, clientAuth, clientTLS)
+	dialer := NewDialer([16]byte{0x01}, common.VNI(0), clientAuth, clientTLS)
 
 	var wg sync.WaitGroup
 	wg.Add(1)

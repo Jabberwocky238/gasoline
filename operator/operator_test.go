@@ -203,13 +203,13 @@ func TestSessionSyncAndRevoke(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	sessionID := [16]byte{0xDE, 0xAD}
-	vnetID := [16]byte{0x00, 0xC8}
+	vni := common.VNI(200)
 	ip := netip.MustParseAddr("10.0.0.5")
 
-	opA.Ctrl.BroadcastSessionSync(sessionID, vnetID, ip)
+	opA.Ctrl.BroadcastSessionSync(sessionID, vni, ip)
 	time.Sleep(100 * time.Millisecond)
 
-	vnet, ok := opB.Ctrl.Registry.GetVNet(vnetID)
+	vnet, ok := opB.Ctrl.Registry.GetVNet(vni)
 	if !ok {
 		t.Fatal("opB has no VNet after sync")
 	}
@@ -222,7 +222,7 @@ func TestSessionSyncAndRevoke(t *testing.T) {
 	}
 	t.Logf("SessionSync OK: B sees session at %s", info.IP)
 
-	opA.Ctrl.BroadcastSessionRevoke(sessionID, vnetID)
+	opA.Ctrl.BroadcastSessionRevoke(sessionID, vni)
 	time.Sleep(100 * time.Millisecond)
 
 	if _, ok := vnet.Get(sessionID); ok {
@@ -256,7 +256,7 @@ func TestDataForwarding(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	vnetID := [16]byte{0x00, 0xC8} // vnet 200
+	vni := common.VNI(200)
 
 	// --- Register ClientA on OpA (10.0.0.2) ---
 	sessionA := [16]byte{0x01}
@@ -264,12 +264,12 @@ func TestDataForwarding(t *testing.T) {
 	clientA := &ClientPeer{
 		Conn:       connA,
 		SessionID:  sessionA,
-		VNetID:     vnetID,
+		VNI:        vni,
 		OperatorID: uuidA,
 		IP:         netip.MustParsePrefix("10.0.0.2/32"),
 	}
 	opA.clients.Add(clientA)
-	opA.Ctrl.BroadcastSessionSync(sessionA, vnetID, clientA.IP.Addr())
+	opA.Ctrl.BroadcastSessionSync(sessionA, vni, clientA.IP.Addr())
 	// Start the read loop so OpA processes packets from ClientA through the real path
 	go opA.routineReadFromClient(clientA)
 	time.Sleep(50 * time.Millisecond) // let goroutine start
@@ -280,20 +280,20 @@ func TestDataForwarding(t *testing.T) {
 	clientB := &ClientPeer{
 		Conn:       connB,
 		SessionID:  sessionB,
-		VNetID:     vnetID,
+		VNI:        vni,
 		OperatorID: uuidB,
 		IP:         netip.MustParsePrefix("10.0.0.3/32"),
 	}
 	opB.clients.Add(clientB)
-	opB.Ctrl.BroadcastSessionSync(sessionB, vnetID, clientB.IP.Addr())
+	opB.Ctrl.BroadcastSessionSync(sessionB, vni, clientB.IP.Addr())
 
 	time.Sleep(200 * time.Millisecond)
 
 	// Verify both operators see both sessions in registry
-	if _, found := opA.Ctrl.LookupRemoteSession(vnetID, netip.MustParseAddr("10.0.0.3")); !found {
+	if _, _, found := opA.Ctrl.LookupRemoteSession(vni, netip.MustParseAddr("10.0.0.3")); !found {
 		t.Fatal("OpA doesn't know about ClientB's session")
 	}
-	if _, found := opB.Ctrl.LookupRemoteSession(vnetID, netip.MustParseAddr("10.0.0.2")); !found {
+	if _, _, found := opB.Ctrl.LookupRemoteSession(vni, netip.MustParseAddr("10.0.0.2")); !found {
 		t.Fatal("OpB doesn't know about ClientA's session")
 	}
 

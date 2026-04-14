@@ -466,7 +466,7 @@ func (*SessionEvent_Revoke) isSessionEvent_Event() {}
 type SessionSync struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	SessionId     []byte                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`          // 16 bytes
-	VnetId        []byte                 `protobuf:"bytes,2,opt,name=vnet_id,json=vnetId,proto3" json:"vnet_id,omitempty"`                   // 16 bytes
+	Vni           uint32                 `protobuf:"varint,2,opt,name=vni,proto3" json:"vni,omitempty"`                                      // 24-bit VNI
 	OperatorUuid  []byte                 `protobuf:"bytes,3,opt,name=operator_uuid,json=operatorUuid,proto3" json:"operator_uuid,omitempty"` // 16 bytes
 	IpAddr        []byte                 `protobuf:"bytes,4,opt,name=ip_addr,json=ipAddr,proto3" json:"ip_addr,omitempty"`                   // 4 bytes (IPv4) or 16 bytes (IPv6)
 	PrefixBits    uint32                 `protobuf:"varint,5,opt,name=prefix_bits,json=prefixBits,proto3" json:"prefix_bits,omitempty"`
@@ -511,11 +511,11 @@ func (x *SessionSync) GetSessionId() []byte {
 	return nil
 }
 
-func (x *SessionSync) GetVnetId() []byte {
+func (x *SessionSync) GetVni() uint32 {
 	if x != nil {
-		return x.VnetId
+		return x.Vni
 	}
-	return nil
+	return 0
 }
 
 func (x *SessionSync) GetOperatorUuid() []byte {
@@ -542,7 +542,7 @@ func (x *SessionSync) GetPrefixBits() uint32 {
 type SessionRevoke struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	SessionId     []byte                 `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"` // 16 bytes
-	VnetId        []byte                 `protobuf:"bytes,2,opt,name=vnet_id,json=vnetId,proto3" json:"vnet_id,omitempty"`          // 16 bytes
+	Vni           uint32                 `protobuf:"varint,2,opt,name=vni,proto3" json:"vni,omitempty"`                             // 24-bit VNI
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -584,11 +584,11 @@ func (x *SessionRevoke) GetSessionId() []byte {
 	return nil
 }
 
-func (x *SessionRevoke) GetVnetId() []byte {
+func (x *SessionRevoke) GetVni() uint32 {
 	if x != nil {
-		return x.VnetId
+		return x.Vni
 	}
-	return nil
+	return 0
 }
 
 var File_operator_ctrl_control_proto protoreflect.FileDescriptor

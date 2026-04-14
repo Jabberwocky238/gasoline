@@ -3,6 +3,8 @@ package ratelimiter
 import (
 	"sync"
 	"time"
+
+	"github.com/jabberwocky238/gasoline/common"
 )
 
 // Rule defines a rate limit for a VNet.
@@ -39,32 +41,32 @@ func (b *bucket) allow(n uint64) bool {
 	return true
 }
 
-// RateLimiter manages per-VNet rate limits using token buckets.
+// RateLimiter manages per-VNI rate limits using token buckets.
 type RateLimiter struct {
 	mu      sync.RWMutex
-	rules   map[[16]byte]*Rule   // vnetID → rule
-	buckets map[[16]byte]*bucket // vnetID → bucket
+	rules   map[common.VNI]*Rule
+	buckets map[common.VNI]*bucket
 }
 
 func New() *RateLimiter {
 	return &RateLimiter{
-		rules:   make(map[[16]byte]*Rule),
-		buckets: make(map[[16]byte]*bucket),
+		rules:   make(map[common.VNI]*Rule),
+		buckets: make(map[common.VNI]*bucket),
 	}
 }
 
-// SetRule sets the rate limit for a VNet. Pass BytesPerSecond=0 to remove the limit.
-func (rl *RateLimiter) SetRule(vnetID [16]byte, rule *Rule) {
+// SetRule sets the rate limit for a VNI. Pass BytesPerSecond=0 to remove the limit.
+func (rl *RateLimiter) SetRule(vni common.VNI, rule *Rule) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 	if rule == nil || rule.BytesPerSecond == 0 {
-		delete(rl.rules, vnetID)
-		delete(rl.buckets, vnetID)
+		delete(rl.rules, vni)
+		delete(rl.buckets, vni)
 		return
 	}
-	rl.rules[vnetID] = rule
+	rl.rules[vni] = rule
 	cap := float64(rule.BytesPerSecond) * 2 // allow 2-second burst
-	rl.buckets[vnetID] = &bucket{
+	rl.buckets[vni] = &bucket{
 		tokens:     cap,
 		capacity:   cap,
 		rate:       float64(rule.BytesPerSecond) / 1e9,
@@ -72,18 +74,18 @@ func (rl *RateLimiter) SetRule(vnetID [16]byte, rule *Rule) {
 	}
 }
 
-// GetRule returns the current rule for a VNet, or nil if unlimited.
-func (rl *RateLimiter) GetRule(vnetID [16]byte) *Rule {
+// GetRule returns the current rule for a VNI, or nil if unlimited.
+func (rl *RateLimiter) GetRule(vni common.VNI) *Rule {
 	rl.mu.RLock()
 	defer rl.mu.RUnlock()
-	return rl.rules[vnetID]
+	return rl.rules[vni]
 }
 
-// Allow checks if n bytes can pass for the given VNet.
+// Allow checks if n bytes can pass for the given VNI.
 // Returns true if allowed (or no rule set).
-func (rl *RateLimiter) Allow(vnetID [16]byte, n uint64) bool {
+func (rl *RateLimiter) Allow(vni common.VNI, n uint64) bool {
 	rl.mu.RLock()
-	b, ok := rl.buckets[vnetID]
+	b, ok := rl.buckets[vni]
 	rl.mu.RUnlock()
 	if !ok {
 		return true
@@ -91,19 +93,19 @@ func (rl *RateLimiter) Allow(vnetID [16]byte, n uint64) bool {
 	return b.allow(n)
 }
 
-// Remove cleans up a VNet's rule and bucket.
-func (rl *RateLimiter) Remove(vnetID [16]byte) {
+// Remove cleans up a VNI's rule and bucket.
+func (rl *RateLimiter) Remove(vni common.VNI) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
-	delete(rl.rules, vnetID)
-	delete(rl.buckets, vnetID)
+	delete(rl.rules, vni)
+	delete(rl.buckets, vni)
 }
 
 // AllRules returns all current rules.
-func (rl *RateLimiter) AllRules() map[[16]byte]*Rule {
+func (rl *RateLimiter) AllRules() map[common.VNI]*Rule {
 	rl.mu.RLock()
 	defer rl.mu.RUnlock()
-	result := make(map[[16]byte]*Rule, len(rl.rules))
+	result := make(map[common.VNI]*Rule, len(rl.rules))
 	for k, v := range rl.rules {
 		result[k] = v
 	}

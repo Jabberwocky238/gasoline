@@ -151,26 +151,26 @@ func LoadVNetConfig(path string) (*NetworkEntry, error) {
 
 // OperatorConfig is the declarative configuration consumed by operator.New().
 type OperatorConfig struct {
-	UUID           *[16]byte           // optional: if nil, random UUID is generated
-	ListenAddr     string              // client listen address
-	OpListenAddr   string              // inter-operator bind address
-	OpExternalAddr string              // external address other operators use to reach us
-	Transport      string              // "tcp", "udp", "quic"
-	AuthStr        string              // global default auth string
-	NetworkAuth    map[[16]byte]string  // per-VNet auth overrides
-	Network        string              // "vnetID:CIDR;..." pairs
-	StatsAddr      string              // stats HTTP API address
-	DiscoverAddrs  []string            // seed operator addresses for bootstrap
-	WatchDir       string              // directory to watch for vnet config files, "" = disabled
-	LogLevel       string              // log level: trace, debug, info, warn, error, fatal, panic
+	UUID           *[16]byte      // optional: if nil, random UUID is generated
+	ListenAddr     string         // client listen address
+	OpListenAddr   string         // inter-operator bind address
+	OpExternalAddr string         // external address other operators use to reach us
+	Transport      string         // "tcp", "udp", "quic"
+	AuthStr        string         // global default auth string
+	NetworkAuth    map[VNI]string // per-VNet auth overrides
+	Network        string         // "vni:CIDR;..." pairs
+	StatsAddr      string         // stats HTTP API address
+	DiscoverAddrs  []string       // seed operator addresses for bootstrap
+	WatchDir       string         // directory to watch for vnet config files, "" = disabled
+	LogLevel       string         // log level: trace, debug, info, warn, error, fatal, panic
 }
 
 // ClientConfig is the declarative configuration consumed by client.New().
 type ClientConfig struct {
-	Endpoint    string   // server address
-	Transport   string   // "tcp", "udp", "quic"
-	AuthStr     string   // auth config string
-	VNetID      [16]byte // virtual network ID
-	TUNName     string   // TUN device name
-	Socks5Port  int      // quick-socks5 port, 0 = disabled
+	Endpoint   string // server address
+	Transport  string // "tcp", "udp", "quic"
+	AuthStr    string // auth config string
+	VNI        VNI    // virtual network (24-bit VXLAN identifier)
+	TUNName    string // TUN device name
+	Socks5Port int    // quick-socks5 port, 0 = disabled
 }

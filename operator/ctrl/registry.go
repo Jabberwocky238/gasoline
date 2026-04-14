@@ -4,6 +4,8 @@ import (
 	"net/netip"
 	"sync"
 	"time"
+
+	"github.com/jabberwocky238/gasoline/common"
 )
 
 type OperatorInfo struct {
@@ -46,15 +48,15 @@ func (v *VNetSessions) Get(sessionID [16]byte) (*SessionInfo, bool) {
 }
 
 // LookupByIP finds a session matching the given IP address.
-func (v *VNetSessions) LookupByIP(ip netip.Addr) (operatorUUID [16]byte, found bool) {
+func (v *VNetSessions) LookupByIP(ip netip.Addr) (sessionID, operatorUUID [16]byte, found bool) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
-	for _, s := range v.Sessions {
+	for sid, s := range v.Sessions {
 		if s.IP == ip {
-			return s.OperatorUUID, true
+			return sid, s.OperatorUUID, true
 		}
 	}
-	return [16]byte{}, false
+	return [16]byte{}, [16]byte{}, false
 }
 
 // Registry holds cluster state: known operators and remote sessions.
@@ -63,13 +65,13 @@ type Registry struct {
 	operators map[[16]byte]*OperatorInfo
 
 	vnetMu sync.RWMutex
-	vnets  map[[16]byte]*VNetSessions // vnetID -> sessions
+	vnets  map[common.VNI]*VNetSessions // VNI -> sessions
 }
 
 func NewRegistry() *Registry {
 	return &Registry{
 		operators: make(map[[16]byte]*OperatorInfo),
-		vnets:     make(map[[16]byte]*VNetSessions),
+		vnets:     make(map[common.VNI]*VNetSessions),
 	}
 }
 
@@ -96,20 +98,20 @@ func (r *Registry) AllOperators() map[[16]byte]*OperatorInfo {
 	return m
 }
 
-func (r *Registry) GetOrCreateVNet(vnetID [16]byte) *VNetSessions {
+func (r *Registry) GetOrCreateVNet(vni common.VNI) *VNetSessions {
 	r.vnetMu.Lock()
 	defer r.vnetMu.Unlock()
-	if v, ok := r.vnets[vnetID]; ok {
+	if v, ok := r.vnets[vni]; ok {
 		return v
 	}
 	v := newVNetSessions()
-	r.vnets[vnetID] = v
+	r.vnets[vni] = v
 	return v
 }
 
-func (r *Registry) GetVNet(vnetID [16]byte) (*VNetSessions, bool) {
+func (r *Registry) GetVNet(vni common.VNI) (*VNetSessions, bool) {
 	r.vnetMu.RLock()
 	defer r.vnetMu.RUnlock()
-	v, ok := r.vnets[vnetID]
+	v, ok := r.vnets[vni]
 	return v, ok
 }

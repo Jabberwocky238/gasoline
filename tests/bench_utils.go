@@ -47,16 +47,16 @@ func startBenchOperator(t *testing.T, uuid [16]byte, tp string) *operator.Operat
 	return op
 }
 
-func setupSingleOperator(t *testing.T, tp string) (*operator.Operator, [16]byte) {
+func setupSingleOperator(t *testing.T, tp string) (*operator.Operator, common.VNI) {
 	t.Helper()
-	vnetID := operator.VNetIDFromUint64(benchVNetNum)
+	vni := common.VNI(benchVNetNum)
 	op := startBenchOperator(t, [16]byte{0xA0}, tp)
-	return op, vnetID
+	return op, vni
 }
 
-func setupOperators(t *testing.T, tp string) (*operator.Operator, *operator.Operator, [16]byte) {
+func setupOperators(t *testing.T, tp string) (*operator.Operator, *operator.Operator, common.VNI) {
 	t.Helper()
-	vnetID := operator.VNetIDFromUint64(benchVNetNum)
+	vni := common.VNI(benchVNetNum)
 	opA := startBenchOperator(t, [16]byte{0xA0}, tp)
 	opB := startBenchOperator(t, [16]byte{0xB0}, tp)
 
@@ -66,7 +66,7 @@ func setupOperators(t *testing.T, tp string) (*operator.Operator, *operator.Oper
 	waitFor(t, 2*time.Second, func() bool {
 		return opA.ConnectedOperators() >= 1 && opB.ConnectedOperators() >= 1
 	})
-	return opA, opB, vnetID
+	return opA, opB, vni
 }
 
 func makeIPv4Packet(src, dst netip.Addr, payload []byte) []byte {

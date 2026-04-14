@@ -2,13 +2,13 @@
   "permissions": {
     "allow": [
       "Bash(xargs grep:*)",
-      "Bash(go get:*)"
+      "Bash(go get:*)",
+      "Bash(go vet*)"
     ],
     "deny": [
       "Bash(go build*)",
       "Bash(go run*)",
-      "Bash(go test*)",
-      "Bash(go vet*)"
+      "Bash(go test*)"
     ]
   }
 }

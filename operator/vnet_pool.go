@@ -1,10 +1,8 @@
 package operator
 
 import (
-	"encoding/binary"
 	"fmt"
 	"net/netip"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -13,7 +11,7 @@ import (
 
 // VNetPool manages IP allocation for a single VNet.
 type VNetPool struct {
-	VNetID   [common.VNetIDLen]byte
+	VNI      common.VNI
 	Prefix   netip.Prefix
 	baseAddr netip.Addr
 
@@ -52,8 +50,7 @@ func (p *VNetPool) AllocateIP() (netip.Addr, error) {
 		}
 
 		if !wrapped && p.next == start {
-			// Full loop, pool exhausted
-			return netip.Addr{}, fmt.Errorf("IP pool exhausted for vnet %x", p.VNetID)
+			return netip.Addr{}, fmt.Errorf("IP pool exhausted for vni %s", p.VNI)
 		}
 		if p.next == start {
 			wrapped = true
@@ -115,8 +112,8 @@ func (p *VNetPool) ipToSeq(ip netip.Addr) uint32 {
 	return ipVal - baseVal
 }
 
-// NewVNetPool creates a single VNet pool for the given vnetID, CIDR prefix, and seed offset.
-func NewVNetPool(vnetID [common.VNetIDLen]byte, prefix netip.Prefix, seed uint32) *VNetPool {
+// NewVNetPool creates a single VNet pool for the given VNI, CIDR prefix, and seed offset.
+func NewVNetPool(vni common.VNI, prefix netip.Prefix, seed uint32) *VNetPool {
 	hostBits := 32 - prefix.Bits()
 	usable := uint32(1<<hostBits) - 2
 	offset := uint32(2)
@@ -136,7 +133,7 @@ func NewVNetPool(vnetID [common.VNetIDLen]byte, prefix netip.Prefix, seed uint32
 		offset = 2
 	}
 	return &VNetPool{
-		VNetID:   vnetID,
+		VNI:      vni,
 		Prefix:   prefix,
 		baseAddr: prefix.Addr(),
 		next:     offset,
@@ -145,28 +142,21 @@ func NewVNetPool(vnetID [common.VNetIDLen]byte, prefix netip.Prefix, seed uint32
 	}
 }
 
-// VNetIDFromUint64 converts a uint64 vnet number to a [16]byte VNetID.
-func VNetIDFromUint64(num uint64) [common.VNetIDLen]byte {
-	var id [common.VNetIDLen]byte
-	binary.BigEndian.PutUint64(id[8:], num)
-	return id
-}
-
 // --------------- VNetPoolMap ---------------
 
 type VNetPoolMap struct {
 	mu    sync.RWMutex
-	pools map[[common.VNetIDLen]byte]*VNetPool
+	pools map[common.VNI]*VNetPool
 }
 
 func NewVNetPoolMap() *VNetPoolMap {
-	return &VNetPoolMap{pools: make(map[[common.VNetIDLen]byte]*VNetPool)}
+	return &VNetPoolMap{pools: make(map[common.VNI]*VNetPool)}
 }
 
-// ParseVNetPools parses "vnetID:CIDR;vnetID:CIDR;..." into a VNetPoolMap.
-// seed is used to spread starting offsets across operators (typically UUID bytes).
+// ParseVNetPools parses "vni:CIDR;vni:CIDR;..." into a VNetPoolMap.
+// seed is used to spread starting offsets across operators.
 func ParseVNetPools(network string, seed uint32) (*VNetPoolMap, error) {
-	m := &VNetPoolMap{pools: make(map[[common.VNetIDLen]byte]*VNetPool)}
+	m := &VNetPoolMap{pools: make(map[common.VNI]*VNetPool)}
 
 	for _, entry := range strings.Split(network, ";") {
 		entry = strings.TrimSpace(entry)
@@ -175,20 +165,19 @@ func ParseVNetPools(network string, seed uint32) (*VNetPoolMap, error) {
 		}
 		parts := strings.SplitN(entry, ":", 2)
 		if len(parts) != 2 {
-			return nil, fmt.Errorf("invalid network entry (expected vnetID:CIDR): %s", entry)
+			return nil, fmt.Errorf("invalid network entry (expected vni:CIDR): %s", entry)
 		}
-		vnetNum, err := strconv.ParseUint(parts[0], 10, 64)
+		vni, err := common.ParseVNI(parts[0])
 		if err != nil {
-			return nil, fmt.Errorf("invalid vnet ID %q: %w", parts[0], err)
+			return nil, fmt.Errorf("invalid vni %q: %w", parts[0], err)
 		}
-		vnetID := VNetIDFromUint64(vnetNum)
 
 		prefix, err := netip.ParsePrefix(parts[1])
 		if err != nil {
 			return nil, fmt.Errorf("invalid CIDR %q: %w", parts[1], err)
 		}
 
-		m.pools[vnetID] = NewVNetPool(vnetID, prefix, seed)
+		m.pools[vni] = NewVNetPool(vni, prefix, seed)
 	}
 
 	if len(m.pools) == 0 {
@@ -197,35 +186,35 @@ func ParseVNetPools(network string, seed uint32) (*VNetPoolMap, error) {
 	return m, nil
 }
 
-// Get returns a pool by VNetID.
-func (m *VNetPoolMap) Get(vnetID [common.VNetIDLen]byte) (*VNetPool, bool) {
+// Get returns a pool by VNI.
+func (m *VNetPoolMap) Get(vni common.VNI) (*VNetPool, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	p, ok := m.pools[vnetID]
+	p, ok := m.pools[vni]
 	return p, ok
 }
 
-// Add inserts or replaces a pool for the given VNetID.
-func (m *VNetPoolMap) Add(vnetID [common.VNetIDLen]byte, pool *VNetPool) {
+// Add inserts or replaces a pool for the given VNI.
+func (m *VNetPoolMap) Add(vni common.VNI, pool *VNetPool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.pools[vnetID] = pool
+	m.pools[vni] = pool
 }
 
-// Remove deletes a pool by VNetID. Returns true if it existed.
-func (m *VNetPoolMap) Remove(vnetID [common.VNetIDLen]byte) bool {
+// Remove deletes a pool by VNI. Returns true if it existed.
+func (m *VNetPoolMap) Remove(vni common.VNI) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	_, ok := m.pools[vnetID]
-	delete(m.pools, vnetID)
+	_, ok := m.pools[vni]
+	delete(m.pools, vni)
 	return ok
 }
 
 // All returns a snapshot of all pools for iteration.
-func (m *VNetPoolMap) All() map[[common.VNetIDLen]byte]*VNetPool {
+func (m *VNetPoolMap) All() map[common.VNI]*VNetPool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	cp := make(map[[common.VNetIDLen]byte]*VNetPool, len(m.pools))
+	cp := make(map[common.VNI]*VNetPool, len(m.pools))
 	for k, v := range m.pools {
 		cp[k] = v
 	}

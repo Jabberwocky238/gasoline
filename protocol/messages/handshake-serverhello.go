@@ -14,7 +14,7 @@ type ServerHello struct {
 	Payload  []byte
 }
 
-func (m *ServerHello) WriteTo(w io.Writer) error {
+func (m *ServerHello) Encode(w io.Writer) error {
 	header := make([]byte, 4)
 	header[0] = m.Version
 	header[1] = byte(m.AuthType)
@@ -29,7 +29,7 @@ func (m *ServerHello) WriteTo(w io.Writer) error {
 	return nil
 }
 
-func (m *ServerHello) ReadFrom(r io.Reader) error {
+func (m *ServerHello) Decode(r io.Reader) error {
 	header := make([]byte, 4)
 	if _, err := io.ReadFull(r, header); err != nil {
 		return err

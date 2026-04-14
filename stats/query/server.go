@@ -10,6 +10,7 @@ import (
 
 	log "github.com/sirupsen/logrus"
 
+	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/stats/ratelimiter"
 	"github.com/jabberwocky238/gasoline/stats/recorder"
 )
@@ -110,7 +111,7 @@ func (s *Server) handleRateLimit(w http.ResponseWriter, r *http.Request) {
 			rules := s.limiter.AllRules()
 			out := make(map[string]uint64, len(rules))
 			for id, rule := range rules {
-				out[hex.EncodeToString(id[:])] = rule.BytesPerSecond
+				out[id.String()] = rule.BytesPerSecond
 			}
 			writeJSON(w, out)
 			return
@@ -119,15 +120,15 @@ func (s *Server) handleRateLimit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	vnetID, err := parseID(idHex)
+	vni, err := common.ParseVNI(idHex)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("bad vnet id: %v", err), http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("bad vni: %v", err), http.StatusBadRequest)
 		return
 	}
 
 	switch r.Method {
 	case http.MethodGet:
-		rule := s.limiter.GetRule(vnetID)
+		rule := s.limiter.GetRule(vni)
 		if rule == nil {
 			writeJSON(w, map[string]any{"bytes_per_second": 0, "limited": false})
 		} else {
@@ -142,11 +143,11 @@ func (s *Server) handleRateLimit(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("bad body: %v", err), http.StatusBadRequest)
 			return
 		}
-		s.limiter.SetRule(vnetID, &ratelimiter.Rule{BytesPerSecond: body.BytesPerSecond})
+		s.limiter.SetRule(vni, &ratelimiter.Rule{BytesPerSecond: body.BytesPerSecond})
 		writeJSON(w, map[string]string{"status": "ok"})
 
 	case http.MethodDelete:
-		s.limiter.Remove(vnetID)
+		s.limiter.Remove(vni)
 		writeJSON(w, map[string]string{"status": "ok"})
 
 	default:

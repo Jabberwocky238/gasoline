@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/protocol/encryption"
@@ -17,7 +18,7 @@ func testConfigFn() protocol.ConfigFunc {
 	serverPriv, _ := encryption.NewPrivateKey()
 	serverPub := serverPriv.PublicKey()
 
-	return func(clientID [16]byte, vnetID [16]byte) (*protocol.SessionConfig, error) {
+	return func(clientID [16]byte, vni common.VNI) (*protocol.SessionConfig, error) {
 		clientPriv, _ := encryption.NewPrivateKey()
 		return &protocol.SessionConfig{
 			ClientPrivateKey: clientPriv,
@@ -43,7 +44,7 @@ func TestTCPHandshakeAndPacket(t *testing.T) {
 
 	addr := ln.Addr()
 	clientID := [16]byte{0x01, 0x02, 0x03}
-	dialer := NewDialer(clientID, [16]byte{}, &auth.NoAuthClient{})
+	dialer := NewDialer(clientID, common.VNI(0), &auth.NoAuthClient{})
 
 	var wg sync.WaitGroup
 	var serverConn *Conn
@@ -159,7 +160,7 @@ func TestTCPMultiplePackets(t *testing.T) {
 	}
 	defer ln.Close()
 
-	dialer := NewDialer([16]byte{}, [16]byte{}, &auth.NoAuthClient{})
+	dialer := NewDialer([16]byte{}, common.VNI(0), &auth.NoAuthClient{})
 
 	var wg sync.WaitGroup
 	var sConn *Conn
@@ -228,7 +229,7 @@ func TestTCPHMACAuth(t *testing.T) {
 	}
 	defer ln.Close()
 
-	dialer := NewDialer(clientID, [16]byte{}, clientAuth)
+	dialer := NewDialer(clientID, common.VNI(0), clientAuth)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -272,7 +273,7 @@ func TestTCPUserPassAuth(t *testing.T) {
 	}
 	defer ln.Close()
 
-	dialer := NewDialer([16]byte{0x01}, [16]byte{}, clientAuth)
+	dialer := NewDialer([16]byte{0x01}, common.VNI(0), clientAuth)
 
 	var wg sync.WaitGroup
 	wg.Add(1)

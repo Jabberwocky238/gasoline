@@ -10,7 +10,7 @@ type ClientRequest struct {
 	Payload []byte
 }
 
-func (m *ClientRequest) WriteTo(w io.Writer) error {
+func (m *ClientRequest) Encode(w io.Writer) error {
 	header := make([]byte, 2)
 	binary.BigEndian.PutUint16(header, uint16(len(m.Payload)))
 	if _, err := w.Write(header); err != nil {
@@ -23,7 +23,7 @@ func (m *ClientRequest) WriteTo(w io.Writer) error {
 	return nil
 }
 
-func (m *ClientRequest) ReadFrom(r io.Reader) error {
+func (m *ClientRequest) Decode(r io.Reader) error {
 	header := make([]byte, 2)
 	if _, err := io.ReadFull(r, header); err != nil {
 		return err

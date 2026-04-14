@@ -8,16 +8,16 @@ import (
 )
 
 func TestCSC_TCP(t *testing.T) {
-	op, vnetID := setupSingleOperator(t, "tcp")
+	op, vni := setupSingleOperator(t, "tcp")
 	defer op.Close()
 
-	connA, resultA, err := tcp.NewDialer([16]byte{0x01}, vnetID, &auth.NoAuthClient{}).Dial(op.ClientAddr())
+	connA, resultA, err := tcp.NewDialer([16]byte{0x01}, vni, &auth.NoAuthClient{}).Dial(op.ClientAddr())
 	if err != nil {
 		t.Fatalf("ClientA dial: %v", err)
 	}
 	defer connA.Close()
 
-	connB, resultB, err := tcp.NewDialer([16]byte{0x02}, vnetID, &auth.NoAuthClient{}).Dial(op.ClientAddr())
+	connB, resultB, err := tcp.NewDialer([16]byte{0x02}, vni, &auth.NoAuthClient{}).Dial(op.ClientAddr())
 	if err != nil {
 		t.Fatalf("ClientB dial: %v", err)
 	}

@@ -28,7 +28,7 @@ type Watcher struct {
 	log      *log.Logger
 
 	mu      sync.Mutex
-	tracked map[string][common.VNetIDLen]byte // filename -> vnetID currently loaded
+	tracked map[string]common.VNI // filename -> VNI currently loaded
 }
 
 func NewWatcher(ctx context.Context, dir string, pools *VNetPoolMap, resolver *auth.MapResolver, logger *log.Logger) (*Watcher, error) {
@@ -49,7 +49,7 @@ func NewWatcher(ctx context.Context, dir string, pools *VNetPoolMap, resolver *a
 		watcher:  fw,
 		seed:     uint32(seed.Int64()),
 		log:      logger,
-		tracked:  make(map[string][common.VNetIDLen]byte),
+		tracked:  make(map[string]common.VNI),
 	}
 
 	// Load all existing files on startup
@@ -119,20 +119,24 @@ func (w *Watcher) loadFile(path string) {
 		return
 	}
 
-	vnetID := VNetIDFromUint64(cfg.VNet)
+	vni := common.VNI(cfg.VNet)
+	if !vni.Valid() {
+		w.log.Errorf("fswatch: vni %d out of 24-bit range in %s", cfg.VNet, path)
+		return
+	}
 	name := filepath.Base(path)
 
 	w.mu.Lock()
-	if oldID, ok := w.tracked[name]; ok && oldID != vnetID {
-		w.pools.Remove(oldID)
-		w.resolver.Remove(oldID)
-		w.log.Infof("fswatch: removed old vnet %x from %s", oldID, name)
+	if oldVNI, ok := w.tracked[name]; ok && oldVNI != vni {
+		w.pools.Remove(oldVNI)
+		w.resolver.Remove(oldVNI)
+		w.log.Infof("fswatch: removed old vni %s from %s", oldVNI, name)
 	}
-	w.tracked[name] = vnetID
+	w.tracked[name] = vni
 	w.mu.Unlock()
 
-	pool := NewVNetPool(vnetID, prefix, w.seed)
-	w.pools.Add(vnetID, pool)
+	pool := NewVNetPool(vni, prefix, w.seed)
+	w.pools.Add(vni, pool)
 
 	authStr := ""
 	if cfg.Auth != nil {
@@ -143,18 +147,18 @@ func (w *Watcher) loadFile(path string) {
 		if err != nil {
 			w.log.Errorf("fswatch: auth in %s: %v", path, err)
 		} else {
-			w.resolver.Set(vnetID, serverAuth)
+			w.resolver.Set(vni, serverAuth)
 		}
 	} else {
-		w.resolver.Remove(vnetID)
+		w.resolver.Remove(vni)
 	}
 
-	w.log.Infof("fswatch: loaded vnet %d (%x) cidr=%s from %s", cfg.VNet, vnetID, prefix, name)
+	w.log.Infof("fswatch: loaded vni %s cidr=%s from %s", vni, prefix, name)
 }
 
 func (w *Watcher) removeFile(name string) {
 	w.mu.Lock()
-	vnetID, ok := w.tracked[name]
+	vni, ok := w.tracked[name]
 	if ok {
 		delete(w.tracked, name)
 	}
@@ -164,9 +168,9 @@ func (w *Watcher) removeFile(name string) {
 		return
 	}
 
-	w.pools.Remove(vnetID)
-	w.resolver.Remove(vnetID)
-	w.log.Infof("fswatch: removed vnet %x (file %s deleted)", vnetID, name)
+	w.pools.Remove(vni)
+	w.resolver.Remove(vni)
+	w.log.Infof("fswatch: removed vni %s (file %s deleted)", vni, name)
 }
 
 func isVNetFile(name string) bool {

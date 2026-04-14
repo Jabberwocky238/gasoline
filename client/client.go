@@ -49,7 +49,7 @@ func New(cfg *common.ClientConfig) (*Client, error) {
 	}
 
 	var sessionID [16]byte
-	dialer, err := createDialer(cfg.Transport, sessionID, cfg.VNetID, clientAuth)
+	dialer, err := createDialer(cfg.Transport, sessionID, cfg.VNI, clientAuth)
 	if err != nil {
 		return nil, fmt.Errorf("dialer: %w", err)
 	}
@@ -222,14 +222,14 @@ func (c *Client) startSocks5() error {
 
 // --------------- Helpers ---------------
 
-func createDialer(transportType string, sessionID [16]byte, vnetID [16]byte, clientAuth auth.ClientAuthenticator) (transport.Dialer, error) {
+func createDialer(transportType string, sessionID [16]byte, vni common.VNI, clientAuth auth.ClientAuthenticator) (transport.Dialer, error) {
 	switch transportType {
 	case "tcp":
-		return tcp.NewDialer(sessionID, vnetID, clientAuth), nil
+		return tcp.NewDialer(sessionID, vni, clientAuth), nil
 	case "udp":
-		return udp.NewDialer(sessionID, vnetID, clientAuth), nil
+		return udp.NewDialer(sessionID, vni, clientAuth), nil
 	case "quic":
-		return quic.NewDialer(sessionID, vnetID, clientAuth, quic.InsecureClientTLS()), nil
+		return quic.NewDialer(sessionID, vni, clientAuth, quic.InsecureClientTLS()), nil
 	default:
 		return nil, fmt.Errorf("unknown transport: %s", transportType)
 	}
@@ -262,7 +262,7 @@ func buildTunOptions(name string, tunAddr netip.Prefix, allowedRanges []netip.Pr
 		Name:              name,
 		Inet4Address:      inet4Addr,
 		Inet6Address:      inet6Addr,
-		MTU:               tunPkg.DefaultMTU,
+		MTU:               common.TunMTU,
 		StrictRoute:       true,
 		Inet4RouteAddress: inet4Route,
 		Inet6RouteAddress: inet6Route,

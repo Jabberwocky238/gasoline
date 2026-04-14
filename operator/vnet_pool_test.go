@@ -16,17 +16,10 @@ func TestVNetPoolRecycle(t *testing.T) {
 		t.Fatalf("parse: %v", err)
 	}
 
-	var vnetID [common.VNetIDLen]byte
-	vnetID[15] = 100
-	vnetID[14] = 0
-	// EncodeVNetID(100) puts 100 in the last 8 bytes big-endian
-	pool, ok := pools.Get(vnetID)
+	pool, ok := pools.Get(common.VNI(100))
 	if !ok {
-		// try finding by iterating
-		for id, p := range pools.All() {
+		for _, p := range pools.All() {
 			pool = p
-			vnetID = id
-			_ = vnetID
 			break
 		}
 	}
@@ -171,8 +164,7 @@ func TestVNetPoolConcurrentOperators(t *testing.T) {
 		}
 	}
 
-	var vnetID [common.VNetIDLen]byte
-	vnetID[15] = 200
+	vni := common.VNI(200)
 
 	type result struct {
 		opIdx int
@@ -187,7 +179,7 @@ func TestVNetPoolConcurrentOperators(t *testing.T) {
 		wg.Add(1)
 		go func(opIdx int) {
 			defer wg.Done()
-			pool, _ := pools[opIdx].Get(vnetID)
+			pool, _ := pools[opIdx].Get(vni)
 
 			for j := 0; j < allocPerOp; j++ {
 				ip, err := pool.AllocateIP()
@@ -201,7 +193,7 @@ func TestVNetPoolConcurrentOperators(t *testing.T) {
 					if k == opIdx {
 						continue
 					}
-					otherPool, _ := pools[k].Get(vnetID)
+					otherPool, _ := pools[k].Get(vni)
 					otherPool.ReserveIP(ip)
 				}
 
@@ -238,9 +230,7 @@ func TestVNetPoolConcurrentAllocRelease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var vnetID [common.VNetIDLen]byte
-	vnetID[15] = 1
-	pool, _ := pools.Get(vnetID)
+	pool, _ := pools.Get(common.VNI(1))
 
 	const goroutines = 4
 	const opsPerGoroutine = 50

@@ -1,7 +1,6 @@
 package common
 
 import (
-	"encoding/binary"
 	"flag"
 	"fmt"
 	"os"
@@ -15,7 +14,7 @@ func RegisterClientFlags(fs *flag.FlagSet) func() *ClientConfig {
 	endpoint := fs.String("endpoint", "", "server address (required)")
 	transportType := fs.String("transport", "quic", "transport type: tcp, udp, quic")
 	authStr := fs.String("auth", "noauth", "auth config string")
-	vnetIDStr := fs.String("vnet", "", "vnet ID (decimal number, e.g. 200)")
+	vniStr := fs.String("vni", "", "VXLAN Network Identifier (decimal, e.g. 200)")
 	tunName := fs.String("tun-name", "", "TUN device name")
 	socks5Port := fs.Int("quick-socks5", 0, "SOCKS5 proxy port (0=disabled, must be >1024)")
 
@@ -35,8 +34,8 @@ func RegisterClientFlags(fs *flag.FlagSet) func() *ClientConfig {
 			if cfg.Auth != "" && !isFlagSet(fs, "auth") {
 				*authStr = cfg.Auth
 			}
-			if cfg.VNet != 0 && !isFlagSet(fs, "vnet") {
-				*vnetIDStr = strconv.FormatUint(cfg.VNet, 10)
+			if cfg.VNet != 0 && !isFlagSet(fs, "vni") {
+				*vniStr = strconv.FormatUint(cfg.VNet, 10)
 			}
 			if cfg.TUNName != "" && !isFlagSet(fs, "tun-name") {
 				*tunName = cfg.TUNName
@@ -48,14 +47,14 @@ func RegisterClientFlags(fs *flag.FlagSet) func() *ClientConfig {
 			os.Exit(1)
 		}
 
-		var vnetID [16]byte
-		if *vnetIDStr != "" {
-			vnetNum, err := strconv.ParseUint(*vnetIDStr, 10, 64)
+		var vni VNI
+		if *vniStr != "" {
+			parsed, err := ParseVNI(*vniStr)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "Invalid vnet ID %q: %v\n", *vnetIDStr, err)
+				fmt.Fprintf(os.Stderr, "Invalid VNI %q: %v\n", *vniStr, err)
 				os.Exit(1)
 			}
-			binary.BigEndian.PutUint64(vnetID[8:], vnetNum)
+			vni = parsed
 		}
 
 		if *socks5Port != 0 && *socks5Port <= 1024 {
@@ -67,7 +66,7 @@ func RegisterClientFlags(fs *flag.FlagSet) func() *ClientConfig {
 			Endpoint:   *endpoint,
 			Transport:  *transportType,
 			AuthStr:    *authStr,
-			VNetID:     vnetID,
+			VNI:        vni,
 			TUNName:    *tunName,
 			Socks5Port: *socks5Port,
 		}

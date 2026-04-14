@@ -13,7 +13,7 @@ type RawPayload struct {
 	Data []byte
 }
 
-func (m *RawPayload) WriteTo(w io.Writer) error {
+func (m *RawPayload) Encode(w io.Writer) error {
 	header := make([]byte, 2)
 	binary.BigEndian.PutUint16(header, uint16(len(m.Data)))
 	if _, err := w.Write(header); err != nil {
@@ -26,7 +26,7 @@ func (m *RawPayload) WriteTo(w io.Writer) error {
 	return nil
 }
 
-func (m *RawPayload) ReadFrom(r io.Reader) error {
+func (m *RawPayload) Decode(r io.Reader) error {
 	header := make([]byte, 2)
 	if _, err := io.ReadFull(r, header); err != nil {
 		return err

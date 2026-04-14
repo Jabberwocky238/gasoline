@@ -5,6 +5,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/jabberwocky238/gasoline/common"
 )
 
 const (
@@ -63,11 +65,11 @@ func (w *slidingWindow) rate(seconds int) float64 {
 
 // SessionStats holds traffic counters and live rate for a single client session.
 type SessionStats struct {
-	SessionID   [16]byte  `json:"-"`
-	VNetID      [16]byte  `json:"-"`
-	AuthID      string    `json:"auth_id"`
-	RemoteAddr  string    `json:"remote_addr"`
-	ConnectedAt time.Time `json:"connected_at"`
+	SessionID   [16]byte   `json:"-"`
+	VNI         common.VNI `json:"-"`
+	AuthID      string     `json:"auth_id"`
+	RemoteAddr  string     `json:"remote_addr"`
+	ConnectedAt time.Time  `json:"connected_at"`
 
 	TxBytes   atomic.Uint64 `json:"-"`
 	RxBytes   atomic.Uint64 `json:"-"`
@@ -86,23 +88,23 @@ func (s *SessionStats) RxRate(seconds int) float64 { return s.rxWindow.rate(seco
 
 // Snapshot returns a JSON-friendly snapshot of this session's stats.
 type Snapshot struct {
-	SessionID   string    `json:"session_id"`
-	VNetID      string    `json:"vnet_id"`
-	AuthID      string    `json:"auth_id"`
-	RemoteAddr  string    `json:"remote_addr"`
-	ConnectedAt time.Time `json:"connected_at"`
-	TxBytes     uint64    `json:"tx_bytes"`
-	RxBytes     uint64    `json:"rx_bytes"`
-	TxPackets   uint64    `json:"tx_packets"`
-	RxPackets   uint64    `json:"rx_packets"`
-	TxBytesPerSec float64 `json:"tx_bytes_per_sec"` // 5s average
-	RxBytesPerSec float64 `json:"rx_bytes_per_sec"` // 5s average
+	SessionID     string    `json:"session_id"`
+	VNI           string    `json:"vni"`
+	AuthID        string    `json:"auth_id"`
+	RemoteAddr    string    `json:"remote_addr"`
+	ConnectedAt   time.Time `json:"connected_at"`
+	TxBytes       uint64    `json:"tx_bytes"`
+	RxBytes       uint64    `json:"rx_bytes"`
+	TxPackets     uint64    `json:"tx_packets"`
+	RxPackets     uint64    `json:"rx_packets"`
+	TxBytesPerSec float64   `json:"tx_bytes_per_sec"` // 5s average
+	RxBytesPerSec float64   `json:"rx_bytes_per_sec"` // 5s average
 }
 
 func (s *SessionStats) snapshot() *Snapshot {
 	return &Snapshot{
 		SessionID:     hexEncode(s.SessionID[:]),
-		VNetID:        hexEncode(s.VNetID[:]),
+		VNI:           s.VNI.String(),
 		AuthID:        s.AuthID,
 		RemoteAddr:    s.RemoteAddr,
 		ConnectedAt:   s.ConnectedAt,
@@ -141,12 +143,12 @@ func New() *Recorder {
 	}
 }
 
-func (r *Recorder) Register(sessionID, vnetID [16]byte, authID, remoteAddr string) {
+func (r *Recorder) Register(sessionID [16]byte, vni common.VNI, authID, remoteAddr string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.sessions[sessionID] = &SessionStats{
 		SessionID:   sessionID,
-		VNetID:      vnetID,
+		VNI:         vni,
 		AuthID:      authID,
 		RemoteAddr:  remoteAddr,
 		ConnectedAt: time.Now(),

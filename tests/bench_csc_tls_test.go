@@ -9,18 +9,18 @@ import (
 )
 
 func TestCSC_TLS(t *testing.T) {
-	op, vnetID := setupSingleOperator(t, "tls")
+	op, vni := setupSingleOperator(t, "tls")
 	defer op.Close()
 
 	tlsConf := quic.InsecureClientTLS()
 
-	connA, resultA, err := tlstransport.NewDialer([16]byte{0x01}, vnetID, &auth.NoAuthClient{}, tlsConf).Dial(op.ClientAddr())
+	connA, resultA, err := tlstransport.NewDialer([16]byte{0x01}, vni, &auth.NoAuthClient{}, tlsConf).Dial(op.ClientAddr())
 	if err != nil {
 		t.Fatalf("ClientA dial: %v", err)
 	}
 	defer connA.Close()
 
-	connB, resultB, err := tlstransport.NewDialer([16]byte{0x02}, vnetID, &auth.NoAuthClient{}, tlsConf).Dial(op.ClientAddr())
+	connB, resultB, err := tlstransport.NewDialer([16]byte{0x02}, vni, &auth.NoAuthClient{}, tlsConf).Dial(op.ClientAddr())
 	if err != nil {
 		t.Fatalf("ClientB dial: %v", err)
 	}

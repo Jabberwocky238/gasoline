@@ -3,6 +3,7 @@ package tcp
 import (
 	"net"
 
+	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/transport"
@@ -10,12 +11,12 @@ import (
 
 type Dialer struct {
 	clientID [16]byte
-	vnetID   [16]byte
+	vni      common.VNI
 	auth     auth.ClientAuthenticator
 }
 
-func NewDialer(clientID [16]byte, vnetID [16]byte, auth auth.ClientAuthenticator) *Dialer {
-	return &Dialer{clientID: clientID, vnetID: vnetID, auth: auth}
+func NewDialer(clientID [16]byte, vni common.VNI, auth auth.ClientAuthenticator) *Dialer {
+	return &Dialer{clientID: clientID, vni: vni, auth: auth}
 }
 
 func (d *Dialer) Dial(endpoint string) (transport.Conn, *protocol.HandshakeResult, error) {
@@ -23,8 +24,7 @@ func (d *Dialer) Dial(endpoint string) (transport.Conn, *protocol.HandshakeResul
 	if err != nil {
 		return nil, nil, err
 	}
-	// Handshake over raw TCP stream (net.Conn implements io.ReadWriter)
-	result, err := protocol.ClientHandshake(raw, d.clientID, d.vnetID, d.auth)
+	result, err := protocol.ClientHandshake(raw, d.clientID, d.vni, d.auth)
 	if err != nil {
 		raw.Close()
 		return nil, nil, err

@@ -42,8 +42,7 @@ type Operator struct {
 	VNetPools      *VNetPoolMap
 
 	// UDP data plane for inter-operator packet forwarding.
-	dataConn  *net.UDPConn
-	framePool *FramePool
+	dataConn *net.UDPConn
 }
 
 func New(cfg *common.OperatorConfig) (*Operator, error) {
@@ -68,8 +67,8 @@ func New(cfg *common.OperatorConfig) (*Operator, error) {
 			cancel()
 			return nil, fmt.Errorf("network: %w", err)
 		}
-		for vnetID, pool := range pools.All() {
-			logger.Infof("VNet %x: %s", vnetID, pool.Prefix)
+		for vni, pool := range pools.All() {
+			logger.Infof("VNet %s: %s", vni, pool.Prefix)
 		}
 
 		serverPriv, err := encryption.NewPrivateKey()
@@ -86,13 +85,13 @@ func New(cfg *common.OperatorConfig) (*Operator, error) {
 			return nil, fmt.Errorf("auth: %w", err)
 		}
 		resolver := auth.NewMapResolver(defaultAuth)
-		for vnetID, authStr := range cfg.NetworkAuth {
+		for vni, authStr := range cfg.NetworkAuth {
 			vnetAuth, err := auth.ParseServerAuth(authStr)
 			if err != nil {
 				cancel()
-				return nil, fmt.Errorf("auth for vnet %x: %w", vnetID, err)
+				return nil, fmt.Errorf("auth for vni %s: %w", vni, err)
 			}
-			resolver.Set(vnetID, vnetAuth)
+			resolver.Set(vni, vnetAuth)
 		}
 
 		configFn := makeConfigFunc(pools, serverPub)
@@ -121,13 +120,13 @@ func New(cfg *common.OperatorConfig) (*Operator, error) {
 		Log:           logger,
 	}
 	if pools != nil {
-		ctrlCfg.OnSessionSync = func(vnetID [16]byte, ip netip.Addr) {
-			if pool, ok := pools.Get(vnetID); ok {
+		ctrlCfg.OnSessionSync = func(vni common.VNI, ip netip.Addr) {
+			if pool, ok := pools.Get(vni); ok {
 				pool.ReserveIP(ip)
 			}
 		}
-		ctrlCfg.OnSessionRevoke = func(vnetID [16]byte, _ [16]byte, ip netip.Addr) {
-			if pool, ok := pools.Get(vnetID); ok {
+		ctrlCfg.OnSessionRevoke = func(vni common.VNI, _ [16]byte, ip netip.Addr) {
+			if pool, ok := pools.Get(vni); ok {
 				pool.UnreserveIP(ip)
 			}
 		}
@@ -158,7 +157,6 @@ func (o *Operator) Start() error {
 		if err != nil {
 			return fmt.Errorf("data udp listen on %s: %w", grpcAddr, err)
 		}
-		o.framePool = NewFramePool(256)
 		o.log.Infof("Data plane UDP listening on %s", o.dataConn.LocalAddr())
 		go o.routineDataRecv()
 	}
@@ -196,7 +194,7 @@ func (o *Operator) Close() error {
 // routineDataRecv reads data frames from other operators via UDP
 // and delivers packets to local clients.
 func (o *Operator) routineDataRecv() {
-	readBuf := make([]byte, maxDatagramSize)
+	readBuf := make([]byte, common.MaxVxlanPayload)
 	for {
 		select {
 		case <-o.ctx.Done():
@@ -214,38 +212,45 @@ func (o *Operator) routineDataRecv() {
 			return
 		}
 
-		df := o.framePool.Get()
+		df := common.GetFrame()
 		if err := df.Decode(readBuf[:n]); err != nil {
-			o.framePool.Put(df)
+			common.PutFrame(df)
 			continue
 		}
 
 		dstIP, err := packetDstIP(df.Packet)
 		if err != nil {
-			o.framePool.Put(df)
+			common.PutFrame(df)
 			continue
 		}
 		dstAddr, ok := netip.AddrFromSlice(dstIP)
 		if !ok {
-			o.framePool.Put(df)
+			common.PutFrame(df)
 			continue
 		}
 
 		target := o.clients.LookupByIP(dstAddr)
 		if target == nil {
-			o.framePool.Put(df)
+			common.PutFrame(df)
 			continue
 		}
 
 		o.Stats.Recorder.RecordTx(target.SessionID, uint64(len(df.Packet)))
 		target.Conn.WritePacket(df.Packet)
-		o.framePool.Put(df)
+		common.PutFrame(df)
 	}
 }
 
 // forwardToRemote looks up the remote operator for dstAddr and enqueues the packet for UDP send.
-func (o *Operator) forwardToRemote(srcVNetID [16]byte, dstAddr netip.Addr, packet []byte) bool {
-	opUUID, found := o.Ctrl.LookupRemoteSession(srcVNetID, dstAddr)
+// srcSessionID is the originating client's session, embedded into the inner Ethernet src MAC;
+// the destination session ID is resolved from the registry for the inner dst MAC.
+func (o *Operator) forwardToRemote(srcVNI common.VNI, srcSessionID [16]byte, dstAddr netip.Addr, packet []byte) bool {
+	if len(packet) > common.TunMTU {
+		o.log.Warnf("forwardToRemote: oversize packet %d > %d, dropping", len(packet), common.TunMTU)
+		return false
+	}
+
+	dstSessionID, opUUID, found := o.Ctrl.LookupRemoteSession(srcVNI, dstAddr)
 	if !found {
 		return false
 	}
@@ -258,10 +263,10 @@ func (o *Operator) forwardToRemote(srcVNetID [16]byte, dstAddr netip.Addr, packe
 		return false
 	}
 
-	df := o.framePool.Get()
-	wire := df.Encode(srcVNetID, packet)
+	df := common.GetFrame()
+	wire := df.Encode(srcVNI, srcSessionID, dstSessionID, packet)
 	_, err := o.dataConn.WriteToUDP(wire, peer.UDPAddr)
-	o.framePool.Put(df)
+	common.PutFrame(df)
 	if err != nil {
 		o.log.Errorf("forwardToRemote WriteToUDP: %v", err)
 		return false
@@ -290,15 +295,15 @@ func (o *Operator) routineAcceptClients() {
 		cp := &ClientPeer{
 			Conn:       conn,
 			SessionID:  result.Config.SessionID,
-			VNetID:     result.Config.VNetID,
+			VNI:        result.Config.VNI,
 			OperatorID: o.Ctrl.UUID(),
 			IP:         result.Config.IPPrefix,
 			AllowedIPs: result.Config.AllowedRanges,
 		}
 
 		o.clients.Add(cp)
-		o.Stats.Recorder.Register(cp.SessionID, cp.VNetID, "", conn.RemoteAddr())
-		o.Ctrl.BroadcastSessionSync(cp.SessionID, cp.VNetID, cp.IP.Addr())
+		o.Stats.Recorder.Register(cp.SessionID, cp.VNI, "", conn.RemoteAddr())
+		o.Ctrl.BroadcastSessionSync(cp.SessionID, cp.VNI, cp.IP.Addr())
 
 		o.log.Infof("Client %x connected, assigned %s from %s",
 			result.ClientID, result.Config.IPPrefix, conn.RemoteAddr())
@@ -310,7 +315,7 @@ func (o *Operator) routineReadFromClient(cp *ClientPeer) {
 	defer func() {
 		o.clients.Remove(cp)
 		o.Stats.Recorder.Unregister(cp.SessionID)
-		o.Ctrl.BroadcastSessionRevoke(cp.SessionID, cp.VNetID)
+		o.Ctrl.BroadcastSessionRevoke(cp.SessionID, cp.VNI)
 		cp.Conn.Close()
 		o.log.Infof("Client %x disconnected", cp.SessionID)
 	}()
@@ -333,10 +338,14 @@ func (o *Operator) routineReadFromClient(cp *ClientPeer) {
 		if n < 1 {
 			continue
 		}
+		if n > common.TunMTU {
+			o.log.Warnf("Client %x sent oversize packet %d > %d, dropping", cp.SessionID, n, common.TunMTU)
+			continue
+		}
 		payload := readBuf[:n]
 
 		o.Stats.Recorder.RecordRx(cp.SessionID, uint64(len(payload)))
-		if !o.Stats.RateLimiter.Allow(cp.VNetID, uint64(len(payload))) {
+		if !o.Stats.RateLimiter.Allow(cp.VNI, uint64(len(payload))) {
 			continue
 		}
 
@@ -357,7 +366,7 @@ func (o *Operator) routineReadFromClient(cp *ClientPeer) {
 		}
 
 		// Remote forwarding via UDP (inter-operator)
-		if o.dataConn != nil && o.forwardToRemote(cp.VNetID, dstAddr, payload) {
+		if o.dataConn != nil && o.forwardToRemote(cp.VNI, cp.SessionID, dstAddr, payload) {
 			continue
 		}
 
@@ -401,10 +410,10 @@ func (o *Operator) routineReaper() {
 // --------------- Helpers ---------------
 
 func makeConfigFunc(pools *VNetPoolMap, serverPub encryption.PublicKey) protocol.ConfigFunc {
-	return func(clientID [16]byte, vnetID [16]byte) (*protocol.SessionConfig, error) {
-		pool, ok := pools.Get(vnetID)
+	return func(clientID [16]byte, vni common.VNI) (*protocol.SessionConfig, error) {
+		pool, ok := pools.Get(vni)
 		if !ok {
-			return nil, fmt.Errorf("unknown vnet %x", vnetID)
+			return nil, fmt.Errorf("unknown vni %s", vni)
 		}
 		clientIP, err := pool.AllocateIP()
 		if err != nil {
@@ -423,7 +432,7 @@ func makeConfigFunc(pools *VNetPoolMap, serverPub encryption.PublicKey) protocol
 		copy(sessionID[:], h.Sum(nil)[:16])
 		return &protocol.SessionConfig{
 			SessionID:        sessionID,
-			VNetID:           vnetID,
+			VNI:              vni,
 			ClientPrivateKey: clientPriv,
 			ServerPublicKey:  serverPub,
 			IPPrefix:         netip.PrefixFrom(clientIP, 32),

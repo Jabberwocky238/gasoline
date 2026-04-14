@@ -3,6 +3,8 @@ package ctrl
 import (
 	"context"
 	"net/netip"
+
+	"github.com/jabberwocky238/gasoline/common"
 )
 
 // server implements OperatorServiceServer. Lives entirely within ctrl.
@@ -59,10 +61,10 @@ func (s *server) NotifySession(ctx context.Context, req *SessionEvent) (*Ack, er
 }
 
 func (s *server) handleSync(msg *SessionSync) {
-	var sessionID, vnetID, opUUID [16]byte
+	var sessionID, opUUID [16]byte
 	copy(sessionID[:], msg.SessionId)
-	copy(vnetID[:], msg.VnetId)
 	copy(opUUID[:], msg.OperatorUuid)
+	vni := common.VNI(msg.Vni)
 
 	var ip netip.Addr
 	if len(msg.IpAddr) == 4 {
@@ -73,30 +75,30 @@ func (s *server) handleSync(msg *SessionSync) {
 		return
 	}
 
-	vnet := s.cp.Registry.GetOrCreateVNet(vnetID)
+	vnet := s.cp.Registry.GetOrCreateVNet(vni)
 	vnet.Add(sessionID, &SessionInfo{OperatorUUID: opUUID, IP: ip})
-	s.cp.log.Infof("SessionSync: %x on operator %x at %s (vnet %x)", sessionID, opUUID, ip, vnetID)
+	s.cp.log.Infof("SessionSync: %x on operator %x at %s (vni %s)", sessionID, opUUID, ip, vni)
 
 	if s.cp.cfg.OnSessionSync != nil {
-		s.cp.cfg.OnSessionSync(vnetID, ip)
+		s.cp.cfg.OnSessionSync(vni, ip)
 	}
 }
 
 func (s *server) handleRevoke(msg *SessionRevoke) {
-	var sessionID, vnetID [16]byte
+	var sessionID [16]byte
 	copy(sessionID[:], msg.SessionId)
-	copy(vnetID[:], msg.VnetId)
+	vni := common.VNI(msg.Vni)
 
 	var revokedIP netip.Addr
-	if vnet, ok := s.cp.Registry.GetVNet(vnetID); ok {
+	if vnet, ok := s.cp.Registry.GetVNet(vni); ok {
 		if info, ok := vnet.Get(sessionID); ok {
 			revokedIP = info.IP
 		}
 		vnet.Remove(sessionID)
 	}
-	s.cp.log.Infof("SessionRevoke: %x (vnet %x)", sessionID, vnetID)
+	s.cp.log.Infof("SessionRevoke: %x (vni %s)", sessionID, vni)
 
 	if s.cp.cfg.OnSessionRevoke != nil && revokedIP.IsValid() {
-		s.cp.cfg.OnSessionRevoke(vnetID, sessionID, revokedIP)
+		s.cp.cfg.OnSessionRevoke(vni, sessionID, revokedIP)
 	}
 }

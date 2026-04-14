@@ -6,6 +6,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/protocol/encryption"
@@ -15,7 +16,7 @@ func testConfigFn() protocol.ConfigFunc {
 	serverPriv, _ := encryption.NewPrivateKey()
 	serverPub := serverPriv.PublicKey()
 
-	return func(clientID [16]byte, vnetID [16]byte) (*protocol.SessionConfig, error) {
+	return func(clientID [16]byte, vni common.VNI) (*protocol.SessionConfig, error) {
 		clientPriv, _ := encryption.NewPrivateKey()
 		return &protocol.SessionConfig{
 			ClientPrivateKey: clientPriv,
@@ -41,7 +42,7 @@ func TestUDPHandshakeAndPacket(t *testing.T) {
 
 	addr := ln.Addr()
 	clientID := [16]byte{0x10, 0x20, 0x30}
-	dialer := NewDialer(clientID, [16]byte{}, &auth.NoAuthClient{})
+	dialer := NewDialer(clientID, common.VNI(0), &auth.NoAuthClient{})
 
 	var wg sync.WaitGroup
 	var serverConn *Conn
@@ -156,7 +157,7 @@ func TestUDPMultiplePackets(t *testing.T) {
 	}
 	defer ln.Close()
 
-	dialer := NewDialer([16]byte{}, [16]byte{}, &auth.NoAuthClient{})
+	dialer := NewDialer([16]byte{}, common.VNI(0), &auth.NoAuthClient{})
 
 	var wg sync.WaitGroup
 	var sConn *Conn
@@ -211,7 +212,7 @@ func TestUDPMultiplePackets(t *testing.T) {
 func TestUDPMultipleClients(t *testing.T) {
 	serverAuth := &auth.NoAuthServer{}
 	clientCount := 0
-	configFn := func(clientID [16]byte, vnetID [16]byte) (*protocol.SessionConfig, error) {
+	configFn := func(clientID [16]byte, vni common.VNI) (*protocol.SessionConfig, error) {
 		clientCount++
 		clientPriv, _ := encryption.NewPrivateKey()
 		serverPriv, _ := encryption.NewPrivateKey()
@@ -252,7 +253,7 @@ func TestUDPMultipleClients(t *testing.T) {
 	clientConns := make([]interface{}, numClients)
 	for i := 0; i < numClients; i++ {
 		id := [16]byte{byte(i)}
-		d := NewDialer(id, [16]byte{}, &auth.NoAuthClient{})
+		d := NewDialer(id, common.VNI(0), &auth.NoAuthClient{})
 		c, _, err := d.Dial(addr)
 		if err != nil {
 			t.Fatalf("Dial %d: %v", i, err)

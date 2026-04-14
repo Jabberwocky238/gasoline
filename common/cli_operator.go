@@ -1,7 +1,6 @@
 package common
 
 import (
-	"encoding/binary"
 	"flag"
 	"fmt"
 	"os"
@@ -24,7 +23,7 @@ func RegisterOperatorFlags(fs *flag.FlagSet) func() *OperatorConfig {
 
 	return func() *OperatorConfig {
 		result := &OperatorConfig{
-			NetworkAuth: make(map[[16]byte]string),
+			NetworkAuth: make(map[VNI]string),
 		}
 
 		if *configFile != "" {
@@ -53,9 +52,10 @@ func RegisterOperatorFlags(fs *flag.FlagSet) func() *OperatorConfig {
 			}
 			for _, entry := range cfg.Network {
 				if entry.Auth != nil && entry.Auth.String() != "" {
-					var vnetID [16]byte
-					binary.BigEndian.PutUint64(vnetID[8:], entry.VNet)
-					result.NetworkAuth[vnetID] = entry.Auth.String()
+					vni := VNI(entry.VNet)
+					if vni.Valid() {
+						result.NetworkAuth[vni] = entry.Auth.String()
+					}
 				}
 			}
 		}

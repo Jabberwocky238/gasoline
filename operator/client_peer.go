@@ -11,7 +11,7 @@ import (
 type ClientPeer struct {
 	Conn       transport.Conn
 	SessionID  [common.SessionIDLen]byte    // unique ID for this session
-	VNetID     [common.VNetIDLen]byte       // virtual network this client belongs to
+	VNI        common.VNI                   // virtual network (24-bit VXLAN VNI)
 	OperatorID [common.OperatorUUIDLen]byte // UUID of the operator this client is on
 	IP         netip.Prefix                 // assigned IP
 	AllowedIPs []netip.Prefix               // allowed IP ranges for this client

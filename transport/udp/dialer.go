@@ -28,6 +28,8 @@ func (d *Dialer) Dial(endpoint string) (transport.Conn, *protocol.HandshakeResul
 	if err != nil {
 		return nil, nil, err
 	}
+	_ = rawConn.SetReadBuffer(8 * 1024 * 1024)
+	_ = rawConn.SetWriteBuffer(8 * 1024 * 1024)
 
 	adapter := newClientStreamAdapter(rawConn)
 	result, err := protocol.ClientHandshake(adapter, d.vmac, d.vni, d.auth)

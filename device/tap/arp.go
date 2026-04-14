@@ -3,43 +3,42 @@ package tap
 import (
 	"net/netip"
 	"sync"
-	"time"
 
 	"github.com/jabberwocky238/gasoline/common"
 )
 
-// ARPTable is the TAP device's userspace IP→VMAC cache.
+// ARPTable is the userspace IP→VMAC cache.
 //
-//   - Lookup(): cached MAC, ok=false on miss.
-//   - WaitFor(): blocking resolution channel with timeout fallback.
-//   - Set():    populates an entry and wakes pending waiters.
-//
-// The OS kernel ARP layer is bypassed entirely — the whole L2 fabric runs
-// in userspace.
+// Resolution flow no longer uses blocking WaitFor; instead the TAP device
+// stages outbound IP packets in stagedIPPackets and drains them via
+// OnLearn when the MAC is learned.
 type ARPTable struct {
-	mu      sync.Mutex
+	mu      sync.RWMutex
 	table   map[netip.Addr]common.VMAC
-	pending map[netip.Addr][]chan common.VMAC
+	onLearn func(netip.Addr, common.VMAC) // optional, fired by Set
 }
 
 func NewARPTable() *ARPTable {
-	return &ARPTable{
-		table:   make(map[netip.Addr]common.VMAC),
-		pending: make(map[netip.Addr][]chan common.VMAC),
-	}
+	return &ARPTable{table: make(map[netip.Addr]common.VMAC)}
 }
 
+// SetLearnHook installs a callback fired (off-lock) on every successful Set.
+// Used by the TAP device to drain its staging queue when an ARP reply
+// arrives for a previously-unknown IP.
+func (a *ARPTable) SetLearnHook(fn func(netip.Addr, common.VMAC)) {
+	a.mu.Lock()
+	a.onLearn = fn
+	a.mu.Unlock()
+}
+
+// Set inserts/replaces an entry and fires the learn hook.
 func (a *ARPTable) Set(ip netip.Addr, mac common.VMAC) {
 	a.mu.Lock()
 	a.table[ip] = mac
-	waiters := a.pending[ip]
-	delete(a.pending, ip)
+	hook := a.onLearn
 	a.mu.Unlock()
-	for _, ch := range waiters {
-		select {
-		case ch <- mac:
-		default:
-		}
+	if hook != nil {
+		hook(ip, mac)
 	}
 }
 
@@ -49,51 +48,17 @@ func (a *ARPTable) Delete(ip netip.Addr) {
 	delete(a.table, ip)
 }
 
+// Lookup returns the cached MAC, or ok=false on miss.
 func (a *ARPTable) Lookup(ip netip.Addr) (common.VMAC, bool) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	v, ok := a.table[ip]
 	return v, ok
 }
 
-// WaitFor blocks until ip is resolved or timeout fires (timeout delivers
-// a zero VMAC value to signal "give up").
-func (a *ARPTable) WaitFor(ip netip.Addr, timeout time.Duration) <-chan common.VMAC {
-	a.mu.Lock()
-	if v, ok := a.table[ip]; ok {
-		a.mu.Unlock()
-		ch := make(chan common.VMAC, 1)
-		ch <- v
-		return ch
-	}
-	ch := make(chan common.VMAC, 1)
-	a.pending[ip] = append(a.pending[ip], ch)
-	a.mu.Unlock()
-
-	go func() {
-		<-time.After(timeout)
-		a.mu.Lock()
-		for i, c := range a.pending[ip] {
-			if c == ch {
-				a.pending[ip] = append(a.pending[ip][:i], a.pending[ip][i+1:]...)
-				if len(a.pending[ip]) == 0 {
-					delete(a.pending, ip)
-				}
-				break
-			}
-		}
-		a.mu.Unlock()
-		select {
-		case ch <- common.VMAC{}:
-		default:
-		}
-	}()
-	return ch
-}
-
 func (a *ARPTable) Snapshot() map[netip.Addr]common.VMAC {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	cp := make(map[netip.Addr]common.VMAC, len(a.table))
 	for k, v := range a.table {
 		cp[k] = v
@@ -102,7 +67,7 @@ func (a *ARPTable) Snapshot() map[netip.Addr]common.VMAC {
 }
 
 func (a *ARPTable) Len() int {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return len(a.table)
 }

@@ -60,7 +60,7 @@ func newVirtualConn(rawConn *net.UDPConn, remoteAddr *net.UDPAddr, keypair *encr
 		rawConn:    rawConn,
 		remoteAddr: remoteAddr,
 		keypair:    keypair,
-		incoming:   make(chan pooledDatagram, 1024),
+		incoming:   make(chan pooledDatagram, peerIncomingCap),
 		isVirtual:  true,
 	}
 	c.lastActive.Store(time.Now().UnixNano())

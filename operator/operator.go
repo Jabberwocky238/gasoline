@@ -189,6 +189,9 @@ func (o *Operator) Start() error {
 		if err != nil {
 			return fmt.Errorf("data udp listen on %s: %w", grpcAddr, err)
 		}
+		// Enlarge OS UDP buffers to absorb bursts; ignore errors (best-effort).
+		_ = o.dataConn.SetReadBuffer(8 * 1024 * 1024)
+		_ = o.dataConn.SetWriteBuffer(8 * 1024 * 1024)
 		o.plane = vxlan.New(o.dataConn)
 		o.plane.Start() // RxLoop: decap + Forward + remote MAC learning
 		o.log.Infof("VXLAN plane bound to %s", o.dataConn.LocalAddr())

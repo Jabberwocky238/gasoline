@@ -12,6 +12,11 @@ import (
 	"github.com/jabberwocky238/gasoline/transport"
 )
 
+// peerIncomingCap bounds the per-peer datagram backlog. Sized for ~1 round
+// of bench traffic (~7600 packets) to absorb bursts while ReadPacket
+// consumes; raise further if your workload sustains > 25k pps.
+const peerIncomingCap = 8192
+
 type Listener struct {
 	rawConn  *net.UDPConn
 	resolver auth.AuthResolver
@@ -45,6 +50,9 @@ func NewListener(addr string, resolver auth.AuthResolver, configFn protocol.Conf
 	if err != nil {
 		return nil, err
 	}
+	// Best-effort enlarge OS UDP socket buffers (8 MB).
+	_ = rawConn.SetReadBuffer(8 * 1024 * 1024)
+	_ = rawConn.SetWriteBuffer(8 * 1024 * 1024)
 	l := &Listener{
 		rawConn:  rawConn,
 		resolver: resolver,
@@ -97,7 +105,7 @@ func (l *Listener) readLoop() {
 
 		// Slow path: new peer (write lock)
 		vp = &virtualPeer{
-			incoming:   make(chan pooledDatagram, 64),
+			incoming:   make(chan pooledDatagram, peerIncomingCap),
 			remoteAddr: remoteAddr,
 		}
 		l.peers.Write(func(m *map[netip.AddrPort]*virtualPeer) {

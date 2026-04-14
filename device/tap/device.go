@@ -1,18 +1,20 @@
 // Package tap implements a userspace virtual TAP device.
 //
-// A Device has two external interfaces:
+// External interfaces:
 //
 //	Upstream   : an OS L3 TUN device (raw IP packets in/out)
 //	Downstream : a transport.Conn (Ethernet frames in/out)
 //
-// On egress (TUN→Conn): each IP packet is wrapped in an Ethernet header.
-// The destination MAC is resolved via the userspace ARPTable; on miss the
-// device emits a standard IPv4 ARP request and queues the packet pending
-// resolution.
+// On egress (TUN→Conn) the destination MAC is resolved via the userspace
+// ARPTable. On miss the IP packet is enqueued in stagedIPPackets[dstIP]
+// and an ARP request is emitted (only on the first miss for that IP).
+// When an ARP reply arrives the table fires its OnLearn hook and the
+// device drains the matching staging queue, wrapping each held packet
+// with the freshly learnt destination MAC and shipping it out.
 //
-// On ingress (Conn→TUN): the Ethernet header is stripped, ARP traffic is
-// intercepted (replies populate the ARP table; requests targeting the
-// local IP are answered), and IPv4/IPv6 payloads are written to the TUN.
+// On ingress (Conn→TUN) the Ethernet header is stripped, ARP traffic is
+// handled (replies populate the table → trigger drain; requests targeting
+// our own IP are answered), IPv4/IPv6 payloads are written to the TUN.
 package tap
 
 import (
@@ -27,8 +29,6 @@ import (
 	tunPkg "github.com/jabberwocky238/gasoline/tun"
 )
 
-const arpResolveTimeout = 2 * time.Second
-
 // Device is the unified TUN+Conn TAP device.
 type Device struct {
 	tun     *tunPkg.Tun
@@ -36,6 +36,7 @@ type Device struct {
 	selfMAC common.VMAC
 	selfIP  netip.Addr
 	arp     *ARPTable
+	staged  *stagedIPPackets
 
 	mu     sync.Mutex
 	closed bool
@@ -44,17 +45,21 @@ type Device struct {
 
 // New constructs a Device. It does not start any goroutines; call Start.
 func New(tun *tunPkg.Tun, conn transport.Conn, selfMAC common.VMAC, selfIP netip.Prefix) *Device {
-	return &Device{
+	d := &Device{
 		tun:     tun,
 		conn:    conn,
 		selfMAC: selfMAC,
 		selfIP:  selfIP.Addr(),
 		arp:     NewARPTable(),
+		staged:  newStagedIPPackets(),
 		done:    make(chan struct{}),
 	}
+	// Drain staged packets whenever ARP learns a new (IP → MAC) binding.
+	d.arp.SetLearnHook(d.onArpLearn)
+	return d
 }
 
-// ARP exposes the local ARP table (for seeding, inspection, tooling).
+// ARP exposes the local ARP table.
 func (d *Device) ARP() *ARPTable { return d.arp }
 
 // SelfMAC returns the device's own VMAC.
@@ -62,6 +67,9 @@ func (d *Device) SelfMAC() common.VMAC { return d.selfMAC }
 
 // SelfIP returns the device's overlay IP.
 func (d *Device) SelfIP() netip.Addr { return d.selfIP }
+
+// PendingStagedCount returns the number of packets currently waiting on ARP.
+func (d *Device) PendingStagedCount() int { return d.staged.pendingCount() }
 
 // Start launches the egress (TUN→Conn) and ingress (Conn→TUN) loops.
 func (d *Device) Start() {
@@ -112,7 +120,6 @@ func (d *Device) ingressLoop() {
 	}
 }
 
-// handleFrame processes one inbound Ethernet frame.
 func (d *Device) handleFrame(frame []byte) {
 	_, _, ethType, payload, ok := common.ParseEth(frame)
 	if !ok {
@@ -128,19 +135,28 @@ func (d *Device) handleFrame(frame []byte) {
 	}
 }
 
-// handleARP processes an inbound ARP packet body.
 func (d *Device) handleARP(body []byte) {
 	pkt, ok := common.ParseARP(body)
 	if !ok {
 		return
 	}
-	// Always learn (sender IP → sender MAC).
+	// Always learn (sender IP → sender MAC). Set fires the OnLearn hook
+	// which drains any staged packets for that IP.
 	if pkt.SPA.IsValid() {
 		d.arp.Set(pkt.SPA, pkt.SHA)
 	}
 	if pkt.Op == common.ARPOpRequest && pkt.TPA == d.selfIP {
 		reply := common.BuildARPReply(d.selfMAC, d.selfIP, pkt.SHA, pkt.SPA)
 		_ = d.conn.WritePacket(reply)
+	}
+}
+
+// onArpLearn is the hook invoked by ARPTable.Set. Drains the staging
+// queue for that IP and ships each held packet with the new MAC.
+func (d *Device) onArpLearn(ip netip.Addr, mac common.VMAC) {
+	queued := d.staged.drain(ip)
+	for _, ipPkt := range queued {
+		d.shipIP(ipPkt, mac)
 	}
 }
 
@@ -154,62 +170,65 @@ func (d *Device) egressLoop() {
 		default:
 		}
 
-		ipBuf := common.GetBuffer()
-		n, err := d.tun.Read(*ipBuf)
+		buf := common.GetBuffer()
+		n, err := d.tun.Read(*buf)
 		if err != nil {
-			common.PutBuffer(ipBuf)
+			common.PutBuffer(buf)
 			log.Errorf("tap: TUN read: %v", err)
 			return
 		}
 		if n < 1 {
-			common.PutBuffer(ipBuf)
+			common.PutBuffer(buf)
 			continue
 		}
-		go d.sendIP(ipBuf, n)
+		d.handleEgress((*buf)[:n])
+		common.PutBuffer(buf)
 	}
 }
 
-// sendIP wraps an IP packet (ipBuf[:n]) with an Ethernet header (resolving
-// via ARP if needed) and ships it through the Conn. Owns ipBuf.
-func (d *Device) sendIP(ipBuf *[]byte, n int) {
-	defer common.PutBuffer(ipBuf)
-
-	ipPkt := (*ipBuf)[:n]
+// handleEgress processes one IP packet read from the TUN.
+//
+// Fast path : ARP hit → wrap & ship synchronously.
+// Slow path : ARP miss → copy into staging queue, emit ARP request once
+//              per destination, return immediately. Drain happens via
+//              onArpLearn when the reply arrives.
+func (d *Device) handleEgress(ipPkt []byte) {
 	dstIP, ok := parseDstIP(ipPkt)
 	if !ok {
 		return
 	}
+	if dstMAC, ok := d.arp.Lookup(dstIP); ok {
+		d.shipIP(ipPkt, dstMAC)
+		return
+	}
+	queued, firstHit := d.staged.enqueue(dstIP, ipPkt)
+	if !queued {
+		log.Debugf("tap: staged queue full for %s, dropping", dstIP)
+		return
+	}
+	if firstHit {
+		req := common.BuildARPRequest(d.selfMAC, d.selfIP, dstIP)
+		_ = d.conn.WritePacket(req)
+	}
+}
+
+// shipIP wraps an IP packet in an Ethernet header and writes one frame to Conn.
+func (d *Device) shipIP(ipPkt []byte, dstMAC common.VMAC) {
 	ethType := common.EthTypeFromIP(ipPkt)
 	if ethType == 0 {
 		return
 	}
-
-	dstMAC, ok := d.arp.Lookup(dstIP)
-	if !ok {
-		req := common.BuildARPRequest(d.selfMAC, d.selfIP, dstIP)
-		_ = d.conn.WritePacket(req)
-		select {
-		case mac := <-d.arp.WaitFor(dstIP, arpResolveTimeout):
-			var zero common.VMAC
-			if mac == zero {
-				log.Debugf("tap: ARP timeout for %s", dstIP)
-				return
-			}
-			dstMAC = mac
-		case <-d.done:
-			return
-		}
-	}
-
 	frameBuf := common.GetBuffer()
 	defer common.PutBuffer(frameBuf)
-	frame := (*frameBuf)[:common.EthHeaderSize+n]
+	frame := (*frameBuf)[:common.EthHeaderSize+len(ipPkt)]
 	common.WriteEthHeader(frame, dstMAC, d.selfMAC, ethType)
 	copy(frame[common.EthHeaderSize:], ipPkt)
 	_ = d.conn.WritePacket(frame)
 }
 
 // parseDstIP extracts the destination IP from a raw IPv4/IPv6 packet.
+// Used only as a key into stagedIPPackets / ARPTable; the inner payload
+// is never inspected beyond this point.
 func parseDstIP(pkt []byte) (netip.Addr, bool) {
 	if len(pkt) < 1 {
 		return netip.Addr{}, false
@@ -230,3 +249,7 @@ func parseDstIP(pkt []byte) (netip.Addr, bool) {
 	}
 	return netip.Addr{}, false
 }
+
+// Touch keeps the package's time import alive for future TTL/age-out work
+// (staged-queue GC, ARP entry expiry). Currently unused but reserved.
+var _ = time.Second

@@ -51,14 +51,18 @@ func RegisterClientFlags(fs *flag.FlagSet) func() *ClientConfig {
 			os.Exit(1)
 		}
 
-		var vni VNI
-		if *vniStr != "" {
-			parsed, err := ParseVNI(*vniStr)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Invalid VNI %q: %v\n", *vniStr, err)
-				os.Exit(1)
-			}
-			vni = parsed
+		if *vniStr == "" {
+			fmt.Fprintln(os.Stderr, "--vni is required (must match one of the operator's configured VNIs)")
+			os.Exit(1)
+		}
+		vni, err := ParseVNI(*vniStr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Invalid VNI %q: %v\n", *vniStr, err)
+			os.Exit(1)
+		}
+		if vni == 0 {
+			fmt.Fprintln(os.Stderr, "--vni must be non-zero")
+			os.Exit(1)
 		}
 
 		if *socks5Port != 0 && *socks5Port <= 1024 {

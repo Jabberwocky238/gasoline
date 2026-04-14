@@ -16,7 +16,7 @@ func RegisterOperatorFlags(fs *flag.FlagSet) func() *OperatorConfig {
 	transportType := fs.String("transport", "quic", "transport type: tcp, udp, quic")
 	authStr := fs.String("auth", "noauth", "auth config string")
 	network := fs.String("network", "0:10.0.0.0/24", "vnetID:CIDR pairs separated by ';'")
-	statsAddr := fs.String("stats", "127.0.0.1:9090", "stats API listen address")
+	statsAddr := fs.String("stats", "", "stats API listen address")
 	discover := fs.String("discover", "", "seed operator addresses for discovery (comma-separated)")
 	watchDir := fs.String("watch", "", "directory to watch for vnet config files")
 	logLevel := fs.String("log-level", "info", "log level: trace, debug, info, warn, error")

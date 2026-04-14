@@ -128,6 +128,42 @@ func TestDeriveSessionKeypairSymmetry(t *testing.T) {
 	}
 }
 
+func TestAEADOverhead1400(t *testing.T) {
+	var key [32]byte
+	copy(key[:], []byte("test-key-32-bytes-long-padding!!"))
+
+	cs, err := NewCipherState(key)
+	if err != nil {
+		t.Fatalf("NewCipherState: %v", err)
+	}
+
+	plaintext := make([]byte, 1400)
+	for i := range plaintext {
+		plaintext[i] = byte(i)
+	}
+
+	encrypted := cs.Seal(nil, plaintext)
+	expectedLen := HeaderSize + 1400 + TagSize // 8 + 1400 + 16 = 1424
+
+	t.Logf("plaintext:  %d bytes", len(plaintext))
+	t.Logf("encrypted:  %d bytes", len(encrypted))
+	t.Logf("overhead:   %d bytes (header=%d + tag=%d)", Overhead, HeaderSize, TagSize)
+
+	if len(encrypted) != expectedLen {
+		t.Fatalf("encrypted length = %d, want %d", len(encrypted), expectedLen)
+	}
+
+	// Verify it can be decrypted back
+	recv, _ := NewCipherState(key)
+	decrypted, err := recv.Open(nil, encrypted)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if len(decrypted) != 1400 {
+		t.Fatalf("decrypted length = %d, want 1400", len(decrypted))
+	}
+}
+
 func TestDeriveSessionKeypairCrossDecryptFails(t *testing.T) {
 	clientPriv, _ := NewPrivateKey()
 	serverPriv, _ := NewPrivateKey()

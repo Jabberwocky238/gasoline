@@ -2,7 +2,7 @@ package common
 
 import "sync"
 
-const MaxPacketSize = 8192
+const MaxPacketSize = 2048
 
 // WaitPool is a bounded pool with backpressure.
 // When the pool is exhausted, Get blocks until a buffer is returned via Put.

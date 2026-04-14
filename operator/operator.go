@@ -22,6 +22,7 @@ import (
 	"github.com/jabberwocky238/gasoline/transport"
 	transportQuic "github.com/jabberwocky238/gasoline/transport/quic"
 	transportTcp "github.com/jabberwocky238/gasoline/transport/tcp"
+	transportTls "github.com/jabberwocky238/gasoline/transport/tls"
 	transportUdp "github.com/jabberwocky238/gasoline/transport/udp"
 
 	"golang.org/x/net/ipv4"
@@ -470,6 +471,12 @@ func createClientListener(transportType, addr string, resolver auth.AuthResolver
 			return nil, err
 		}
 		return transportQuic.NewListener(addr, resolver, configFn, tlsConf)
+	case "tls":
+		tlsConf, err := transportQuic.GenerateServerTLS()
+		if err != nil {
+			return nil, err
+		}
+		return transportTls.NewListener(addr, resolver, configFn, tlsConf)
 	default:
 		return nil, fmt.Errorf("unknown transport: %s", transportType)
 	}

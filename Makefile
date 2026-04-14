@@ -3,6 +3,9 @@ OUTPUT_DIR  = bin
 
 .PHONY: all linux linux-arm64 windows clean
 
+prepare:
+	git submodule update --init --recursive
+
 all: linux
 
 linux:
@@ -19,10 +22,36 @@ test-op:
 	go test ./operator/ -v -timeout 30s
 
 test-op-dataforwarding:
-	go test ./operator/ -v -run TestDataForwarding -timeout 10s   
-
+	go test ./operator/ -v -run TestDataForwarding -timeout 10s
 
 test: test-op
+
+# bench-{topology}-{transport}
+# topology: csc (client-server-client), cssc (client-server-server-client)
+# transport: tcp, udp, quic, tls
+bench-csc-tcp:
+	go test ./tests/ -v -run TestCSC_TCP -timeout 120s
+
+bench-csc-udp:
+	go test ./tests/ -v -run TestCSC_UDP -timeout 120s
+
+bench-csc-quic:
+	go test ./tests/ -v -run TestCSC_QUIC -timeout 120s
+
+bench-csc-tls:
+	go test ./tests/ -v -run TestCSC_TLS -timeout 120s
+
+bench-cssc-tcp:
+	go test ./tests/ -v -run TestCSSC_TCP -timeout 120s
+
+bench-cssc-udp:
+	go test ./tests/ -v -run TestCSSC_UDP -timeout 120s
+
+bench-cssc-quic:
+	go test ./tests/ -v -run TestCSSC_QUIC -timeout 120s
+
+bench-cssc-tls:
+	go test ./tests/ -v -run TestCSSC_TLS -timeout 120s
 
 clean:
 	rm -rf $(OUTPUT_DIR)/$(BINARY_NAME)-*

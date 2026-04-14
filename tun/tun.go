@@ -11,7 +11,7 @@ import (
 	singTun "github.com/sagernet/sing-tun"
 )
 
-const DefaultMTU = 1500
+const DefaultMTU = 1400
 
 type Tun struct {
 	tunIf singTun.Tun
@@ -113,7 +113,7 @@ func newSingTun(tunName string, Address string) (singTun.Tun, error) {
 		Name:         tunName,
 		Inet4Address: Inet4Address,
 		Inet6Address: Inet6Address,
-		MTU:          DefaultMTU, // 使用标准MTU大小
+		MTU:          DefaultMTU, // 使用标准MTU大小1400以避免分片问题
 		GSO:          false,      // 在Linux下禁用GSO以避免兼容性问题
 		AutoRoute:    false,      // 禁用自动路由配置，使用手动路由
 		// Inet4Gateway: Inet4Gateway, // 模仿wireguard行为

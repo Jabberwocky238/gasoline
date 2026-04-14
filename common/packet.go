@@ -6,10 +6,6 @@ const (
 	VNetIDLen       = 16
 )
 
-const (
-	DefaultUDPBufferSize = 2 << 13 // 16KB
-)
-
 // Client↔Operator packet type prefix (first byte of plaintext, before AEAD encryption).
 // Transport layer is unaware — this is added/stripped at the application layer.
 const (

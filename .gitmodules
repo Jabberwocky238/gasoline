@@ -4,3 +4,12 @@
 [submodule "mihomo"]
 	path = mihomo
 	url = https://github.com/MetaCubeX/mihomo.git
+[submodule "ovs"]
+	path = ovs
+	url = https://github.com/openvswitch/ovs.git
+[submodule "pangolin"]
+	path = pangolin
+	url = https://github.com/fosrl/pangolin.git
+[submodule "cilium"]
+	path = cilium
+	url = https://github.com/cilium/cilium.git

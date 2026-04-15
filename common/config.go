@@ -96,19 +96,19 @@ type FileConfig struct {
 	Mode string `yaml:"mode"` // "operator" or "client"
 
 	// Operator fields
-	Listen    string         `yaml:"listen"`
+	Listen    string         `yaml:"listen"` // combined listener spec, e.g. "quic://:8080;tls://127.0.0.1:9000"
 	OpListen  string         `yaml:"op-listen"`
 	Network   []NetworkEntry `yaml:"network"`
 	StatsAddr string         `yaml:"stats"`
 
 	// Client fields
-	Endpoint string `yaml:"endpoint"`
-	VNet     uint64 `yaml:"vnet"`
-	TUNName  string `yaml:"tun-name"`
+	Endpoint  string `yaml:"endpoint"`
+	VNet      uint64 `yaml:"vnet"`
+	TUNName   string `yaml:"tun-name"`
+	Transport string `yaml:"transport"` // client-only: transport kind (tcp/udp/quic/tls)
 
 	// Shared fields
-	Transport string `yaml:"transport"`
-	Auth      string `yaml:"auth"`
+	Auth string `yaml:"auth"`
 }
 
 func LoadConfig(path string) (*FileConfig, error) {

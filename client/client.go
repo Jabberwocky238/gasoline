@@ -11,7 +11,7 @@ import (
 	socks5 "github.com/things-go/go-socks5"
 
 	"github.com/jabberwocky238/gasoline/common"
-	"github.com/jabberwocky238/gasoline/device/tap"
+	tap "github.com/jabberwocky238/gasoline/device/vtap"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/transport"
 	"github.com/jabberwocky238/gasoline/transport/quic"
@@ -38,8 +38,9 @@ type Client struct {
 	tunOpener      TunOpener
 	socks5Listener net.Listener
 
-	tun *tunPkg.Tun
-	dev *tap.Device
+	tun       *tunPkg.Tun
+	dev       *tap.Device
+	keepalive *Keepalive
 }
 
 func (c *Client) SetPlatformTunOpener(opener TunOpener) {
@@ -116,7 +117,15 @@ func (c *Client) Start() error {
 
 	// 3. Build the TAP device (TUN ⇄ Conn) and start its loops.
 	c.dev = tap.New(tunDev, conn, c.cfg.VMAC, hsCfg.IPPrefix)
+
+	// 4. Keepalive: random 10–15s ticker, src=selfMAC / dst=all-zero out,
+	//    expects (dst=selfMAC, src=all-zero) back. Hook drops the reply
+	//    before IP/ARP dispatch; Device routes it to NotifyReply.
+	c.keepalive = NewKeepalive(conn, c.cfg.VMAC)
+	c.dev.SetKeepaliveHook(c.keepalive.NotifyReply)
+
 	c.dev.Start()
+	c.keepalive.Start()
 
 	if c.cfg.Socks5Port > 0 {
 		if err := c.startSocks5(); err != nil {
@@ -137,6 +146,9 @@ func (c *Client) ARP() *tap.ARPTable {
 
 func (c *Client) Close() error {
 	c.cancel()
+	if c.keepalive != nil {
+		c.keepalive.Stop()
+	}
 	if c.socks5Listener != nil {
 		c.socks5Listener.Close()
 	}

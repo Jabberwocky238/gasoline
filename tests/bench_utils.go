@@ -18,25 +18,22 @@ import (
 const (
 	benchVNetNum  = 200
 	benchVNetCIDR = "10.0.200.0/24"
-	// benchPayload is the inner UDP payload size; total IP packet is this + 20-byte
-	// IPv4 header, capped at TunMTU (1400). 1380 → 1400-byte IP packet.
-	benchPayload = 1380
-	benchRoundSz = 10 * 1024 * 1024
-	benchRounds  = 10
+	benchPayload  = 1380
+	benchRoundSz  = 10 * 1024 * 1024
+	benchRounds   = 10
 )
 
 func startBenchOperator(t *testing.T, uuid [16]byte, tp string) *operator.Operator {
 	t.Helper()
 	vnetStr := fmt.Sprintf("%d:%s", benchVNetNum, benchVNetCIDR)
 	cfg := &common.OperatorConfig{
-		UUID:         &uuid,
-		ListenAddr:   "127.0.0.1:0",
-		OpListenAddr: "127.0.0.1:0",
-		Transport:    tp,
-		AuthStr:      "noauth",
-		Network:      vnetStr,
-		StatsAddr:    "",
-		LogLevel:     "error",
+		UUID:            &uuid,
+		ClientListeners: []common.ListenerSpec{{Transport: tp, Addr: "127.0.0.1:0"}},
+		OpListenAddr:    "127.0.0.1:0",
+		AuthStr:         "noauth",
+		Network:         vnetStr,
+		StatsAddr:       "",
+		LogLevel:        "error",
 	}
 	op, err := operator.New(cfg)
 	if err != nil {

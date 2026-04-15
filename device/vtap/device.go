@@ -38,6 +38,8 @@ type Device struct {
 	arp     *ARPTable
 	staged  *stagedIPPackets
 
+	keepaliveHook func()
+
 	mu     sync.Mutex
 	closed bool
 	done   chan struct{}
@@ -64,6 +66,18 @@ func (d *Device) ARP() *ARPTable { return d.arp }
 
 // SelfMAC returns the device's own VMAC.
 func (d *Device) SelfMAC() common.VMAC { return d.selfMAC }
+
+// Conn exposes the underlying transport.Conn (used by the client to attach
+// out-of-band writers like keepalive).
+func (d *Device) Conn() transport.Conn { return d.conn }
+
+// SetKeepaliveHook installs a callback fired by the ingress loop whenever a
+// keepalive reply frame addressed to selfMAC is observed.
+func (d *Device) SetKeepaliveHook(fn func()) {
+	d.mu.Lock()
+	d.keepaliveHook = fn
+	d.mu.Unlock()
+}
 
 // SelfIP returns the device's overlay IP.
 func (d *Device) SelfIP() netip.Addr { return d.selfIP }
@@ -126,6 +140,15 @@ func (d *Device) handleFrame(frame []byte) {
 		return
 	}
 	switch ethType {
+	case common.EtherTypeKeepalive:
+		if common.IsKeepaliveReply(frame, d.selfMAC) {
+			d.mu.Lock()
+			hook := d.keepaliveHook
+			d.mu.Unlock()
+			if hook != nil {
+				hook()
+			}
+		}
 	case common.EtherTypeARP:
 		d.handleARP(payload)
 	case common.EtherTypeIPv4, common.EtherTypeIPv6:

@@ -11,9 +11,8 @@ import (
 // Returns a function that resolves flags + config file into OperatorConfig.
 func RegisterOperatorFlags(fs *flag.FlagSet) func() *OperatorConfig {
 	configFile := fs.String("c", "", "config file path (YAML)")
-	listenAddr := fs.String("listen", "0.0.0.0:8443", "client listen address")
 	opListen := fs.String("op-listen", "0.0.0.0:6677", "operator listen: <bind>;[external]")
-	transportType := fs.String("transport", "quic", "transport type: tcp, udp, quic")
+	transportType := fs.String("transport", "quic://:8443", "client listeners: '<schema>://<addr>[;<schema>://<addr>...]', e.g. 'quic://:8080;tls://127.0.0.1:9000'")
 	authStr := fs.String("auth", "noauth", "auth config string")
 	network := fs.String("network", "0:10.0.0.0/24", "vnetID:CIDR pairs separated by ';'")
 	statsAddr := fs.String("stats", "", "stats API listen address")
@@ -31,9 +30,6 @@ func RegisterOperatorFlags(fs *flag.FlagSet) func() *OperatorConfig {
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Config: %v\n", err)
 				os.Exit(1)
-			}
-			if cfg.Listen != "" && !isFlagSet(fs, "listen") {
-				*listenAddr = cfg.Listen
 			}
 			if cfg.OpListen != "" && !isFlagSet(fs, "op-listen") {
 				*opListen = cfg.OpListen
@@ -63,10 +59,15 @@ func RegisterOperatorFlags(fs *flag.FlagSet) func() *OperatorConfig {
 		// Parse op-listen: "bind;external"
 		opListenAddr, opExternalAddr := parseOpListen(*opListen)
 
-		result.ListenAddr = *listenAddr
+		specs, err := ParseListenerSpecs(*transportType)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Transport: %v\n", err)
+			os.Exit(1)
+		}
+
+		result.ClientListeners = specs
 		result.OpListenAddr = opListenAddr
 		result.OpExternalAddr = opExternalAddr
-		result.Transport = *transportType
 		result.AuthStr = *authStr
 		result.Network = *network
 		result.StatsAddr = *statsAddr

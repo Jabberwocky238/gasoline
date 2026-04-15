@@ -40,10 +40,10 @@ type Operator struct {
 
 	Ctrl *ctrl.ControlPlane
 
-	clientListener transport.Listener
-	clients        *ClientTable
-	Stats          *stats.Engine
-	VNetPools      *VNetPoolMap
+	clientListeners map[string]transport.Listener // keyed by transport kind
+	clients         *ClientTable
+	Stats           *stats.Engine
+	VNetPools       *VNetPoolMap
 
 	dataConn *net.UDPConn
 	plane    *vxlan.Plane
@@ -66,7 +66,7 @@ func New(cfg *common.OperatorConfig) (*Operator, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	var pools *VNetPoolMap
-	var clientListener transport.Listener
+	clientListeners := make(map[string]transport.Listener)
 
 	if cfg.Network != "" {
 		seed, _ := rand.Int(rand.Reader, big.NewInt(1<<32))
@@ -104,21 +104,35 @@ func New(cfg *common.OperatorConfig) (*Operator, error) {
 		}
 
 		configFn := makeConfigFunc(pools, serverPub)
-		clientListener, err = createClientListener(cfg.Transport, cfg.ListenAddr, resolver, configFn)
-		if err != nil {
+		if len(cfg.ClientListeners) == 0 {
 			cancel()
-			return nil, fmt.Errorf("listener: %w", err)
+			return nil, fmt.Errorf("no client listeners configured")
+		}
+		for _, spec := range cfg.ClientListeners {
+			if _, dup := clientListeners[spec.Transport]; dup {
+				cancel()
+				return nil, fmt.Errorf("duplicate listener transport %q", spec.Transport)
+			}
+			ln, err := createClientListener(spec.Transport, spec.Addr, resolver, configFn)
+			if err != nil {
+				cancel()
+				for _, existing := range clientListeners {
+					_ = existing.Close()
+				}
+				return nil, fmt.Errorf("listener %s/%s: %w", spec.Transport, spec.Addr, err)
+			}
+			clientListeners[spec.Transport] = ln
 		}
 	}
 
 	op := &Operator{
-		ctx:            ctx,
-		cancel:         cancel,
-		log:            logger,
-		clientListener: clientListener,
-		clients:        NewClientTable(),
-		Stats:          stats.New(cfg.StatsAddr),
-		VNetPools:      pools,
+		ctx:             ctx,
+		cancel:          cancel,
+		log:             logger,
+		clientListeners: clientListeners,
+		clients:         NewClientTable(),
+		Stats:           stats.New(cfg.StatsAddr),
+		VNetPools:       pools,
 	}
 
 	ctrlCfg := &ctrl.Config{
@@ -162,11 +176,31 @@ func New(cfg *common.OperatorConfig) (*Operator, error) {
 
 func (o *Operator) UUID() [16]byte   { return o.Ctrl.UUID() }
 func (o *Operator) GRPCAddr() string { return o.Ctrl.GRPCAddr() }
+// ClientAddr returns the bind address of a single arbitrary client listener,
+// or "" if none. Retained for tests/inspection; prefer ClientListeners() when
+// more than one transport may be active.
 func (o *Operator) ClientAddr() string {
-	if o.clientListener != nil {
-		return o.clientListener.Addr()
+	for _, ln := range o.clientListeners {
+		return ln.Addr()
 	}
 	return ""
+}
+
+// ClientAddrFor returns the bind address for a specific transport kind.
+func (o *Operator) ClientAddrFor(transport string) string {
+	if ln, ok := o.clientListeners[transport]; ok {
+		return ln.Addr()
+	}
+	return ""
+}
+
+// ClientListeners returns a snapshot of (transport → bind addr).
+func (o *Operator) ClientListeners() map[string]string {
+	out := make(map[string]string, len(o.clientListeners))
+	for t, ln := range o.clientListeners {
+		out[t] = ln.Addr()
+	}
+	return out
 }
 func (o *Operator) ConnectedClients() int   { return o.clients.Len() }
 func (o *Operator) ConnectedOperators() int { return o.Ctrl.Peers.Len() }
@@ -197,9 +231,9 @@ func (o *Operator) Start() error {
 		o.log.Infof("VXLAN plane bound to %s", o.dataConn.LocalAddr())
 	}
 
-	if o.clientListener != nil {
-		o.log.Infof("Client endpoint listening on %s", o.clientListener.Addr())
-		go o.routineAcceptClients()
+	for tp, ln := range o.clientListeners {
+		o.log.Infof("Client endpoint (%s) listening on %s", tp, ln.Addr())
+		go o.routineAcceptClients(tp, ln)
 	}
 
 	go o.routineReaper()
@@ -219,8 +253,8 @@ func (o *Operator) Close() error {
 	if o.dataConn != nil {
 		o.dataConn.Close()
 	}
-	if o.clientListener != nil {
-		o.clientListener.Close()
+	for _, ln := range o.clientListeners {
+		_ = ln.Close()
 	}
 	o.clients.CloseAll()
 	o.Stats.Close()
@@ -229,15 +263,15 @@ func (o *Operator) Close() error {
 
 // --------------- Client data plane ---------------
 
-func (o *Operator) routineAcceptClients() {
+func (o *Operator) routineAcceptClients(tp string, ln transport.Listener) {
 	for {
-		conn, result, err := o.clientListener.Accept()
+		conn, result, err := ln.Accept()
 		if err != nil {
 			select {
 			case <-o.ctx.Done():
 				return
 			default:
-				o.log.Errorf("Client accept failed: %v", err)
+				o.log.Errorf("Client accept failed (%s): %v", tp, err)
 				continue
 			}
 		}
@@ -309,6 +343,19 @@ func (o *Operator) routineReadFromClient(cp *ClientPeer) {
 
 		o.Stats.Recorder.RecordRx(cp.SessionID, uint64(n))
 		if !o.Stats.RateLimiter.Allow(cp.VNI, uint64(n)) {
+			continue
+		}
+
+		// Keepalive interception: a frame with dst=all-zero and
+		// EtherType=0x88B5 never enters the VXLAN plane. Reply in place
+		// with (dst=clientMAC, src=all-zero, type=0x88B5).
+		if src, ok := common.IsKeepaliveRequest(readBuf[:n]); ok {
+			if src == cp.VMAC {
+				reply := common.BuildKeepaliveReply(cp.VMAC)
+				if err := cp.Conn.WritePacket(reply); err != nil {
+					o.log.Debugf("keepalive reply to %x: %v", cp.VMAC, err)
+				}
+			}
 			continue
 		}
 

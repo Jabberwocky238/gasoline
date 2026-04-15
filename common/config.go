@@ -149,20 +149,75 @@ func LoadVNetConfig(path string) (*NetworkEntry, error) {
 
 // --------------- Runtime configs ---------------
 
+// ListenerSpec declares one client-facing listener: transport kind + bind addr.
+type ListenerSpec struct {
+	Transport string // "tcp", "udp", "quic", "tls"
+	Addr      string // bind address, e.g. "0.0.0.0:8443"
+}
+
+// ParseListenerSpecs parses the combined transport flag, e.g.
+//
+//	"quic://:8080;tls://127.0.0.1:9000"
+//
+// into a slice of ListenerSpec. The input is first split on ';'; each entry
+// is then split on "://" into (schema, addr). Both sides must be non-empty.
+// Duplicate transports produce an error.
+func ParseListenerSpecs(s string) ([]ListenerSpec, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, fmt.Errorf("empty transport spec")
+	}
+	var out []ListenerSpec
+	seen := make(map[string]struct{})
+	for _, raw := range strings.Split(s, ";") {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		schema, addr, ok := strings.Cut(raw, "://")
+		if !ok {
+			return nil, fmt.Errorf("listener spec %q: missing '://' separator (expected '<schema>://<addr>')", raw)
+		}
+		spec := ListenerSpec{
+			Transport: strings.TrimSpace(schema),
+			Addr:      strings.TrimSpace(addr),
+		}
+		if spec.Transport == "" {
+			return nil, fmt.Errorf("listener spec %q: missing transport", raw)
+		}
+		switch spec.Transport {
+		case "tcp", "udp", "quic", "tls":
+		default:
+			return nil, fmt.Errorf("listener spec %q: unsupported transport %q", raw, spec.Transport)
+		}
+		if spec.Addr == "" {
+			return nil, fmt.Errorf("listener spec %q: missing bind addr", raw)
+		}
+		if _, dup := seen[spec.Transport]; dup {
+			return nil, fmt.Errorf("duplicate transport %q", spec.Transport)
+		}
+		seen[spec.Transport] = struct{}{}
+		out = append(out, spec)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("no listener specs parsed from %q", s)
+	}
+	return out, nil
+}
+
 // OperatorConfig is the declarative configuration consumed by operator.New().
 type OperatorConfig struct {
-	UUID           *[16]byte      // optional: if nil, random UUID is generated
-	ListenAddr     string         // client listen address
-	OpListenAddr   string         // inter-operator bind address
-	OpExternalAddr string         // external address other operators use to reach us
-	Transport      string         // "tcp", "udp", "quic"
-	AuthStr        string         // global default auth string
-	NetworkAuth    map[VNI]string // per-VNet auth overrides
-	Network        string         // "vni:CIDR;..." pairs
-	StatsAddr      string         // stats HTTP API address
-	DiscoverAddrs  []string       // seed operator addresses for bootstrap
-	WatchDir       string         // directory to watch for vnet config files, "" = disabled
-	LogLevel       string         // log level: trace, debug, info, warn, error, fatal, panic
+	UUID            *[16]byte      // optional: if nil, random UUID is generated
+	ClientListeners []ListenerSpec // client-facing listeners (one per transport)
+	OpListenAddr    string         // inter-operator bind address
+	OpExternalAddr  string         // external address other operators use to reach us
+	AuthStr         string         // global default auth string
+	NetworkAuth     map[VNI]string // per-VNet auth overrides
+	Network         string         // "vni:CIDR;..." pairs
+	StatsAddr       string         // stats HTTP API address
+	DiscoverAddrs   []string       // seed operator addresses for bootstrap
+	WatchDir        string         // directory to watch for vnet config files, "" = disabled
+	LogLevel        string         // log level: trace, debug, info, warn, error, fatal, panic
 }
 
 // ClientConfig is the declarative configuration consumed by client.New().

@@ -48,6 +48,52 @@ func ParseEth(frame []byte) (dstMAC, srcMAC VMAC, ethType uint16, payload []byte
 	return
 }
 
+// EtherTypeKeepalive is the EtherType used for client↔operator keepalive frames.
+// Picked from the IEEE "local/experimental" range so it cannot collide with
+// IPv4, IPv6, or ARP.
+//
+// Protocol: client emits (dst=00:00:00:00:00:00, src=selfMAC, type=0x88B5,
+// payload empty). Operator reflects (dst=clientMAC, src=00:00:00:00:00:00,
+// type=0x88B5, payload empty). Keepalive frames never enter the VXLAN plane.
+const EtherTypeKeepalive uint16 = 0x88B5
+
+// KeepaliveZeroMAC is the all-zero VMAC used as the "peer" side of a keepalive
+// exchange (src on operator replies, dst on client requests).
+var KeepaliveZeroMAC = VMAC{}
+
+// IsKeepaliveRequest reports whether frame is a client→operator keepalive
+// (dst=all-zero, type=EtherTypeKeepalive). Returns the client's src MAC.
+func IsKeepaliveRequest(frame []byte) (srcMAC VMAC, ok bool) {
+	dst, src, ethType, _, parsed := ParseEth(frame)
+	if !parsed || ethType != EtherTypeKeepalive {
+		return VMAC{}, false
+	}
+	if dst != KeepaliveZeroMAC {
+		return VMAC{}, false
+	}
+	return src, true
+}
+
+// IsKeepaliveReply reports whether frame is an operator→client keepalive reply
+// for selfMAC (dst=selfMAC, src=all-zero, type=EtherTypeKeepalive).
+func IsKeepaliveReply(frame []byte, selfMAC VMAC) bool {
+	dst, src, ethType, _, ok := ParseEth(frame)
+	if !ok || ethType != EtherTypeKeepalive {
+		return false
+	}
+	return dst == selfMAC && src == KeepaliveZeroMAC
+}
+
+// BuildKeepaliveRequest constructs a client→operator keepalive frame.
+func BuildKeepaliveRequest(selfMAC VMAC) []byte {
+	return WrapEth(KeepaliveZeroMAC, selfMAC, EtherTypeKeepalive, nil)
+}
+
+// BuildKeepaliveReply constructs an operator→client keepalive reply frame.
+func BuildKeepaliveReply(clientMAC VMAC) []byte {
+	return WrapEth(clientMAC, KeepaliveZeroMAC, EtherTypeKeepalive, nil)
+}
+
 // EthTypeFromIP picks the EtherType based on an inner IP packet's version nibble.
 func EthTypeFromIP(ipPacket []byte) uint16 {
 	if len(ipPacket) == 0 {

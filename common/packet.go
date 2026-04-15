@@ -115,18 +115,6 @@ const (
 	MaxVxlanPayload = 1500
 )
 
-// InnerIPVersion returns the IP version (4 or 6) of an inner packet, or 0 if invalid.
-func InnerIPVersion(packet []byte) int {
-	if len(packet) < 1 {
-		return 0
-	}
-	v := packet[0] >> 4
-	if v == 4 || v == 6 {
-		return int(v)
-	}
-	return 0
-}
-
 // MTUFor returns the per-family inner-IP cap.
 func MTUFor(version int) int {
 	switch version {

@@ -1,79 +1,82 @@
 package operator
 
 import (
-	"net/netip"
-	"sync"
-
 	"github.com/jabberwocky238/gasoline/common"
 )
 
-// vniVMACKey indexes the ClientTable by (VNI, ClientID).
+// vniVMACKey indexes the ClientTable by (VNI, VMAC).
 type vniVMACKey struct {
 	vni common.VNI
 	cid common.VMAC
 }
 
-// ClientTable manages connected client peers with dual indexes:
-//   - by assigned IP (for ingress translation)
-//   - by (VNI, ClientID) (for data-plane forwarding without IP parsing)
-type ClientTable struct {
-	mu    sync.RWMutex
-	byIP  map[netip.Addr]*ClientPeer
+// clientTableState is the guarded inner state.
+type clientTableState struct {
 	byVMAC map[vniVMACKey]*ClientPeer
+}
+
+// ClientTable manages connected client peers indexed by (VNI, VMAC) — the
+// forwarding identity used by the data plane. IP-based lookup was removed:
+// the data plane never inspects inner IP payloads, and overlapping VNet CIDRs
+// make IP a non-unique key.
+type ClientTable struct {
+	guard *common.MutexGuard[clientTableState]
 }
 
 func NewClientTable() *ClientTable {
 	return &ClientTable{
-		byIP:  make(map[netip.Addr]*ClientPeer),
-		byVMAC: make(map[vniVMACKey]*ClientPeer),
+		guard: common.WithGuard(clientTableState{
+			byVMAC: make(map[vniVMACKey]*ClientPeer),
+		}),
 	}
 }
 
 func (ct *ClientTable) Add(cp *ClientPeer) {
-	ct.mu.Lock()
-	defer ct.mu.Unlock()
-	ct.byIP[cp.IP.Addr()] = cp
-	ct.byVMAC[vniVMACKey{cp.VNI, cp.VMAC}] = cp
+	ct.guard.Write(func(s *clientTableState) {
+		s.byVMAC[vniVMACKey{cp.VNI, cp.VMAC}] = cp
+	})
 }
 
 func (ct *ClientTable) Remove(cp *ClientPeer) {
-	ct.mu.Lock()
-	defer ct.mu.Unlock()
-	addr := cp.IP.Addr()
-	if existing, ok := ct.byIP[addr]; ok && existing == cp {
-		delete(ct.byIP, addr)
-	}
-	key := vniVMACKey{cp.VNI, cp.VMAC}
-	if existing, ok := ct.byVMAC[key]; ok && existing == cp {
-		delete(ct.byVMAC, key)
-	}
+	ct.guard.Write(func(s *clientTableState) {
+		key := vniVMACKey{cp.VNI, cp.VMAC}
+		if existing, ok := s.byVMAC[key]; ok && existing == cp {
+			delete(s.byVMAC, key)
+		}
+	})
 }
 
-// LookupByIP finds a client peer by exact assigned IP match.
-func (ct *ClientTable) LookupByIP(addr netip.Addr) *ClientPeer {
-	ct.mu.RLock()
-	defer ct.mu.RUnlock()
-	return ct.byIP[addr]
-}
-
-// LookupByVMAC finds a client peer by (VNI, ClientID) — used by the data
-// plane to forward without inspecting inner IP payloads.
+// LookupByVMAC finds a client peer by (VNI, VMAC) — used by the data plane to
+// forward without inspecting inner IP payloads.
 func (ct *ClientTable) LookupByVMAC(vni common.VNI, cid common.VMAC) *ClientPeer {
-	ct.mu.RLock()
-	defer ct.mu.RUnlock()
-	return ct.byVMAC[vniVMACKey{vni, cid}]
+	var out *ClientPeer
+	ct.guard.Read(func(s clientTableState) {
+		out = s.byVMAC[vniVMACKey{vni, cid}]
+	})
+	return out
+}
+
+// Snapshot returns a copy of all currently registered peers.
+func (ct *ClientTable) Snapshot() []*ClientPeer {
+	var out []*ClientPeer
+	ct.guard.Read(func(s clientTableState) {
+		out = make([]*ClientPeer, 0, len(s.byVMAC))
+		for _, cp := range s.byVMAC {
+			out = append(out, cp)
+		}
+	})
+	return out
 }
 
 func (ct *ClientTable) Len() int {
-	ct.mu.RLock()
-	defer ct.mu.RUnlock()
-	return len(ct.byIP)
+	var n int
+	ct.guard.Read(func(s clientTableState) { n = len(s.byVMAC) })
+	return n
 }
 
 func (ct *ClientTable) CloseAll() {
-	ct.mu.Lock()
-	defer ct.mu.Unlock()
-	for _, cp := range ct.byIP {
-		cp.Conn.Close()
+	peers := ct.Snapshot()
+	for _, cp := range peers {
+		_ = cp.Conn.Close()
 	}
 }

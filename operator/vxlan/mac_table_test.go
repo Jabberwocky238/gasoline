@@ -1,7 +1,7 @@
 package vxlan
 
 import (
-	"net"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -16,15 +16,15 @@ func TestMACTableLocalLookup(t *testing.T) {
 	tbl := NewMACTable()
 	vni := common.VNI(7)
 	mac := common.VMAC{0x02, 0, 0, 0, 0, 0x01}
-	port := &stubPort{id: "A"}
+	lp := &stubPort{id: "A"}
 
-	tbl.RegisterLocal(vni, mac, port)
+	tbl.RegisterLocal(vni, mac, lp)
 
 	got, ok := tbl.LookupLocal(vni, mac)
-	if !ok || got != port {
+	if !ok || got != lp {
 		t.Fatalf("LookupLocal: got %v ok=%v, want port ok=true", got, ok)
 	}
-	if p, addr, found := tbl.Lookup(vni, mac); !found || p != port || addr != nil {
+	if p, addr, found := tbl.Lookup(vni, mac); !found || p != lp || addr.IsValid() {
 		t.Fatalf("Lookup: got (%v,%v,%v)", p, addr, found)
 	}
 
@@ -38,7 +38,7 @@ func TestMACTableRemoteLearning(t *testing.T) {
 	tbl := NewMACTable()
 	vni := common.VNI(42)
 	mac := common.VMAC{0x02, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE}
-	addr := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 5), Port: 9999}
+	addr := netip.MustParseAddrPort("10.0.0.5:9999")
 
 	tbl.LearnRemote(vni, mac, addr)
 	got, ok := tbl.LookupRemote(vni, mac)
@@ -47,8 +47,8 @@ func TestMACTableRemoteLearning(t *testing.T) {
 	}
 
 	// Local registration shadows remote
-	port := &stubPort{id: "Z"}
-	tbl.RegisterLocal(vni, mac, port)
+	lp := &stubPort{id: "Z"}
+	tbl.RegisterLocal(vni, mac, lp)
 	if _, ok := tbl.LookupRemote(vni, mac); ok {
 		t.Fatalf("RegisterLocal should have purged remote shadow")
 	}
@@ -65,7 +65,7 @@ func TestMACTableFloodIndexes(t *testing.T) {
 	vni := common.VNI(1)
 	macA := common.VMAC{0x02, 0, 0, 0, 0, 0x0A}
 	macB := common.VMAC{0x02, 0, 0, 0, 0, 0x0B}
-	addrR := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 9), Port: 1}
+	addrR := netip.MustParseAddrPort("10.0.0.9:1")
 
 	tbl.RegisterLocal(vni, macA, &stubPort{id: "A"})
 	tbl.RegisterLocal(vni, macB, &stubPort{id: "B"})
@@ -88,7 +88,7 @@ func TestMACTableAgeOut(t *testing.T) {
 	tbl := NewMACTable()
 	vni := common.VNI(1)
 	mac := common.VMAC{0x02, 0, 0, 0, 0, 1}
-	addr := &net.UDPAddr{IP: net.IPv4(10, 0, 0, 1), Port: 1}
+	addr := netip.MustParseAddrPort("10.0.0.1:1")
 	tbl.LearnRemote(vni, mac, addr)
 
 	if n := tbl.AgeOutRemotes(time.Hour); n != 0 {

@@ -5,28 +5,32 @@ import (
 	"fmt"
 	"net/netip"
 	"strings"
-	"sync"
 
 	"github.com/jabberwocky238/gasoline/common"
 )
 
+// v4State is the guarded mutable state for an IPv4 pool. Nil on IPv6 pools.
+type v4State struct {
+	next    uint32          // next sequence to try
+	freed   []uint32        // recycled sequences
+	inUse   map[uint32]bool // all known in-use sequences (local + remote)
+	maxHost uint32          // max usable host count
+}
+
 // VNetPool manages IP allocation for a single VNet.
 //
-// IPv4: sequential pool with recycle list (state-tracking).
+// IPv4: sequential pool with recycle list (state-tracking, guarded).
 // IPv6: deterministic derivation from (SessionID, VNI) — no state required.
-//       ReserveIP / UnreserveIP / ReleaseIP are no-ops on v6 pools since
-//       there is no shared allocation table to coordinate.
+//
+//	ReserveIP / UnreserveIP / ReleaseIP are no-ops on v6 pools since
+//	there is no shared allocation table to coordinate.
 type VNetPool struct {
 	VNI      common.VNI
 	Prefix   netip.Prefix
 	baseAddr netip.Addr
 
-	// IPv4-only state
-	mu      sync.Mutex
-	next    uint32          // next sequence to try
-	freed   []uint32        // recycled sequences
-	inUse   map[uint32]bool // all known in-use sequences (local + remote)
-	maxHost uint32          // max usable host count
+	// v4 is nil for IPv6 pools.
+	v4 *common.MutexGuard[v4State]
 }
 
 // IsV4 reports whether this pool allocates IPv4 addresses.
@@ -43,49 +47,55 @@ func (p *VNetPool) AllocateIP(sessionID [16]byte) (netip.Addr, error) {
 }
 
 func (p *VNetPool) allocateV4() (netip.Addr, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	var (
+		out netip.Addr
+		err error
+	)
+	p.v4.Write(func(s *v4State) {
+		// Try freed list first
+		for len(s.freed) > 0 {
+			seq := s.freed[len(s.freed)-1]
+			s.freed = s.freed[:len(s.freed)-1]
+			if !s.inUse[seq] {
+				out = addToAddrV4(p.baseAddr, seq)
+				s.inUse[seq] = true
+				return
+			}
+		}
 
-	// Try freed list first
-	for len(p.freed) > 0 {
-		seq := p.freed[len(p.freed)-1]
-		p.freed = p.freed[:len(p.freed)-1]
-		if !p.inUse[seq] {
+		// Scan from s.next, wrapping around once
+		start := s.next
+		wrapped := false
+		for {
+			seq := s.next
+			s.next++
+			if s.next > s.maxHost {
+				s.next = 2 // wrap around
+			}
+
+			if !wrapped && s.next == start {
+				err = fmt.Errorf("IP pool exhausted for vni %s", p.VNI)
+				return
+			}
+			if s.next == start {
+				wrapped = true
+			}
+
+			if s.inUse[seq] {
+				continue
+			}
+
 			ip := addToAddrV4(p.baseAddr, seq)
-			p.inUse[seq] = true
-			return ip, nil
-		}
-	}
+			if !p.Prefix.Contains(ip) {
+				continue
+			}
 
-	// Scan from p.next, wrapping around once
-	start := p.next
-	wrapped := false
-	for {
-		seq := p.next
-		p.next++
-		if p.next > p.maxHost {
-			p.next = 2 // wrap around
+			s.inUse[seq] = true
+			out = ip
+			return
 		}
-
-		if !wrapped && p.next == start {
-			return netip.Addr{}, fmt.Errorf("IP pool exhausted for vni %s", p.VNI)
-		}
-		if p.next == start {
-			wrapped = true
-		}
-
-		if p.inUse[seq] {
-			continue
-		}
-
-		ip := addToAddrV4(p.baseAddr, seq)
-		if !p.Prefix.Contains(ip) {
-			continue
-		}
-
-		p.inUse[seq] = true
-		return ip, nil
-	}
+	})
+	return out, err
 }
 
 // deriveV6 computes a stateless IPv6 address for a session:
@@ -106,19 +116,15 @@ func (p *VNetPool) deriveV6(sessionID [16]byte) netip.Addr {
 	h.Write(vb[:])
 	sum := h.Sum(nil)
 
-	// Overwrite host portion of base with hash bytes.
-	// networkBytes = bits/8; networkBitRemainder handles non-byte-aligned prefixes.
 	networkBytes := bits / 8
 	remainder := bits % 8
 
 	if networkBytes < 16 {
-		// Preserve any partial byte at the boundary.
 		if remainder != 0 {
 			mask := byte(0xFF << (8 - remainder))
 			base[networkBytes] = (base[networkBytes] & mask) | (sum[networkBytes] &^ mask)
 			networkBytes++
 		}
-		// Fill full host bytes from hash.
 		for i := networkBytes; i < 16; i++ {
 			base[i] = sum[i-(bits/8)]
 		}
@@ -128,46 +134,46 @@ func (p *VNetPool) deriveV6(sessionID [16]byte) netip.Addr {
 
 // ReleaseIP returns an IPv4 address back to the pool. No-op for IPv6.
 func (p *VNetPool) ReleaseIP(ip netip.Addr) {
-	if !ip.Is4() {
+	if !ip.Is4() || p.v4 == nil {
 		return
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	seq := p.ipToSeqV4(ip)
-	if !p.inUse[seq] {
-		return
-	}
-	delete(p.inUse, seq)
-	p.freed = append(p.freed, seq)
+	p.v4.Write(func(s *v4State) {
+		if !s.inUse[seq] {
+			return
+		}
+		delete(s.inUse, seq)
+		s.freed = append(s.freed, seq)
+	})
 }
 
 // ReserveIP marks an IPv4 address as in-use. No-op for IPv6 (stateless).
 func (p *VNetPool) ReserveIP(ip netip.Addr) {
-	if !ip.Is4() {
+	if !ip.Is4() || p.v4 == nil {
 		return
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.inUse[p.ipToSeqV4(ip)] = true
+	seq := p.ipToSeqV4(ip)
+	p.v4.Write(func(s *v4State) { s.inUse[seq] = true })
 }
 
 // UnreserveIP removes an IPv4 reservation. No-op for IPv6.
 func (p *VNetPool) UnreserveIP(ip netip.Addr) {
-	if !ip.Is4() {
+	if !ip.Is4() || p.v4 == nil {
 		return
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	delete(p.inUse, p.ipToSeqV4(ip))
+	seq := p.ipToSeqV4(ip)
+	p.v4.Write(func(s *v4State) { delete(s.inUse, seq) })
 }
 
 // InUseCount returns the number of currently allocated IPv4 addresses.
 // Always 0 for IPv6 pools (stateless).
 func (p *VNetPool) InUseCount() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return len(p.inUse)
+	if p.v4 == nil {
+		return 0
+	}
+	var n int
+	p.v4.Read(func(s v4State) { n = len(s.inUse) })
+	return n
 }
 
 func (p *VNetPool) ipToSeqV4(ip netip.Addr) uint32 {
@@ -188,7 +194,6 @@ func NewVNetPool(vni common.VNI, prefix netip.Prefix, seed uint32) *VNetPool {
 		baseAddr: prefix.Addr(),
 	}
 	if !prefix.Addr().Is4() {
-		// IPv6: no state needed
 		return p
 	}
 
@@ -210,27 +215,30 @@ func NewVNetPool(vni common.VNI, prefix netip.Prefix, seed uint32) *VNetPool {
 	if offset > maxHost {
 		offset = 2
 	}
-	p.next = offset
-	p.inUse = make(map[uint32]bool)
-	p.maxHost = maxHost
+	p.v4 = common.WithGuard(v4State{
+		next:    offset,
+		inUse:   make(map[uint32]bool),
+		maxHost: maxHost,
+	})
 	return p
 }
 
 // --------------- VNetPoolMap ---------------
 
 type VNetPoolMap struct {
-	mu    sync.RWMutex
-	pools map[common.VNI]*VNetPool
+	guard *common.MutexGuard[map[common.VNI]*VNetPool]
 }
 
 func NewVNetPoolMap() *VNetPoolMap {
-	return &VNetPoolMap{pools: make(map[common.VNI]*VNetPool)}
+	return &VNetPoolMap{
+		guard: common.WithGuard(make(map[common.VNI]*VNetPool)),
+	}
 }
 
 // ParseVNetPools parses "vni:CIDR;vni:CIDR;..." into a VNetPoolMap.
 // seed is used to spread starting offsets across operators (IPv4 only).
 func ParseVNetPools(network string, seed uint32) (*VNetPoolMap, error) {
-	m := &VNetPoolMap{pools: make(map[common.VNI]*VNetPool)}
+	pools := make(map[common.VNI]*VNetPool)
 
 	for _, entry := range strings.Split(network, ";") {
 		entry = strings.TrimSpace(entry)
@@ -251,47 +259,53 @@ func ParseVNetPools(network string, seed uint32) (*VNetPoolMap, error) {
 			return nil, fmt.Errorf("invalid CIDR %q: %w", parts[1], err)
 		}
 
-		m.pools[vni] = NewVNetPool(vni, prefix, seed)
+		pools[vni] = NewVNetPool(vni, prefix, seed)
 	}
 
-	if len(m.pools) == 0 {
+	if len(pools) == 0 {
 		return nil, fmt.Errorf("no network configured")
 	}
-	return m, nil
+	return &VNetPoolMap{guard: common.WithGuard(pools)}, nil
 }
 
 // Get returns a pool by VNI.
 func (m *VNetPoolMap) Get(vni common.VNI) (*VNetPool, bool) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	p, ok := m.pools[vni]
+	var (
+		p  *VNetPool
+		ok bool
+	)
+	m.guard.Read(func(pools map[common.VNI]*VNetPool) {
+		p, ok = pools[vni]
+	})
 	return p, ok
 }
 
 // Add inserts or replaces a pool for the given VNI.
 func (m *VNetPoolMap) Add(vni common.VNI, pool *VNetPool) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.pools[vni] = pool
+	m.guard.Write(func(pools *map[common.VNI]*VNetPool) {
+		(*pools)[vni] = pool
+	})
 }
 
 // Remove deletes a pool by VNI. Returns true if it existed.
 func (m *VNetPoolMap) Remove(vni common.VNI) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	_, ok := m.pools[vni]
-	delete(m.pools, vni)
-	return ok
+	var existed bool
+	m.guard.Write(func(pools *map[common.VNI]*VNetPool) {
+		_, existed = (*pools)[vni]
+		delete(*pools, vni)
+	})
+	return existed
 }
 
 // All returns a snapshot of all pools for iteration.
 func (m *VNetPoolMap) All() map[common.VNI]*VNetPool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	cp := make(map[common.VNI]*VNetPool, len(m.pools))
-	for k, v := range m.pools {
-		cp[k] = v
-	}
+	var cp map[common.VNI]*VNetPool
+	m.guard.Read(func(pools map[common.VNI]*VNetPool) {
+		cp = make(map[common.VNI]*VNetPool, len(pools))
+		for k, v := range pools {
+			cp[k] = v
+		}
+	})
 	return cp
 }
 

@@ -30,7 +30,7 @@ func TestCSSC_TCP(t *testing.T) {
 	t.Logf("ClientA=%s  ClientB=%s", clientAIP, clientBIP)
 
 	waitFor(t, 2e9, func() bool {
-		_, _, _, found := opA.Ctrl.LookupRemoteByIP(vni, clientBIP)
+		_, _, found := opA.Ctrl.LookupRemoteByVMAC(vni, resultB.VMAC)
 		return found
 	})
 

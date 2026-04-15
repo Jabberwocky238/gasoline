@@ -1,9 +1,9 @@
 // Package vxlan implements an in-process VXLAN data plane.
 //
-// A Plane owns a single UDP socket for inter-operator traffic and a MAC
-// learning table indexed by (VNI, MAC). Local destinations register as
-// Ports; remote destinations are learned dynamically from incoming UDP
-// frames and stored as net.UDPAddr endpoints.
+// A Plane owns a single port.Conn (platform-aware batch UDP socket) for
+// inter-operator traffic and a MAC learning table indexed by (VNI, MAC).
+// Local destinations register as Ports; remote destinations are learned
+// dynamically from incoming frames and stored as netip.AddrPort endpoints.
 //
 // Forwarding rules:
 //

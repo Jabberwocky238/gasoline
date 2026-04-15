@@ -30,9 +30,9 @@ func TestCSSC_UDP(t *testing.T) {
 	t.Logf("ClientA=%s  ClientB=%s", clientAIP, clientBIP)
 
 	waitFor(t, 2e9, func() bool {
-		_, _, _, found := opA.Ctrl.LookupRemoteByIP(vni, clientBIP)
+		_, _, found := opA.Ctrl.LookupRemoteByVMAC(vni, resultB.VMAC)
 		return found
 	})
 
-	runTransfer(t, "UDP", connA, connB, clientAIP, clientBIP, resultA.VMAC, resultB.VMAC)
+	runTransfer(t, "CSSC-UDP", connA, connB, clientAIP, clientBIP, resultA.VMAC, resultB.VMAC)
 }

@@ -106,7 +106,10 @@ func runTransfer(t *testing.T, label string, connA, connB transport.Conn, srcIP,
 
 	// Operator data plane is L2 — wrap the IP packet in an Ethernet header
 	// (dstMAC = clientB's VMAC, srcMAC = clientA's VMAC) before sending.
-	wire := common.WrapEth(dstMAC, srcMAC, common.EtherTypeIPv4, ipPkt)
+	// WrapEth now returns a pooled DataFrame; reused across the whole loop.
+	df := common.WrapEth(dstMAC, srcMAC, common.EtherTypeIPv4, ipPkt)
+	defer common.PutFrame(df)
+	wire := df.Bytes()
 
 	// CPU profile — output to project root
 	profilePath := fmt.Sprintf("../cpu_%s.prof", label)

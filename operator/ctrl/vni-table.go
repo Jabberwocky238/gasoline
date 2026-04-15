@@ -1,111 +1,96 @@
 package ctrl
 
 import (
-	"net/netip"
-	"sync"
-
 	"github.com/jabberwocky238/gasoline/common"
 )
 
-// VNetSessions holds all sessions belonging to a single VNI with three
-// secondary indexes so every data-plane lookup is O(1):
+// vnetSessionsState is the guarded inner state of VNetSessions.
 //
-//	Sessions   : sessionID     → *SessionInfo  (authoritative)
-//	byIP       : netip.Addr    → sessionID
-//	byVMAC : common.VMAC → sessionID
-//
-// All three maps are kept in sync under a single RWMutex.
+//	Sessions : sessionID  → *SessionInfo  (authoritative)
+//	byVMAC   : common.VMAC → sessionID    (secondary, data-plane lookup)
+type vnetSessionsState struct {
+	Sessions map[[16]byte]*SessionInfo
+	byVMAC   map[common.VMAC][16]byte
+}
+
+// VNetSessions holds all sessions belonging to a single VNI. Concurrency is
+// managed by a common.MutexGuard over the inner state so readers and writers
+// go through a single critical section each.
 type VNetSessions struct {
-	mu         sync.RWMutex
-	Sessions   map[[16]byte]*SessionInfo
-	byIP       map[netip.Addr][16]byte
-	byVMAC map[common.VMAC][16]byte
+	guard *common.MutexGuard[vnetSessionsState]
 }
 
 func newVNetSessions() *VNetSessions {
 	return &VNetSessions{
-		Sessions:   make(map[[16]byte]*SessionInfo),
-		byIP:       make(map[netip.Addr][16]byte),
-		byVMAC: make(map[common.VMAC][16]byte),
+		guard: common.WithGuard(vnetSessionsState{
+			Sessions: make(map[[16]byte]*SessionInfo),
+			byVMAC:   make(map[common.VMAC][16]byte),
+		}),
 	}
 }
 
-// Add inserts/replaces a session and its secondary index entries.
-// If the sessionID already exists with different IP/ClientID the stale
-// index entries are cleaned up first.
+// Add inserts/replaces a session and keeps byVMAC in sync. If sessionID
+// already exists with a different VMAC the stale byVMAC entry is cleaned up.
 func (v *VNetSessions) Add(sessionID [16]byte, info *SessionInfo) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-
-	// Remove stale secondary index entries if this sessionID is being replaced.
-	if old, ok := v.Sessions[sessionID]; ok {
-		if old.IP.IsValid() {
-			if cur, hit := v.byIP[old.IP]; hit && cur == sessionID {
-				delete(v.byIP, old.IP)
+	v.guard.Write(func(s *vnetSessionsState) {
+		if old, ok := s.Sessions[sessionID]; ok {
+			if cur, hit := s.byVMAC[old.VMAC]; hit && cur == sessionID {
+				delete(s.byVMAC, old.VMAC)
 			}
 		}
-		if cur, hit := v.byVMAC[old.VMAC]; hit && cur == sessionID {
-			delete(v.byVMAC, old.VMAC)
+		s.Sessions[sessionID] = info
+		var zero common.VMAC
+		if info.VMAC != zero {
+			s.byVMAC[info.VMAC] = sessionID
 		}
-	}
-
-	v.Sessions[sessionID] = info
-	if info.IP.IsValid() {
-		v.byIP[info.IP] = sessionID
-	}
-	var zero common.VMAC
-	if info.VMAC != zero {
-		v.byVMAC[info.VMAC] = sessionID
-	}
+	})
 }
 
-// Remove deletes a session and its secondary index entries.
+// Remove deletes a session and its byVMAC entry.
 func (v *VNetSessions) Remove(sessionID [16]byte) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-
-	info, ok := v.Sessions[sessionID]
-	if !ok {
-		return
-	}
-	delete(v.Sessions, sessionID)
-	if info.IP.IsValid() {
-		if cur, hit := v.byIP[info.IP]; hit && cur == sessionID {
-			delete(v.byIP, info.IP)
+	v.guard.Write(func(s *vnetSessionsState) {
+		info, ok := s.Sessions[sessionID]
+		if !ok {
+			return
 		}
-	}
-	if cur, hit := v.byVMAC[info.VMAC]; hit && cur == sessionID {
-		delete(v.byVMAC, info.VMAC)
-	}
+		delete(s.Sessions, sessionID)
+		if cur, hit := s.byVMAC[info.VMAC]; hit && cur == sessionID {
+			delete(s.byVMAC, info.VMAC)
+		}
+	})
 }
 
 // Get returns the SessionInfo for a sessionID.
-func (v *VNetSessions) Get(sessionID [16]byte) (*SessionInfo, bool) {
-	v.mu.RLock()
-	defer v.mu.RUnlock()
-	s, ok := v.Sessions[sessionID]
-	return s, ok
+func (v *VNetSessions) Get(sessionID [16]byte) (info *SessionInfo, found bool) {
+	v.guard.Read(func(s vnetSessionsState) {
+		info, found = s.Sessions[sessionID]
+	})
+	return
 }
 
-// LookupByIP finds a session by its assigned IP in O(1).
-func (v *VNetSessions) LookupByIP(ip netip.Addr) (sessionID [16]byte, info *SessionInfo, found bool) {
-	v.mu.RLock()
-	defer v.mu.RUnlock()
-	sid, ok := v.byIP[ip]
-	if !ok {
-		return [16]byte{}, nil, false
-	}
-	return sid, v.Sessions[sid], true
-}
-
-// LookupByVMAC finds a session by its ClientID in O(1).
-// Primary data-plane lookup — no packet inspection involved.
+// LookupByVMAC finds a session by its VMAC in O(1). Primary data-plane
+// lookup — no packet inspection involved.
 func (v *VNetSessions) LookupByVMAC(cid common.VMAC) (sessionID [16]byte, info *SessionInfo, found bool) {
-	v.mu.RLock()
-	defer v.mu.RUnlock()
-	sid, ok := v.byVMAC[cid]
-	if !ok {
-		return [16]byte{}, nil, false
-	}
-	return sid, v.Sessions[sid], true
+	v.guard.Read(func(s vnetSessionsState) {
+		sid, ok := s.byVMAC[cid]
+		if !ok {
+			return
+		}
+		sessionID = sid
+		info = s.Sessions[sid]
+		found = true
+	})
+	return
+}
+
+// Snapshot returns a shallow copy of the sessionID → SessionInfo map.
+func (v *VNetSessions) Snapshot() map[[16]byte]*SessionInfo {
+	var out map[[16]byte]*SessionInfo
+	v.guard.Read(func(s vnetSessionsState) {
+		out = make(map[[16]byte]*SessionInfo, len(s.Sessions))
+		for k, inf := range s.Sessions {
+			out[k] = inf
+		}
+	})
+	return out
 }

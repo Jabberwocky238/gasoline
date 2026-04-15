@@ -14,8 +14,8 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/jabberwocky238/gasoline/common"
-	"github.com/jabberwocky238/gasoline/device/vxlan"
 	"github.com/jabberwocky238/gasoline/operator/ctrl"
+	"github.com/jabberwocky238/gasoline/operator/vxlan"
 	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/protocol/encryption"
@@ -45,7 +45,7 @@ type Operator struct {
 	Stats           *stats.Engine
 	VNetPools       *VNetPoolMap
 
-	dataConn *net.UDPConn
+	dataPort *net.UDPConn
 	plane    *vxlan.Plane
 }
 
@@ -155,8 +155,8 @@ func New(cfg *common.OperatorConfig) (*Operator, error) {
 		if op.plane == nil || opUUID == op.Ctrl.UUID() {
 			return
 		}
-		if peer, ok := op.Ctrl.Peers.Get(opUUID); ok && peer.UDPAddr != nil {
-			op.plane.Table().LearnRemote(vni, vmac, peer.UDPAddr)
+		if peer, ok := op.Ctrl.Peers.Get(opUUID); ok && peer.UDPAddrPort.IsValid() {
+			op.plane.Table().LearnRemote(vni, vmac, peer.UDPAddrPort)
 		}
 	}
 	ctrlCfg.OnSessionRevoke = func(vni common.VNI, _ [16]byte, _ [16]byte, vmac common.VMAC, ip netip.Addr) {
@@ -176,6 +176,7 @@ func New(cfg *common.OperatorConfig) (*Operator, error) {
 
 func (o *Operator) UUID() [16]byte   { return o.Ctrl.UUID() }
 func (o *Operator) GRPCAddr() string { return o.Ctrl.GRPCAddr() }
+
 // ClientAddr returns the bind address of a single arbitrary client listener,
 // or "" if none. Retained for tests/inspection; prefer ClientListeners() when
 // more than one transport may be active.
@@ -213,22 +214,21 @@ func (o *Operator) Start() error {
 		return err
 	}
 
-	// UDP data plane bound on the same port as gRPC (TCP and UDP coexist).
+	// UDP data plane bound on the same {host,port} as gRPC. TCP and UDP
+	// coexist on the same port (independent transport tables in the kernel).
 	if grpcAddr := o.Ctrl.GRPCAddr(); grpcAddr != "" {
 		udpAddr, err := net.ResolveUDPAddr("udp", grpcAddr)
 		if err != nil {
-			return fmt.Errorf("resolve data udp addr: %w", err)
+			return fmt.Errorf("data plane resolve %s: %w", grpcAddr, err)
 		}
-		o.dataConn, err = net.ListenUDP("udp", udpAddr)
+		dp, err := net.ListenUDP("udp", udpAddr)
 		if err != nil {
-			return fmt.Errorf("data udp listen on %s: %w", grpcAddr, err)
+			return fmt.Errorf("data plane listen on %s: %w", grpcAddr, err)
 		}
-		// Enlarge OS UDP buffers to absorb bursts; ignore errors (best-effort).
-		_ = o.dataConn.SetReadBuffer(8 * 1024 * 1024)
-		_ = o.dataConn.SetWriteBuffer(8 * 1024 * 1024)
-		o.plane = vxlan.New(o.dataConn)
+		o.dataPort = dp
+		o.plane = vxlan.New(dp)
 		o.plane.Start() // RxLoop: decap + Forward + remote MAC learning
-		o.log.Infof("VXLAN plane bound to %s", o.dataConn.LocalAddr())
+		o.log.Infof("VXLAN plane bound to %s", dp.LocalAddr())
 	}
 
 	for tp, ln := range o.clientListeners {
@@ -250,9 +250,8 @@ func (o *Operator) Close() error {
 	if o.plane != nil {
 		o.plane.Close()
 	}
-	if o.dataConn != nil {
-		o.dataConn.Close()
-	}
+	// dataPort is closed by plane.Close() above; nothing to do here.
+	o.dataPort = nil
 	for _, ln := range o.clientListeners {
 		_ = ln.Close()
 	}
@@ -351,10 +350,11 @@ func (o *Operator) routineReadFromClient(cp *ClientPeer) {
 		// with (dst=clientMAC, src=all-zero, type=0x88B5).
 		if src, ok := common.IsKeepaliveRequest(readBuf[:n]); ok {
 			if src == cp.VMAC {
-				reply := common.BuildKeepaliveReply(cp.VMAC)
-				if err := cp.Conn.WritePacket(reply); err != nil {
+				df := common.BuildKeepaliveReply(cp.VMAC)
+				if err := cp.Conn.WritePacket(df.Bytes()); err != nil {
 					o.log.Debugf("keepalive reply to %x: %v", cp.VMAC, err)
 				}
+				common.PutFrame(df)
 			}
 			continue
 		}
@@ -380,16 +380,12 @@ func (o *Operator) routineReaper() {
 		}
 
 		now := time.Now()
-		o.clients.mu.RLock()
 		var stale []*ClientPeer
-		for _, cp := range o.clients.byIP {
-			idle := now.Sub(cp.Conn.LastActive())
-			if idle > idleTimeout {
+		for _, cp := range o.clients.Snapshot() {
+			if now.Sub(cp.Conn.LastActive()) > idleTimeout {
 				stale = append(stale, cp)
 			}
 		}
-		o.clients.mu.RUnlock()
-
 		for _, cp := range stale {
 			idle := now.Sub(cp.Conn.LastActive())
 			o.log.Warnf("Reaping idle client %x (idle %v)", cp.SessionID, idle.Round(time.Second))

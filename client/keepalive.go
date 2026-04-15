@@ -86,8 +86,10 @@ func (k *Keepalive) loop() {
 }
 
 func (k *Keepalive) sendOnce() error {
-	frame := common.BuildKeepaliveRequest(k.selfMAC)
-	if err := k.conn.WritePacket(frame); err != nil {
+	df := common.BuildKeepaliveRequest(k.selfMAC)
+	err := k.conn.WritePacket(df.Bytes())
+	common.PutFrame(df)
+	if err != nil {
 		return err
 	}
 	k.mu.Lock()

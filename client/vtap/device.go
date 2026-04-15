@@ -213,8 +213,9 @@ func (d *Device) egressLoop() {
 //
 // Fast path : ARP hit → wrap & ship synchronously.
 // Slow path : ARP miss → copy into staging queue, emit ARP request once
-//              per destination, return immediately. Drain happens via
-//              onArpLearn when the reply arrives.
+//
+//	per destination, return immediately. Drain happens via
+//	onArpLearn when the reply arrives.
 func (d *Device) handleEgress(ipPkt []byte) {
 	dstIP, ok := parseDstIP(ipPkt)
 	if !ok {
@@ -235,9 +236,22 @@ func (d *Device) handleEgress(ipPkt []byte) {
 	}
 }
 
+func ethTypeFromIP(ipPacket []byte) uint16 {
+	if len(ipPacket) == 0 {
+		return 0
+	}
+	switch ipPacket[0] >> 4 {
+	case 4:
+		return common.EtherTypeIPv4
+	case 6:
+		return common.EtherTypeIPv6
+	}
+	return 0
+}
+
 // shipIP wraps an IP packet in an Ethernet header and writes one frame to Conn.
 func (d *Device) shipIP(ipPkt []byte, dstMAC common.VMAC) {
-	ethType := common.EthTypeFromIP(ipPkt)
+	ethType := ethTypeFromIP(ipPkt)
 	if ethType == 0 {
 		return
 	}

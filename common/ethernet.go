@@ -12,21 +12,56 @@ import "encoding/binary"
 //
 // Wire layout of a frame emitted by WrapEth:
 //   [dstMAC:6][srcMAC:6][ethType:2][payload...]
+//
+// The byte-level accessors (ethDstMAC / ethSrcMAC / ethTypeOf) are shared
+// with dataframe.go's DataFrame methods (offsets there are
+// VxlanHeaderSize-shifted).
 
-// WrapEth builds a full Ethernet frame around payload.
-// Returns a freshly allocated slice. For hot paths, prefer WriteEthHeader
-// into a pre-sized buffer.
-func WrapEth(dstMAC, srcMAC VMAC, ethType uint16, payload []byte) []byte {
-	out := make([]byte, EthHeaderSize+len(payload))
-	copy(out[0:6], dstMAC[:])
-	copy(out[6:12], srcMAC[:])
-	binary.BigEndian.PutUint16(out[12:14], ethType)
-	copy(out[14:], payload)
-	return out
+// --------------- Shared byte-level accessors ---------------
+
+// ethDstMAC reads the destination MAC at b[0:6]. Caller guarantees len(b) ≥ 6.
+func ethDstMAC(b []byte) VMAC {
+	var m VMAC
+	copy(m[:], b[0:6])
+	return m
+}
+
+// ethSrcMAC reads the source MAC at b[6:12]. Caller guarantees len(b) ≥ 12.
+func ethSrcMAC(b []byte) VMAC {
+	var m VMAC
+	copy(m[:], b[6:12])
+	return m
+}
+
+// ethTypeOf reads the EtherType at b[12:14]. Caller guarantees len(b) ≥ 14.
+func ethTypeOf(b []byte) uint16 {
+	return binary.BigEndian.Uint16(b[12:14])
+}
+
+// --------------- Public API ---------------
+
+// WrapEth borrows a DataFrame from the global pool and stamps an
+// Ethernet-only frame (no VXLAN header) into its backing buffer. Returns
+// the *DataFrame; caller obtains the wire bytes via df.Bytes() and MUST
+// release it via PutFrame after the bytes have been consumed.
+//
+// Replaces the old `make([]byte, ...) + 2 × copy` pattern with a single
+// pool-borrow + the unavoidable header/payload copies. The returned
+// df.size sets up Bytes()/Frame()/EtherType() / etc to read the eth
+// header at offset 0 (note: VxlanHeaderSize-shifted accessors like
+// DstMAC/SrcMAC/EtherType assume a VXLAN prefix and will be wrong here
+// — use ParseEth on df.Bytes() if you need to introspect).
+func WrapEth(dstMAC, srcMAC VMAC, ethType uint16, payload []byte) *DataFrame {
+	df := GetFrame()
+	WriteEthHeader(df.buf[:], dstMAC, srcMAC, ethType)
+	copy(df.buf[EthHeaderSize:], payload)
+	df.size = EthHeaderSize + len(payload)
+	return df
 }
 
 // WriteEthHeader stamps an Ethernet header at dst[0:14].
 // dst must have at least EthHeaderSize bytes of capacity.
+// Used by DataFrame.Encode and by WrapEth.
 func WriteEthHeader(dst []byte, dstMAC, srcMAC VMAC, ethType uint16) {
 	_ = dst[EthHeaderSize-1] // bounds hint
 	copy(dst[0:6], dstMAC[:])
@@ -35,18 +70,20 @@ func WriteEthHeader(dst []byte, dstMAC, srcMAC VMAC, ethType uint16) {
 }
 
 // ParseEth returns (dstMAC, srcMAC, ethType, payload) of an Ethernet frame.
-// The returned slices alias into frame — do not mutate.
+// The returned payload slice aliases into frame — do not mutate.
 func ParseEth(frame []byte) (dstMAC, srcMAC VMAC, ethType uint16, payload []byte, ok bool) {
 	if len(frame) < EthHeaderSize {
 		return
 	}
-	copy(dstMAC[:], frame[0:6])
-	copy(srcMAC[:], frame[6:12])
-	ethType = binary.BigEndian.Uint16(frame[12:14])
+	dstMAC = ethDstMAC(frame)
+	srcMAC = ethSrcMAC(frame)
+	ethType = ethTypeOf(frame)
 	payload = frame[EthHeaderSize:]
 	ok = true
 	return
 }
+
+// --------------- Keepalive ---------------
 
 // EtherTypeKeepalive is the EtherType used for client↔operator keepalive frames.
 // Picked from the IEEE "local/experimental" range so it cannot collide with
@@ -65,10 +102,7 @@ var KeepaliveZeroMAC = VMAC{}
 // (dst=all-zero, type=EtherTypeKeepalive). Returns the client's src MAC.
 func IsKeepaliveRequest(frame []byte) (srcMAC VMAC, ok bool) {
 	dst, src, ethType, _, parsed := ParseEth(frame)
-	if !parsed || ethType != EtherTypeKeepalive {
-		return VMAC{}, false
-	}
-	if dst != KeepaliveZeroMAC {
+	if !parsed || ethType != EtherTypeKeepalive || dst != KeepaliveZeroMAC {
 		return VMAC{}, false
 	}
 	return src, true
@@ -84,26 +118,14 @@ func IsKeepaliveReply(frame []byte, selfMAC VMAC) bool {
 	return dst == selfMAC && src == KeepaliveZeroMAC
 }
 
-// BuildKeepaliveRequest constructs a client→operator keepalive frame.
-func BuildKeepaliveRequest(selfMAC VMAC) []byte {
+// BuildKeepaliveRequest constructs a client→operator keepalive frame
+// inside a pooled DataFrame. Caller releases via PutFrame.
+func BuildKeepaliveRequest(selfMAC VMAC) *DataFrame {
 	return WrapEth(KeepaliveZeroMAC, selfMAC, EtherTypeKeepalive, nil)
 }
 
-// BuildKeepaliveReply constructs an operator→client keepalive reply frame.
-func BuildKeepaliveReply(clientMAC VMAC) []byte {
+// BuildKeepaliveReply constructs an operator→client keepalive reply frame
+// inside a pooled DataFrame. Caller releases via PutFrame.
+func BuildKeepaliveReply(clientMAC VMAC) *DataFrame {
 	return WrapEth(clientMAC, KeepaliveZeroMAC, EtherTypeKeepalive, nil)
-}
-
-// EthTypeFromIP picks the EtherType based on an inner IP packet's version nibble.
-func EthTypeFromIP(ipPacket []byte) uint16 {
-	if len(ipPacket) == 0 {
-		return 0
-	}
-	switch ipPacket[0] >> 4 {
-	case 4:
-		return EtherTypeIPv4
-	case 6:
-		return EtherTypeIPv6
-	}
-	return 0
 }

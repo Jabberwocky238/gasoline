@@ -1,9 +1,8 @@
 package common
 
 import (
-	"encoding/binary"
 	"fmt"
-	"net"
+	"net/netip"
 	"sync"
 )
 
@@ -53,6 +52,11 @@ type DataFrame struct {
 	size int
 }
 
+// Buf exposes the full backing array so a recv path (e.g. port.Conn.ReadBatch)
+// can write directly into it. After the kernel writes n bytes, call
+// (or have the container call) commitSize(n).
+func (f *DataFrame) Buf() []byte { return f.buf[:] }
+
 // --------------- Lazy accessors (slice into buf) ---------------
 
 // Size returns the total wire size of the frame.
@@ -69,22 +73,22 @@ func (f *DataFrame) VNI() VNI {
 	return VNIFromBytes3([3]byte{f.buf[4], f.buf[5], f.buf[6]})
 }
 
-// DstMAC returns the inner Ethernet destination MAC.
+// DstMAC returns the inner Ethernet destination MAC. Slices into the
+// inner-Ethernet region of buf and delegates to the shared ethDstMAC
+// helper (also used by ethernet.go's standalone parsers).
 func (f *DataFrame) DstMAC() VMAC {
-	var m VMAC
-	if f.size >= VxlanHeaderSize+6 {
-		copy(m[:], f.buf[VxlanHeaderSize:VxlanHeaderSize+6])
+	if f.size < VxlanHeaderSize+6 {
+		return VMAC{}
 	}
-	return m
+	return ethDstMAC(f.buf[VxlanHeaderSize:f.size])
 }
 
 // SrcMAC returns the inner Ethernet source MAC.
 func (f *DataFrame) SrcMAC() VMAC {
-	var m VMAC
-	if f.size >= VxlanHeaderSize+12 {
-		copy(m[:], f.buf[VxlanHeaderSize+6:VxlanHeaderSize+12])
+	if f.size < VxlanHeaderSize+12 {
+		return VMAC{}
 	}
-	return m
+	return ethSrcMAC(f.buf[VxlanHeaderSize:f.size])
 }
 
 // EtherType returns the inner Ethernet EtherType (0x0800 / 0x86DD).
@@ -92,7 +96,7 @@ func (f *DataFrame) EtherType() uint16 {
 	if f.size < VxlanHeaderSize+EthHeaderSize {
 		return 0
 	}
-	return binary.BigEndian.Uint16(f.buf[VxlanHeaderSize+12 : VxlanHeaderSize+14])
+	return ethTypeOf(f.buf[VxlanHeaderSize:f.size])
 }
 
 // Frame returns the inner Ethernet frame (Eth header + payload).
@@ -111,8 +115,8 @@ func (f *DataFrame) Packet() []byte {
 	return f.buf[VxlanHeaderSize+EthHeaderSize : f.size]
 }
 
-// Reset clears the frame for reuse. Only size needs zeroing — buf contents
-// will be overwritten on the next Encode/Decode.
+// Reset clears the frame for reuse. Only size + Endpoint need zeroing —
+// buf contents will be overwritten on the next Encode/Decode/recv.
 func (f *DataFrame) Reset() {
 	f.size = 0
 }
@@ -153,7 +157,7 @@ func (f *DataFrame) EncodeFrame(vni VNI, ethFrame []byte) []byte {
 // then VXLAN-wraps it. New code should build the Eth frame upstream and
 // call EncodeFrame.
 func (f *DataFrame) Encode(vni VNI, srcVMAC, dstVMAC VMAC, packet []byte) []byte {
-	version := InnerIPVersion(packet)
+	version := int(packet[0] >> 4)
 	mtu := MTUFor(version)
 	if mtu == 0 {
 		panic(fmt.Sprintf("dataframe: unknown IP version for packet[0]=0x%02x", packet[0]))
@@ -215,31 +219,17 @@ func PutFrame(f *DataFrame) {
 // MaxBatchSize caps the number of frames in one DataFrameContainer.
 // Matches OVS's NETDEV_MAX_BURST — each batch is one unit of work
 // passed between pipeline stages (RX → decode → Forward → TX).
-const MaxBatchSize = 32
+const MaxBatchSize = 128
 
-// DataFrameContainer aggregates a batch of *DataFrame pointers along with
-// per-batch context. The container is empty on Get — frames come from the
-// DataFrame pool via GetFrame() and are Push-ed in; on Put the container
-// releases each frame back to the frame pool before it returns itself to
-// the container pool.
-//
-// Design: OVS dp_packet_batch + WireGuard Queue*Container.  Each pipeline
-// stage operates on a whole container — the channel/mutex cost of passing
-// the container is amortised across up to MaxBatchSize frames.
-//
-// Fields:
-//
-//	frames   : slot array of borrowed *DataFrame pointers (nil when empty)
-//	count    : number of live frames (0 ≤ count ≤ MaxBatchSize)
-//	Endpoint : per-batch UDP endpoint (source on RX, destination on TX)
-//	Mu       : container-wide mutex for cross-stage synchronisation
-//	Drop     : true if any stage marks the batch as undeliverable
 type DataFrameContainer struct {
-	frames   [MaxBatchSize]*DataFrame
-	count    int
-	Endpoint *net.UDPAddr
-	Mu       sync.Mutex
-	Drop     bool
+	Frames [MaxBatchSize]*DataFrame
+	bufs   [MaxBatchSize][]byte // bufs[i] aliases Frames[i].buf[:]
+	Sizes  [MaxBatchSize]int
+	Addrs  [MaxBatchSize]netip.AddrPort
+	count  int
+
+	Mu   sync.Mutex
+	Drop bool
 }
 
 // Count returns the number of live frames in the batch.
@@ -248,47 +238,33 @@ func (c *DataFrameContainer) Count() int { return c.count }
 // Full reports whether the batch has reached MaxBatchSize.
 func (c *DataFrameContainer) Full() bool { return c.count >= MaxBatchSize }
 
-// Push appends f to the batch. Returns false if the batch is already full.
-// The container takes ownership of f — do not call PutFrame on it yourself;
-// it will be released when the container is Put back.
-func (c *DataFrameContainer) Push(f *DataFrame) bool {
-	if c.count >= MaxBatchSize {
-		return false
-	}
-	c.frames[c.count] = f
-	c.count++
-	return true
-}
-
-// Frames returns a slice view of the live frames ([0, count)).
+// Live returns a slice view of the live frames ([0, count)).
 // Consumers iterate this; do not append — capacity is MaxBatchSize.
-func (c *DataFrameContainer) Frames() []*DataFrame { return c.frames[:c.count] }
+func (c *DataFrameContainer) Live() []*DataFrame { return c.Frames[:c.count] }
 
-// Reset releases each live frame back to the DataFrame pool, nils all
-// slots, and clears per-batch metadata. Called automatically by
-// PutDataFrameContainer.
+// Reset clears per-batch state on the owned frames + count + Drop. The
+// underlying DataFrame slots and bufs slab are kept (re-used next Get).
 func (c *DataFrameContainer) Reset() {
 	for i := 0; i < c.count; i++ {
-		PutFrame(c.frames[i])
-		c.frames[i] = nil
+		c.Frames[i].size = 0
 	}
 	c.count = 0
-	c.Endpoint = nil
 	c.Drop = false
 }
 
 // DefaultDataFrameContainerPool is the global batch-container pool.
-// Initialised in init(). A fresh container has all slots nil and count=0.
+// Initialised in init().
 var DefaultDataFrameContainerPool *WaitPool
 
-// GetDataFrameContainer takes one empty container from the pool.
-// Fill it via Push(); release via PutDataFrameContainer.
+// GetDataFrameContainer takes one container from the pool. The container
+// owns its own DataFrames across Get/Put cycles — caller must NOT release
+// individual frames via PutFrame.
 func GetDataFrameContainer() *DataFrameContainer {
 	return DefaultDataFrameContainerPool.Get().(*DataFrameContainer)
 }
 
 // PutDataFrameContainer returns a container to the pool after Reset()
-// (which releases each live frame back to the DataFrame pool).
+// (clears per-batch state on the owned frames, keeps the slot array).
 func PutDataFrameContainer(c *DataFrameContainer) {
 	c.Reset()
 	DefaultDataFrameContainerPool.Put(c)

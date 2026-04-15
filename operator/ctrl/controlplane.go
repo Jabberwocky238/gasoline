@@ -250,20 +250,6 @@ func (c *ControlPlane) LookupRemoteByVMAC(vni common.VNI, cid common.VMAC) (sess
 	return sid, info.OperatorUUID, true
 }
 
-// LookupRemoteByIP resolves a destination IP to (sessionID, vmac, operatorUUID).
-// Used on client ingress to translate IP → ClientID before handing to the MAC-based data plane.
-func (c *ControlPlane) LookupRemoteByIP(vni common.VNI, dstIP netip.Addr) (sessionID [16]byte, cid common.VMAC, operatorUUID [16]byte, found bool) {
-	vnet, ok := c.Registry.GetVNet(vni)
-	if !ok {
-		return [16]byte{}, common.VMAC{}, [16]byte{}, false
-	}
-	sid, info, ok := vnet.LookupByIP(dstIP)
-	if !ok {
-		return [16]byte{}, common.VMAC{}, [16]byte{}, false
-	}
-	return sid, info.VMAC, info.OperatorUUID, true
-}
-
 // --------------- bootstrap / discover ---------------
 
 func (c *ControlPlane) bootstrap() {

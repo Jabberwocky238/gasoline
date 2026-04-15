@@ -10,8 +10,8 @@ import (
 	log "github.com/sirupsen/logrus"
 	socks5 "github.com/things-go/go-socks5"
 
+	tap "github.com/jabberwocky238/gasoline/client/vtap"
 	"github.com/jabberwocky238/gasoline/common"
-	tap "github.com/jabberwocky238/gasoline/device/vtap"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/transport"
 	"github.com/jabberwocky238/gasoline/transport/quic"

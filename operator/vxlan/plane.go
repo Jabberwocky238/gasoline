@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"sync"
 
 	log "github.com/sirupsen/logrus"
 
@@ -28,10 +27,9 @@ import (
 type Plane struct {
 	conn  *net.UDPConn
 	table *MACTable
+	done  chan struct{} // immutable after New; closed exactly once via closed guard
 
-	mu     sync.Mutex
-	closed bool
-	done   chan struct{}
+	closed *common.MutexGuard[bool]
 }
 
 // New constructs a Plane bound to the given UDP socket. The Plane does
@@ -39,9 +37,10 @@ type Plane struct {
 // conn — Close will close it.
 func New(conn *net.UDPConn) *Plane {
 	return &Plane{
-		conn:  conn,
-		table: NewMACTable(),
-		done:  make(chan struct{}),
+		conn:   conn,
+		table:  NewMACTable(),
+		done:   make(chan struct{}),
+		closed: common.WithGuard(false),
 	}
 }
 
@@ -53,19 +52,20 @@ func (p *Plane) Start() {
 	go p.RxLoop()
 }
 
-// Close stops the RxLoop and closes the underlying socket.
+// Close stops the RxLoop and closes the underlying socket. Idempotent.
 func (p *Plane) Close() error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.closed {
+	first := false
+	p.closed.Write(func(c *bool) {
+		if !*c {
+			*c = true
+			close(p.done)
+			first = true
+		}
+	})
+	if !first || p.conn == nil {
 		return nil
 	}
-	p.closed = true
-	close(p.done)
-	if p.conn != nil {
-		return p.conn.Close()
-	}
-	return nil
+	return p.conn.Close()
 }
 
 // RegisterPort attaches a local Port at (vni, mac).

@@ -53,15 +53,6 @@ var DefaultBufferPool = NewWaitPool(0, func() any {
 	return &buf
 })
 
-// InitBufferPool re-initializes the global pool with a bounded max.
-// Call once at startup before any Get/Put.
-func InitBufferPool(max uint32) {
-	DefaultBufferPool = NewWaitPool(max, func() any {
-		buf := make([]byte, MaxPacketSize)
-		return &buf
-	})
-}
-
 // GetBuffer retrieves a buffer from the pool.
 func GetBuffer() *[]byte {
 	return DefaultBufferPool.Get().(*[]byte)

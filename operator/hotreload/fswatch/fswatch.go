@@ -1,4 +1,6 @@
-package operator
+// Package fswatch hotreloads VNet configs from a directory of `*.yaml`
+// files into the operator's VNetPoolMap + AuthResolver.
+package fswatch
 
 import (
 	"context"
@@ -14,6 +16,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/jabberwocky238/gasoline/common"
+	"github.com/jabberwocky238/gasoline/operator"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
 )
 
@@ -21,7 +24,7 @@ import (
 // dynamically updates the in-memory VNetPoolMap and AuthResolver.
 type Watcher struct {
 	dir      string
-	pools    *VNetPoolMap
+	pools    *operator.VNetPoolMap
 	resolver *auth.MapResolver
 	watcher  *fsnotify.Watcher
 	seed     uint32
@@ -31,7 +34,7 @@ type Watcher struct {
 	tracked map[string]common.VNI // filename -> VNI currently loaded
 }
 
-func NewWatcher(ctx context.Context, dir string, pools *VNetPoolMap, resolver *auth.MapResolver, logger *log.Logger) (*Watcher, error) {
+func NewWatcher(ctx context.Context, dir string, pools *operator.VNetPoolMap, resolver *auth.MapResolver, logger *log.Logger) (*Watcher, error) {
 	fw, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
@@ -73,6 +76,8 @@ func NewWatcher(ctx context.Context, dir string, pools *VNetPoolMap, resolver *a
 	go w.loop(ctx)
 	return w, nil
 }
+
+func (w *Watcher) Close() error { return w.watcher.Close() }
 
 func (w *Watcher) loop(ctx context.Context) {
 	defer w.watcher.Close()
@@ -135,7 +140,7 @@ func (w *Watcher) loadFile(path string) {
 	w.tracked[name] = vni
 	w.mu.Unlock()
 
-	pool := NewVNetPool(vni, prefix, w.seed)
+	pool := operator.NewVNetPool(vni, prefix, w.seed)
 	w.pools.Add(vni, pool)
 
 	authStr := ""

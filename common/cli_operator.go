@@ -18,6 +18,7 @@ func RegisterOperatorFlags(fs *flag.FlagSet) func() *OperatorConfig {
 	statsAddr := fs.String("stats", "", "stats API listen address")
 	discover := fs.String("discover", "", "seed operator addresses for discovery (comma-separated)")
 	watchDir := fs.String("watch", "", "directory to watch for vnet config files")
+	enableK8s := fs.Bool("enable-k8s", false, "enable k8s VNetConfig informer hot-reload backend")
 	logLevel := fs.String("log-level", "info", "log level: trace, debug, info, warn, error")
 
 	return func() *OperatorConfig {
@@ -73,6 +74,14 @@ func RegisterOperatorFlags(fs *flag.FlagSet) func() *OperatorConfig {
 		result.StatsAddr = *statsAddr
 		result.DiscoverAddrs = parseDiscoverAddrs(*discover)
 		result.WatchDir = *watchDir
+		result.EnableK8s = *enableK8s
+		// Namespace comes from the standard downward-API env var injected
+		// on a gasoline-operator pod; kubeconfig is unset → in-cluster.
+		result.K8sNamespace = os.Getenv("POD_NAMESPACE")
+		if result.K8sNamespace == "" && result.EnableK8s {
+			fmt.Fprintf(os.Stderr, "k8s: $POD_NAMESPACE env var must be set when --enable-k8s is true\n")
+			os.Exit(1)
+		}
 		result.LogLevel = *logLevel
 		return result
 	}

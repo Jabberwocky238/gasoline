@@ -1,0 +1,203 @@
+# kubectl apply -f scripts/gasoline-deployment.yaml
+# kubectl apply -f scripts/k8scrd.sample.yaml
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gasoline
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: vnetconfigs.gasoline.jabberwocky238.io
+spec:
+  group: gasoline.jabberwocky238.io
+  scope: Namespaced
+  names:
+    plural: vnetconfigs
+    singular: vnetconfig
+    kind: VNetConfig
+    listKind: VNetConfigList
+    shortNames:
+      - vnc
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: VNI
+          type: integer
+          jsonPath: .spec.vnet
+        - name: CIDR
+          type: string
+          jsonPath: .spec.cidr
+        - name: Applied
+          type: date
+          jsonPath: .status.lastApplied
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: [vnet, cidr]
+              properties:
+                vnet:
+                  type: integer
+                  minimum: 0
+                  maximum: 16777215
+                cidr:
+                  type: string
+                auth:
+                  type: string
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gasoline-operator
+  namespace: gasoline
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gasoline-operator
+rules:
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "create"]
+  - apiGroups: ["gasoline.jabberwocky238.io"]
+    resources: ["vnetconfigs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["gasoline.jabberwocky238.io"]
+    resources: ["vnetconfigs/status"]
+    verbs: ["update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gasoline-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gasoline-operator
+subjects:
+  - kind: ServiceAccount
+    name: gasoline-operator
+    namespace: gasoline
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: gasoline-operator
+  namespace: gasoline
+  labels:
+    app: gasoline-operator
+spec:
+  selector:
+    matchLabels:
+      app: gasoline-operator
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: gasoline-operator
+    spec:
+      serviceAccountName: gasoline-operator
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: operator
+          image: ghcr.io/jabberwocky238/gasoline:latest # TODO: pin a digest
+          imagePullPolicy: Always
+          args:
+            - "operator"
+            - "--listen=quic://:20000;tls://:20001;udp://:20002"
+            - "--op-listen=:5555;$(POD_IP):5555"
+            - "--auth=noauth"
+            - "--enable-k8s"
+            - "--discover=gasoline-operator-peers.$(POD_NAMESPACE).svc.cluster.local:5555"
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          ports:
+            - name: quic
+              containerPort: 20000
+              protocol: UDP
+              hostPort: 20000
+            - name: tls
+              containerPort: 20001
+              protocol: TCP
+              hostPort: 20001
+            - name: udp
+              containerPort: 20002
+              protocol: UDP
+              hostPort: 20002
+            - name: ctrl-tcp
+              containerPort: 5555
+              protocol: TCP
+            - name: ctrl-udp
+              containerPort: 5555
+              protocol: UDP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gasoline-operator
+  namespace: gasoline
+  labels:
+    app: gasoline-operator
+spec:
+  type: ClusterIP
+  selector:
+    app: gasoline-operator
+  internalTrafficPolicy: Local       # client traffic stays on caller's node
+  trafficDistribution: PreferClose   # k8s ≥ 1.31; ignored on older clusters
+  ports:
+    - name: quic
+      port: 20000
+      targetPort: 20000
+      protocol: UDP
+    - name: tls
+      port: 20001
+      targetPort: 20001
+      protocol: TCP
+    - name: udp
+      port: 20002
+      targetPort: 20002
+      protocol: UDP
+---
+# headless: DNS resolves to every peer pod's IP, used by --discover
+apiVersion: v1
+kind: Service
+metadata:
+  name: gasoline-operator-peers
+  namespace: gasoline
+  labels:
+    app: gasoline-operator
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    app: gasoline-operator
+  publishNotReadyAddresses: true
+  ports:
+    - name: ctrl-tcp
+      port: 5555
+      targetPort: 5555
+      protocol: TCP
+    - name: ctrl-udp
+      port: 5555
+      targetPort: 5555
+      protocol: UDP

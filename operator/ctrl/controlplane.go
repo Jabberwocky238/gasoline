@@ -132,6 +132,8 @@ func (c *ControlPlane) Stop() {
 }
 
 // DialOperator connects to a remote operator, registers, and adds as peer.
+// Silently skips when the remote turns out to be ourselves (a headless DNS
+// expansion will include our own IP).
 func (c *ControlPlane) DialOperator(addr string) error {
 	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -149,6 +151,14 @@ func (c *ControlPlane) DialOperator(addr string) error {
 
 	var remoteUUID [16]byte
 	copy(remoteUUID[:], resp.Uuid)
+	if remoteUUID == c.uuid {
+		conn.Close()
+		return nil
+	}
+	if _, ok := c.Peers.Get(remoteUUID); ok {
+		conn.Close()
+		return nil
+	}
 	c.Peers.Add(NewPeer(remoteUUID, resp.ExternalAddr, conn))
 	c.Registry.SetOperator(remoteUUID, &OperatorInfo{Addr: resp.ExternalAddr})
 	c.log.Infof("Registered with operator %x at %s", remoteUUID, resp.ExternalAddr)
@@ -257,9 +267,11 @@ func (c *ControlPlane) bootstrap() {
 		if addr == "" {
 			continue
 		}
-		c.log.Infof("Bootstrapping from seed %s", addr)
-		if err := c.DialOperator(addr); err != nil {
-			c.log.Errorf("Bootstrap dial %s: %v", addr, err)
+		for _, expanded := range expandHost(c.ctx, addr, c.log) {
+			c.log.Infof("Bootstrapping from seed %s", expanded)
+			if err := c.DialOperator(expanded); err != nil {
+				c.log.Errorf("Bootstrap dial %s: %v", expanded, err)
+			}
 		}
 	}
 	for _, peer := range c.Peers.All() {
@@ -270,6 +282,39 @@ func (c *ControlPlane) bootstrap() {
 		}
 		c.processDiscoverResp(resp)
 	}
+}
+
+// expandHost resolves the host portion of "host:port" via the system DNS
+// resolver and returns one "ip:port" entry per A/AAAA record. Required
+// for Kubernetes headless Services where the DNS name maps to N peer pod
+// IPs and we want one Peer entry per IP — gRPC's pick_first balancer
+// would otherwise stick to a single backend.
+//
+// Falls back to [addr] verbatim when:
+//   - the host is already an IP literal (LookupHost returns just it);
+//   - SplitHostPort fails (callers handed us bare junk — let the dialer
+//     surface the error);
+//   - the lookup fails (transient DNS hiccup; let dial fail loudly).
+func expandHost(ctx context.Context, addr string, logger *log.Logger) []string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return []string{addr}
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return []string{addr}
+	}
+	ips, err := net.DefaultResolver.LookupHost(ctx, host)
+	if err != nil || len(ips) == 0 {
+		if logger != nil {
+			logger.Warnf("dns lookup %s: %v", host, err)
+		}
+		return []string{addr}
+	}
+	out := make([]string, 0, len(ips))
+	for _, ip := range ips {
+		out = append(out, net.JoinHostPort(ip, port))
+	}
+	return out
 }
 
 func (c *ControlPlane) processDiscoverResp(resp *DiscoverResp) {

@@ -27,12 +27,12 @@ import (
 	transportUdp "github.com/jabberwocky238/gasoline/transport/udp"
 )
 
-// Operator wires together: client transport listener, control plane (gRPC),
-// and a vxlan.Plane that handles all L2 forwarding (local + inter-operator).
-//
-// The data plane is now entirely owned by Plane; Operator only provides
-// orchestration (accept clients, register them as Ports on the Plane,
-// shovel client→Conn frames into Plane.Forward).
+type HotReloader interface {
+	Close() error
+}
+
+type HotReloaderBuilder func(pools *VNetPoolMap, resolver *auth.MapResolver, logger *log.Logger) (HotReloader, error)
+
 type Operator struct {
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -45,8 +45,36 @@ type Operator struct {
 	Stats           *stats.Engine
 	VNetPools       *VNetPoolMap
 
+	authResolver *auth.MapResolver
+
 	dataPort *net.UDPConn
 	plane    *vxlan.Plane
+
+	Reloaders map[string]HotReloader
+}
+
+// RegisterReloader builds the HotReloader via builder with the operator's
+// own VNetPools / authResolver / logger, then stashes it under name.
+// Init-time only: not safe for concurrent callers.
+func (o *Operator) RegisterReloader(name string, builder HotReloaderBuilder) error {
+	if builder == nil {
+		return fmt.Errorf("operator: nil HotReloaderBuilder for %q", name)
+	}
+	r, err := builder(o.VNetPools, o.authResolver, o.log)
+	if err != nil {
+		return err
+	}
+	if r == nil {
+		return fmt.Errorf("operator: builder for %q returned nil reloader", name)
+	}
+	if o.Reloaders == nil {
+		o.Reloaders = make(map[string]HotReloader)
+	}
+	if old, ok := o.Reloaders[name]; ok && old != nil {
+		_ = old.Close()
+	}
+	o.Reloaders[name] = r
+	return nil
 }
 
 // connPort wraps a transport.Conn into a vxlan.Port.
@@ -66,6 +94,7 @@ func New(cfg *common.OperatorConfig) (*Operator, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	var pools *VNetPoolMap
+	var resolver *auth.MapResolver // shared with HotReloaderBuilders via op.authResolver
 	clientListeners := make(map[string]transport.Listener)
 
 	if cfg.Network != "" {
@@ -93,7 +122,7 @@ func New(cfg *common.OperatorConfig) (*Operator, error) {
 			cancel()
 			return nil, fmt.Errorf("auth: %w", err)
 		}
-		resolver := auth.NewMapResolver(defaultAuth)
+		resolver = auth.NewMapResolver(defaultAuth)
 		for vni, authStr := range cfg.NetworkAuth {
 			vnetAuth, err := auth.ParseServerAuth(authStr)
 			if err != nil {
@@ -133,6 +162,7 @@ func New(cfg *common.OperatorConfig) (*Operator, error) {
 		clients:         NewClientTable(),
 		Stats:           stats.New(cfg.StatsAddr),
 		VNetPools:       pools,
+		authResolver:    resolver,
 	}
 
 	ctrlCfg := &ctrl.Config{
@@ -247,6 +277,12 @@ func (o *Operator) Start() error {
 func (o *Operator) Close() error {
 	o.cancel()
 	o.Ctrl.Stop()
+	for _, r := range o.Reloaders {
+		if r != nil {
+			_ = r.Close()
+		}
+	}
+	o.Reloaders = nil
 	if o.plane != nil {
 		o.plane.Close()
 	}

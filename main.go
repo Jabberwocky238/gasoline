@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -12,6 +13,9 @@ import (
 	"github.com/jabberwocky238/gasoline/client"
 	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/operator"
+	"github.com/jabberwocky238/gasoline/operator/hotreload/fswatch"
+	hotreloadk8s "github.com/jabberwocky238/gasoline/operator/hotreload/k8s"
+	"github.com/jabberwocky238/gasoline/protocol/auth"
 )
 
 func main() {
@@ -36,10 +40,38 @@ func runOperator(args []string) {
 	resolve := common.RegisterOperatorFlags(fs)
 	fs.Parse(args)
 
-	op, err := operator.New(resolve())
+	cfg := resolve()
+	op, err := operator.New(cfg)
 	if err != nil {
 		log.Fatalf("Operator init: %v", err)
 	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if cfg.WatchDir != "" {
+		if err := op.RegisterReloader("fs", func(pools *operator.VNetPoolMap, resolver *auth.MapResolver, logger *log.Logger) (operator.HotReloader, error) {
+			return fswatch.NewWatcher(ctx, cfg.WatchDir, pools, resolver, logger)
+		}); err != nil {
+			log.Fatalf("fswatch reloader: %v", err)
+		}
+	}
+	if cfg.EnableK8s {
+		if cfg.K8sNamespace == "" {
+			log.Fatalf("k8s reloader: $POD_NAMESPACE not set")
+		}
+		if err := op.RegisterReloader("k8s", func(pools *operator.VNetPoolMap, resolver *auth.MapResolver, logger *log.Logger) (operator.HotReloader, error) {
+			return hotreloadk8s.NewWatcher(ctx, hotreloadk8s.Config{
+				Namespace: cfg.K8sNamespace,
+				Pools:     pools,
+				Resolver:  resolver,
+				Logger:    logger,
+			})
+		}); err != nil {
+			log.Fatalf("k8s reloader: %v", err)
+		}
+	}
+
 	if err := op.Start(); err != nil {
 		log.Fatalf("Operator start: %v", err)
 	}

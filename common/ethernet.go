@@ -2,42 +2,6 @@ package common
 
 import "encoding/binary"
 
-// Ethernet frame helpers.
-//
-// Userspace L2 simulation: the client's TUN reads raw IP packets; we wrap
-// them into a fake Ethernet frame so the rest of the data plane (operator,
-// VXLAN, remote operator, peer client) only ever sees L2 frames. The real
-// OS network stack is not involved in MAC resolution — the client-side
-// ARP table is a pure userspace map (see phase-2 work).
-//
-// Wire layout of a frame emitted by WrapEth:
-//   [dstMAC:6][srcMAC:6][ethType:2][payload...]
-//
-// The byte-level accessors (ethDstMAC / ethSrcMAC / ethTypeOf) are shared
-// with dataframe.go's DataFrame methods (offsets there are
-// VxlanHeaderSize-shifted).
-
-// --------------- Shared byte-level accessors ---------------
-
-// ethDstMAC reads the destination MAC at b[0:6]. Caller guarantees len(b) ≥ 6.
-func ethDstMAC(b []byte) VMAC {
-	var m VMAC
-	copy(m[:], b[0:6])
-	return m
-}
-
-// ethSrcMAC reads the source MAC at b[6:12]. Caller guarantees len(b) ≥ 12.
-func ethSrcMAC(b []byte) VMAC {
-	var m VMAC
-	copy(m[:], b[6:12])
-	return m
-}
-
-// ethTypeOf reads the EtherType at b[12:14]. Caller guarantees len(b) ≥ 14.
-func ethTypeOf(b []byte) uint16 {
-	return binary.BigEndian.Uint16(b[12:14])
-}
-
 // --------------- Public API ---------------
 
 // WrapEth borrows a DataFrame from the global pool and stamps an
@@ -75,9 +39,9 @@ func ParseEth(frame []byte) (dstMAC, srcMAC VMAC, ethType uint16, payload []byte
 	if len(frame) < EthHeaderSize {
 		return
 	}
-	dstMAC = ethDstMAC(frame)
-	srcMAC = ethSrcMAC(frame)
-	ethType = ethTypeOf(frame)
+	dstMAC = VMAC(frame[0:6])
+	srcMAC = VMAC(frame[6:12])
+	ethType = binary.BigEndian.Uint16(frame[12:14])
 	payload = frame[EthHeaderSize:]
 	ok = true
 	return

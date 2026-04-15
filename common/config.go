@@ -217,6 +217,8 @@ type OperatorConfig struct {
 	StatsAddr       string         // stats HTTP API address
 	DiscoverAddrs   []string       // seed operator addresses for bootstrap
 	WatchDir        string         // directory to watch for vnet config files, "" = disabled
+	EnableK8s       bool           // enable the k8s VNetConfig informer hot-reload backend
+	K8sNamespace    string         // namespace for the k8s informer; resolved from $POD_NAMESPACE
 	LogLevel        string         // log level: trace, debug, info, warn, error, fatal, panic
 }
 

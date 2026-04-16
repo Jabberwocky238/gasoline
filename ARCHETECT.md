@@ -25,19 +25,7 @@ kubectl label node node-1 externalip=10.0.0.1
 kubectl label node node-2 externalip=10.0.0.2
 kubectl label node node-3 externalip=10.0.0.3
 
-安装：      
-                                                        
-  curl -sfL https://get.k3s.io | sh -
-                                                                                                                                                                
-  卸载：
-                                                                                                                                                                
-  /usr/local/bin/k3s-uninstall.sh                     
- kubectl get nodes    
 
-  如果是 agent 节点：
-    cat /var/lib/rancher/k3s/server/node-token
- curl -sfL https://get.k3s.io | K3S_URL=https://163.245.211.144:6443 K3S_TOKEN=K10f5f954af5bc36afe4af043752b33bb8c0689cf18d1f273024b3b49176ed0f27d::server:fb5377b5568ddbc8158cb3323d05e6a2 sh -s - --node-label externalip=<该节点的外部IP>
-  /usr/local/bin/k3s-agent-uninstall.sh
 
 gasolines启动时自动连接 <serverip>:6677，server自己维护一个map，包括了所有server和自己到目标server的延迟时间。
 

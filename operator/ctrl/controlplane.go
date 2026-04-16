@@ -268,6 +268,10 @@ func (c *ControlPlane) bootstrap() {
 			continue
 		}
 		for _, expanded := range expandHost(c.ctx, addr, c.log) {
+			// Skip our own address to avoid self-connection.
+			if expanded == c.cfg.ExternalAddr {
+				continue
+			}
 			c.log.Infof("Bootstrapping from seed %s", expanded)
 			if err := c.DialOperator(expanded); err != nil {
 				c.log.Errorf("Bootstrap dial %s: %v", expanded, err)

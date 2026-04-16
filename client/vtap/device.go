@@ -31,6 +31,7 @@ import (
 
 // Device is the unified TUN+Conn TAP device.
 type Device struct {
+	ctx     *common.Gactx // child of the Client's Gactx; carries logger + cancel
 	tun     *tunPkg.Tun
 	conn    transport.Conn
 	selfMAC common.VMAC
@@ -46,8 +47,11 @@ type Device struct {
 }
 
 // New constructs a Device. It does not start any goroutines; call Start.
-func New(tun *tunPkg.Tun, conn transport.Conn, selfMAC common.VMAC, selfIP netip.Prefix) *Device {
+// parent is the Client's Gactx; a child scope is derived so vtap log lines
+// inherit vni/vmac and carry component=vtap.
+func New(parent *common.Gactx, tun *tunPkg.Tun, conn transport.Conn, selfMAC common.VMAC, selfIP netip.Prefix) *Device {
 	d := &Device{
+		ctx:     parent.Child(log.Fields{"component": "vtap"}),
 		tun:     tun,
 		conn:    conn,
 		selfMAC: selfMAC,
@@ -100,6 +104,7 @@ func (d *Device) Close() error {
 	}
 	d.closed = true
 	close(d.done)
+	d.ctx.Cancel()
 	if d.conn != nil {
 		_ = d.conn.Close()
 	}
@@ -153,7 +158,7 @@ func (d *Device) handleFrame(frame []byte) {
 		d.handleARP(payload)
 	case common.EtherTypeIPv4, common.EtherTypeIPv6:
 		if _, err := d.tun.Write(payload); err != nil {
-			log.Errorf("tap: TUN write: %v", err)
+			d.ctx.Logger().Errorf("tap: TUN write: %v", err)
 		}
 	}
 }
@@ -197,7 +202,7 @@ func (d *Device) egressLoop() {
 		n, err := d.tun.Read(*buf)
 		if err != nil {
 			common.PutBuffer(buf)
-			log.Errorf("tap: TUN read: %v", err)
+			d.ctx.Logger().Errorf("tap: TUN read: %v", err)
 			return
 		}
 		if n < 1 {
@@ -227,7 +232,7 @@ func (d *Device) handleEgress(ipPkt []byte) {
 	}
 	queued, firstHit := d.staged.enqueue(dstIP, ipPkt)
 	if !queued {
-		log.Debugf("tap: staged queue full for %s, dropping", dstIP)
+		d.ctx.Logger().Debugf("tap: staged queue full for %s, dropping", dstIP)
 		return
 	}
 	if firstHit {

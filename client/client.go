@@ -1,7 +1,6 @@
 package client
 
 import (
-	"context"
 	"fmt"
 	"net"
 	"net/netip"
@@ -29,9 +28,8 @@ type TunOpener interface {
 // Client orchestrates the handshake then hands off the data plane to a
 // tap.Device that owns TUN ⇄ ARP/Eth ⇄ Conn for the lifetime of the session.
 type Client struct {
-	mu     sync.Mutex
-	ctx    context.Context
-	cancel context.CancelFunc
+	mu  sync.Mutex
+	ctx *common.Gactx // cancel scope + logger, shared with sub-components
 
 	cfg            *common.ClientConfig
 	dialer         transport.Dialer
@@ -67,12 +65,20 @@ func New(cfg *common.ClientConfig) (*Client, error) {
 		return nil, fmt.Errorf("dialer: %w", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	base := cfg.Logger
+	if base == nil {
+		base = log.StandardLogger()
+	}
+	entry := base.WithFields(log.Fields{
+		"component": "client",
+		"vni":       uint32(cfg.VNI),
+		"vmac":      fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x", cfg.VMAC[0], cfg.VMAC[1], cfg.VMAC[2], cfg.VMAC[3], cfg.VMAC[4], cfg.VMAC[5]),
+	})
+
 	return &Client{
 		cfg:    cfg,
 		dialer: dialer,
-		ctx:    ctx,
-		cancel: cancel,
+		ctx:    common.NewGactx(nil, entry),
 	}, nil
 }
 
@@ -86,7 +92,7 @@ func (c *Client) Start() error {
 		return fmt.Errorf("dial: %w", err)
 	}
 	hsCfg := &result.Config
-	log.Infof("Handshake OK: assigned IP %s, allowed %v", hsCfg.IPPrefix.String(), hsCfg.AllowedRanges)
+	c.ctx.Logger().Infof("Handshake OK: assigned IP %s, allowed %v", hsCfg.IPPrefix.String(), hsCfg.AllowedRanges)
 
 	// Store connection info for the caller to retrieve via GetConnInfo().
 	ranges := make([]string, len(hsCfg.AllowedRanges))
@@ -133,15 +139,15 @@ func (c *Client) Start() error {
 		}
 	}
 	c.tun = tunDev
-	log.Infof("TUN interface up: %s", hsCfg.IPPrefix.String())
+	c.ctx.Logger().Infof("TUN interface up: %s", hsCfg.IPPrefix.String())
 
 	// 3. Build the TAP device (TUN ⇄ Conn) and start its loops.
-	c.dev = tap.New(tunDev, conn, c.cfg.VMAC, hsCfg.IPPrefix)
+	c.dev = tap.New(c.ctx, tunDev, conn, c.cfg.VMAC, hsCfg.IPPrefix)
 
 	// 4. Keepalive: random 10–15s ticker, src=selfMAC / dst=all-zero out,
 	//    expects (dst=selfMAC, src=all-zero) back. Hook drops the reply
 	//    before IP/ARP dispatch; Device routes it to NotifyReply.
-	c.keepalive = NewKeepalive(conn, c.cfg.VMAC)
+	c.keepalive = NewKeepalive(c.ctx, conn, c.cfg.VMAC)
 	c.dev.SetKeepaliveHook(c.keepalive.NotifyReply)
 
 	c.dev.Start()
@@ -172,7 +178,7 @@ func (c *Client) ARP() *tap.ARPTable {
 }
 
 func (c *Client) Close() error {
-	c.cancel()
+	c.ctx.Cancel()
 	c.connInfo = nil
 	if c.keepalive != nil {
 		c.keepalive.Stop()
@@ -195,13 +201,14 @@ func (c *Client) startSocks5() error {
 	c.socks5Listener = ln
 
 	server := socks5.NewServer()
+	logger := c.ctx.Logger().WithField("component", "socks5")
 	go func() {
-		log.Infof("SOCKS5 proxy listening on %s", addr)
+		logger.Infof("SOCKS5 proxy listening on %s", addr)
 		if err := server.Serve(ln); err != nil {
 			select {
 			case <-c.ctx.Done():
 			default:
-				log.Errorf("SOCKS5 server error: %v", err)
+				logger.Errorf("SOCKS5 server error: %v", err)
 			}
 		}
 	}()

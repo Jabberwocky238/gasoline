@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 
+	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v3"
 )
 
@@ -224,11 +225,16 @@ type OperatorConfig struct {
 
 // ClientConfig is the declarative configuration consumed by client.New().
 type ClientConfig struct {
-	Endpoint   string   // server address
-	Transport  string   // "tcp", "udp", "quic"
-	AuthStr    string   // auth config string
-	VNI        VNI      // virtual network (24-bit VXLAN identifier)
-	VMAC   VMAC // 6-byte MAC-style forwarding identity
-	TUNName    string   // TUN device name
-	Socks5Port int      // quick-socks5 port, 0 = disabled
+	Endpoint   string // server address
+	Transport  string // "tcp", "udp", "quic"
+	AuthStr    string // auth config string
+	VNI        VNI    // virtual network (24-bit VXLAN identifier)
+	VMAC       VMAC   // 6-byte MAC-style forwarding identity
+	TUNName    string // TUN device name
+	Socks5Port int    // quick-socks5 port, 0 = disabled
+
+	// Logger is the logrus logger injected by the caller. If nil, the client
+	// falls back to logrus.StandardLogger(). Sub-components receive a derived
+	// *logrus.Entry via context (see client.LoggerFrom).
+	Logger *log.Logger
 }

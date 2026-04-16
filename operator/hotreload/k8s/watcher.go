@@ -129,6 +129,12 @@ func (w *Watcher) onUpsert(obj any) {
 		w.log.Errorf("k8s: unexpected event object type %T", obj)
 		return
 	}
+
+	// Skip if we already processed this generation (prevents status-write loop).
+	if og, found, _ := unstructured.NestedInt64(u.Object, "status", "observedGeneration"); found && og == u.GetGeneration() {
+		return
+	}
+
 	var cr VNetConfig
 	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, &cr); err != nil {
 		w.log.Errorf("k8s: decode %s: %v", u.GetName(), err)

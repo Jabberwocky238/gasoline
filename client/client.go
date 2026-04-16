@@ -41,6 +41,15 @@ type Client struct {
 	tun       *tunPkg.Tun
 	dev       *tap.Device
 	keepalive *Keepalive
+
+	connInfo *ConnInfo // populated after successful handshake
+}
+
+// ConnInfo holds the connection details returned by the server handshake.
+type ConnInfo struct {
+	IP            string   `json:"ip"`
+	VMAC          string   `json:"vmac"`
+	AllowedRanges []string `json:"allowed_ranges"`
 }
 
 func (c *Client) SetPlatformTunOpener(opener TunOpener) {
@@ -78,6 +87,17 @@ func (c *Client) Start() error {
 	}
 	hsCfg := &result.Config
 	log.Infof("Handshake OK: assigned IP %s, allowed %v", hsCfg.IPPrefix.String(), hsCfg.AllowedRanges)
+
+	// Store connection info for the caller to retrieve via GetConnInfo().
+	ranges := make([]string, len(hsCfg.AllowedRanges))
+	for i, r := range hsCfg.AllowedRanges {
+		ranges[i] = r.String()
+	}
+	c.connInfo = &ConnInfo{
+		IP:            hsCfg.IPPrefix.String(),
+		VMAC:          fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x", c.cfg.VMAC[0], c.cfg.VMAC[1], c.cfg.VMAC[2], c.cfg.VMAC[3], c.cfg.VMAC[4], c.cfg.VMAC[5]),
+		AllowedRanges: ranges,
+	}
 
 	// 2. Open TUN device.
 	tunAddr := hsCfg.IPPrefix
@@ -136,6 +156,13 @@ func (c *Client) Start() error {
 	return nil
 }
 
+// GetConnInfo returns handshake connection details, or nil if not connected.
+func (c *Client) GetConnInfo() *ConnInfo {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.connInfo
+}
+
 // ARP exposes the device-local ARP table for tooling/seeding.
 func (c *Client) ARP() *tap.ARPTable {
 	if c.dev == nil {
@@ -146,6 +173,7 @@ func (c *Client) ARP() *tap.ARPTable {
 
 func (c *Client) Close() error {
 	c.cancel()
+	c.connInfo = nil
 	if c.keepalive != nil {
 		c.keepalive.Stop()
 	}

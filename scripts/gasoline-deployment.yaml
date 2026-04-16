@@ -129,7 +129,7 @@ spec:
             - "--op-listen=:5555;$(EXTERNAL_IP):5555"
             - "--auth=noauth"
             - "--enable-k8s"
-            - "--discover=gasoline-operator-peers.$(POD_NAMESPACE).svc.cluster.local:5555"
+            - "--discover=163.245.211.144:5555"
           env:
             - name: POD_NAMESPACE
               valueFrom:
@@ -139,25 +139,5 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.labels['externalip']
----
-# headless: DNS resolves to every peer pod's IP, used by --discover
-apiVersion: v1
-kind: Service
-metadata:
-  name: gasoline-operator-peers
-  namespace: gasoline
-  labels:
-    app: gasoline-operator
-spec:
-  type: ClusterIP
-  clusterIP: None
-  selector:
-    app: gasoline-operator
-  publishNotReadyAddresses: true
-  ports:
-    - name: ctrl
-      port: 5555
-      targetPort: 5555
-      protocol: TCP
 ---
 

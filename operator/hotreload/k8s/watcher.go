@@ -98,8 +98,22 @@ func NewWatcher(ctx context.Context, cfg Config) (*Watcher, error) {
 	factory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(dyn, 30*time.Second, cfg.Namespace, nil)
 	informer := factory.ForResource(GroupVersionResource).Informer()
 	if _, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    func(o any) { w.onUpsert(o) },
-		UpdateFunc: func(_, o any) { w.onUpsert(o) },
+		AddFunc: func(o any) { w.onUpsert(o) },
+		UpdateFunc: func(old, cur any) {
+			oldU, _ := old.(*unstructured.Unstructured)
+			curU, _ := cur.(*unstructured.Unstructured)
+			if oldU != nil && curU != nil {
+				// Same resourceVersion → resync, skip.
+				if oldU.GetResourceVersion() == curU.GetResourceVersion() {
+					return
+				}
+				// Same generation → only status/metadata changed, skip.
+				if oldU.GetGeneration() == curU.GetGeneration() {
+					return
+				}
+			}
+			w.onUpsert(cur)
+		},
 		DeleteFunc: func(o any) { w.onDelete(o) },
 	}); err != nil {
 		return nil, fmt.Errorf("k8s: add event handler: %w", err)
@@ -127,11 +141,6 @@ func (w *Watcher) onUpsert(obj any) {
 	u, ok := obj.(*unstructured.Unstructured)
 	if !ok {
 		w.log.Errorf("k8s: unexpected event object type %T", obj)
-		return
-	}
-
-	// Skip if we already processed this generation (prevents status-write loop).
-	if og, found, _ := unstructured.NestedInt64(u.Object, "status", "observedGeneration"); found && og == u.GetGeneration() {
 		return
 	}
 

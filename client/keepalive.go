@@ -1,7 +1,6 @@
 package client
 
 import (
-	"context"
 	"math/rand"
 	"sync"
 	"time"
@@ -25,8 +24,7 @@ type Keepalive struct {
 	minInterval time.Duration
 	maxInterval time.Duration
 
-	ctx    context.Context
-	cancel context.CancelFunc
+	ctx *common.Gactx // child of the Client's Gactx; carries logger + cancel
 
 	mu       sync.Mutex
 	lastSent time.Time
@@ -36,15 +34,15 @@ type Keepalive struct {
 }
 
 // NewKeepalive constructs a keepalive loop for conn. Default cadence is 10–15s.
-func NewKeepalive(conn transport.Conn, selfMAC common.VMAC) *Keepalive {
-	ctx, cancel := context.WithCancel(context.Background())
+// parent is the Client's Gactx; a child scope is derived for Stop() and the
+// logger inherits the parent fields (vni, vmac, ...) plus component=keepalive.
+func NewKeepalive(parent *common.Gactx, conn transport.Conn, selfMAC common.VMAC) *Keepalive {
 	return &Keepalive{
 		conn:        conn,
 		selfMAC:     selfMAC,
 		minInterval: 10 * time.Second,
 		maxInterval: 15 * time.Second,
-		ctx:         ctx,
-		cancel:      cancel,
+		ctx:         parent.Child(log.Fields{"component": "keepalive"}),
 	}
 }
 
@@ -52,7 +50,7 @@ func NewKeepalive(conn transport.Conn, selfMAC common.VMAC) *Keepalive {
 func (k *Keepalive) Start() { go k.loop() }
 
 // Stop halts the ticker.
-func (k *Keepalive) Stop() { k.cancel() }
+func (k *Keepalive) Stop() { k.ctx.Cancel() }
 
 // NotifyReply records that a keepalive reply was observed on the ingress path.
 func (k *Keepalive) NotifyReply() {
@@ -80,7 +78,7 @@ func (k *Keepalive) loop() {
 		case <-t.C:
 		}
 		if err := k.sendOnce(); err != nil {
-			log.Debugf("keepalive: send: %v", err)
+			k.ctx.Logger().Debugf("keepalive: send: %v", err)
 		}
 	}
 }

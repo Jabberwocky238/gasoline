@@ -100,7 +100,11 @@ func runClient(args []string) {
 	resolve := common.RegisterClientFlags(fs)
 	fs.Parse(args)
 
-	c, err := client.New(resolve())
+	cfg := resolve()
+	if cfg.Logger == nil {
+		cfg.Logger = log.StandardLogger()
+	}
+	c, err := client.New(cfg)
 	if err != nil {
 		log.Fatalf("Client init: %v", err)
 	}

@@ -126,10 +126,11 @@ spec:
           args:
             - "operator"
             - "--listen=quic://:20000;tls://:20001;udp://:20002"
-            - "--op-listen=:5555;$(EXTERNAL_IP):5555"
+            - "--op-listen=:5555"
+            - "--op-addr-claim=$(EXTERNAL_IP):5555"
             - "--auth=noauth"
             - "--enable-k8s"
-            - "--discover=163.245.211.144:5555"
+            - "--op-addr-discover=163.245.211.144:5555"
           env:
             - name: POD_NAMESPACE
               valueFrom:

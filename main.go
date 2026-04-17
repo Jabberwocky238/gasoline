@@ -15,6 +15,7 @@ import (
 	"github.com/jabberwocky238/gasoline/operator"
 	"github.com/jabberwocky238/gasoline/operator/hotreload/fswatch"
 	hotreloadk8s "github.com/jabberwocky238/gasoline/operator/hotreload/k8s"
+	"github.com/jabberwocky238/gasoline/operator/hotreload/sigreload"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
 )
 
@@ -49,11 +50,24 @@ func runOperator(args []string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	if cfg.WatchDir != "" {
+	if cfg.EnableFswatch {
+		if cfg.WatchDir == "" {
+			log.Fatalf("fswatch reloader: --enable-fswatch requires --watch-vni=<dir>")
+		}
 		if err := op.RegisterReloader("fs", func(pools *operator.VNetPoolMap, resolver *auth.MapResolver, logger *log.Logger) (operator.HotReloader, error) {
 			return fswatch.NewWatcher(ctx, cfg.WatchDir, pools, resolver, logger)
 		}); err != nil {
 			log.Fatalf("fswatch reloader: %v", err)
+		}
+	}
+	if cfg.EnableSigreload {
+		if cfg.WatchDir == "" {
+			log.Fatalf("sigreload reloader: --enable-sigreload requires --watch-vni=<dir>")
+		}
+		if err := op.RegisterReloader("sig", func(pools *operator.VNetPoolMap, resolver *auth.MapResolver, logger *log.Logger) (operator.HotReloader, error) {
+			return sigreload.NewWatcher(ctx, cfg.WatchDir, pools, resolver, logger)
+		}); err != nil {
+			log.Fatalf("sigreload reloader: %v", err)
 		}
 	}
 	if cfg.EnableK8s {

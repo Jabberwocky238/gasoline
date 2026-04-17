@@ -96,10 +96,12 @@ type FileConfig struct {
 	Mode string `yaml:"mode"` // "operator" or "client"
 
 	// Operator fields
-	Listen    string         `yaml:"listen"` // combined listener spec, e.g. "quic://:8080;tls://127.0.0.1:9000"
-	OpListen  string         `yaml:"op-listen"`
-	Network   []NetworkEntry `yaml:"network"`
-	StatsAddr string         `yaml:"stats"`
+	Listen         string         `yaml:"listen"` // combined listener spec, e.g. "quic://:8080;tls://127.0.0.1:9000"
+	OpListen       string         `yaml:"op-listen"`        // inter-operator bind address
+	OpAddrClaim    string         `yaml:"op-addr-claim"`    // externally-advertised address
+	OpAddrDiscover string         `yaml:"op-addr-discover"` // comma-separated seed addresses
+	Network        []NetworkEntry `yaml:"network"`
+	StatsAddr      string         `yaml:"stats"`
 
 	// Client fields
 	Endpoint  string `yaml:"endpoint"`
@@ -216,7 +218,9 @@ type OperatorConfig struct {
 	Network         string         // "vni:CIDR;..." pairs
 	StatsAddr       string         // stats HTTP API address
 	DiscoverAddrs   []string       // seed operator addresses for bootstrap
-	WatchDir        string         // directory to watch for vnet config files, "" = disabled
+	WatchDir        string         // directory holding per-VNet config files (shared by fswatch + sigreload); "" = disabled
+	EnableFswatch   bool           // enable the inotify-based directory hot-reload backend
+	EnableSigreload bool           // enable the SIGHUP-triggered directory rescan backend
 	EnableK8s       bool           // enable the k8s VNetConfig informer hot-reload backend
 	K8sNamespace    string         // namespace for the k8s informer; resolved from $POD_NAMESPACE
 	LogLevel        string         // log level: trace, debug, info, warn, error, fatal, panic

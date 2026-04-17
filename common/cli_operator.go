@@ -11,13 +11,16 @@ import (
 // Returns a function that resolves flags + config file into OperatorConfig.
 func RegisterOperatorFlags(fs *flag.FlagSet) func() *OperatorConfig {
 	configFile := fs.String("c", "", "config file path (YAML)")
-	opListen := fs.String("op-listen", "0.0.0.0:6677", "operator listen: <bind>;[external]")
+	opListen := fs.String("op-listen", "0.0.0.0:6677", "inter-operator bind address")
+	opAddrClaim := fs.String("op-addr-claim", "", "address this operator claims to peers (host:port, public-reachable)")
+	opAddrDiscover := fs.String("op-addr-discover", "", "seed operator addresses for discovery (comma-separated)")
 	listenSpec := fs.String("listen", "quic://:8443", "client listeners: '<schema>://<addr>[;<schema>://<addr>...]', e.g. 'quic://:8080;tls://127.0.0.1:9000'")
 	authStr := fs.String("auth", "noauth", "auth config string")
 	network := fs.String("network", "0:10.0.0.0/24", "vnetID:CIDR pairs separated by ';'")
 	statsAddr := fs.String("stats", "", "stats API listen address")
-	discover := fs.String("discover", "", "seed operator addresses for discovery (comma-separated)")
-	watchDir := fs.String("watch", "", "directory to watch for vnet config files")
+	watchDir := fs.String("watch-vni", "", "directory holding per-VNet config files (vni.d)")
+	enableFswatch := fs.Bool("enable-fswatch", false, "enable inotify-based hot-reload of --watch-vni dir")
+	enableSigreload := fs.Bool("enable-sigreload", false, "enable SIGHUP-triggered rescan of --watch-vni dir")
 	enableK8s := fs.Bool("enable-k8s", false, "enable k8s VNetConfig informer hot-reload backend")
 	logLevel := fs.String("log-level", "info", "log level: trace, debug, info, warn, error")
 
@@ -34,6 +37,12 @@ func RegisterOperatorFlags(fs *flag.FlagSet) func() *OperatorConfig {
 			}
 			if cfg.OpListen != "" && !isFlagSet(fs, "op-listen") {
 				*opListen = cfg.OpListen
+			}
+			if cfg.OpAddrClaim != "" && !isFlagSet(fs, "op-addr-claim") {
+				*opAddrClaim = cfg.OpAddrClaim
+			}
+			if cfg.OpAddrDiscover != "" && !isFlagSet(fs, "op-addr-discover") {
+				*opAddrDiscover = cfg.OpAddrDiscover
 			}
 			if cfg.Listen != "" && !isFlagSet(fs, "listen") {
 				*listenSpec = cfg.Listen
@@ -57,9 +66,6 @@ func RegisterOperatorFlags(fs *flag.FlagSet) func() *OperatorConfig {
 			}
 		}
 
-		// Parse op-listen: "bind;external"
-		opListenAddr, opExternalAddr := parseOpListen(*opListen)
-
 		specs, err := ParseListenerSpecs(*listenSpec)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Listen: %v\n", err)
@@ -67,13 +73,23 @@ func RegisterOperatorFlags(fs *flag.FlagSet) func() *OperatorConfig {
 		}
 
 		result.ClientListeners = specs
-		result.OpListenAddr = opListenAddr
-		result.OpExternalAddr = opExternalAddr
+		result.OpListenAddr = strings.TrimSpace(*opListen)
+		result.OpExternalAddr = strings.TrimSpace(*opAddrClaim)
+		if result.OpListenAddr == "" || result.OpExternalAddr == "" {
+			fmt.Fprintf(os.Stderr, "op: --op-listen and --op-addr-claim must both be set (got op-listen=%q op-addr-claim=%q)\n",
+				result.OpListenAddr, result.OpExternalAddr)
+			os.Exit(1)
+		}
 		result.AuthStr = *authStr
 		result.Network = *network
 		result.StatsAddr = *statsAddr
-		result.DiscoverAddrs = parseDiscoverAddrs(*discover)
+		result.DiscoverAddrs = parseDiscoverAddrs(*opAddrDiscover)
+		if len(result.DiscoverAddrs) == 0 {
+			fmt.Fprintf(os.Stderr, "op: WARNING: --op-addr-discover is empty; this operator will only know peers that dial in\n")
+		}
 		result.WatchDir = *watchDir
+		result.EnableFswatch = *enableFswatch
+		result.EnableSigreload = *enableSigreload
 		result.EnableK8s = *enableK8s
 		// Namespace comes from the standard downward-API env var injected
 		// on a gasoline-operator pod; kubeconfig is unset → in-cluster.
@@ -85,15 +101,6 @@ func RegisterOperatorFlags(fs *flag.FlagSet) func() *OperatorConfig {
 		result.LogLevel = *logLevel
 		return result
 	}
-}
-
-func parseOpListen(s string) (bind, external string) {
-	parts := strings.SplitN(s, ";", 2)
-	bind = strings.TrimSpace(parts[0])
-	if len(parts) == 2 {
-		external = strings.TrimSpace(parts[1])
-	}
-	return
 }
 
 func parseDiscoverAddrs(s string) []string {

@@ -1,9 +1,10 @@
 # Gasoline Operator Configuration
 # Usage: gasoline operator -c config.sample-server.yaml
 
-listen: "0.0.0.0:8443"
+listen: "quic://0.0.0.0:8443;tls://0.0.0.0:18443"
 op-listen: "0.0.0.0:6677"
-transport: "quic"
+op-addr-claim: "10.0.0.1:6677"
+# op-addr-discover: "peer1.example.com:6677,peer2.example.com:6677"
 
 # Global default auth (used when a VNet has no per-VNet auth)
 auth: "noauth"

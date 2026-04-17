@@ -3,7 +3,10 @@
     "allow": [
       "Bash(xargs grep:*)",
       "Bash(go get:*)",
-      "Bash(go vet*)"
+      "Bash(go vet*)",
+      "Bash(grep -E \"\\\\.\\(json|md|tsx|ts|jsx|js\\)$\")",
+      "Bash(xargs wc *)",
+      "Bash(bun run *)"
     ],
     "deny": [
       "Bash(go build*)",

@@ -75,6 +75,10 @@ func RegisterClientFlags(fs *flag.FlagSet) func() *ClientConfig {
 			fmt.Fprintf(os.Stderr, "Invalid --vmac %q: %v\n", *vmacStr, err)
 			os.Exit(1)
 		}
+		if (vmac == VMAC{}) {
+			fmt.Fprintln(os.Stderr, "--vmac must be non-zero (omit the flag to auto-generate one)")
+			os.Exit(1)
+		}
 
 		return &ClientConfig{
 			Endpoint:   *endpoint,

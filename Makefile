@@ -8,8 +8,13 @@ prepare:
 
 all: linux
 
-linux:
+linux-amd64:
 	GOOS=linux GOARCH=amd64 go build -o $(OUTPUT_DIR)/$(BINARY_NAME)-linux-amd64 .
+
+linux-arm64:
+	GOOS=linux GOARCH=arm64 go build -o $(OUTPUT_DIR)/$(BINARY_NAME)-linux-arm64 .
+
+linux: linux-amd64 linux-arm64
 
 windows:
 	GOOS=windows GOARCH=amd64 go build -o $(OUTPUT_DIR)/$(BINARY_NAME)-windows-amd64.exe .

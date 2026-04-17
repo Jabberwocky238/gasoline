@@ -2,6 +2,15 @@
 
 # gasoline
 
+## on the fly
+ClientRequest除了长度，还要发一个encryption.PublicKey，也就是长度，encryption.PublicKey，payload，这个公钥在握手时生成，client在握手时产 
+生密钥对，operator不产生密钥对，删除operator的密钥对。client连接时发送自己的vmac和公钥，需要一同保存到mac表里，当arp请求发送来的时候，需 
+要检测是标准arp还是gasoline特殊的arp，如果是标准arp，返回标准arp报文，否则返回特殊化arp报文，特殊化报文附带对应ip所在client的公钥。每次  
+传输之前，使用对方ip对应的公钥进行加密，这样operator和链路层永远无法知道内部信息。同时你要在vnet定义的时候，定义这是一个zerotrust网络还  
+是普通网络，如果是普通网络，所有的握手过程和传输过程都不加密，arp也响应正常arp，否则就都加密，但是因为路由是基于mac的所以都不影响 
+
+## debug
+
 go run main.go operator --listen "quic://0.0.0.0:8443" --network "200:10.0.0.0/24;1000:192.168.200.0/24"
 ./gasoline operator --listen "quic://0.0.0.0:20000" --network "200:10.0.0.0/24;1000:192.168.200.0/24" --op-listen "0.0.0.0:6678;69.164.244.173:6678"
 ./gasoline operator --listen "quic://0.0.0.0:20000;tls://0.0.0.0:20001" --network "200:10.0.0.0/24;1000:192.168.200.0/24" --op-listen "0.0.0.0:6678;69.164.253.11:6678" --discover "69.164.244.173:6678"

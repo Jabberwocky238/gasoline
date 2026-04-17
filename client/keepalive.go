@@ -24,7 +24,7 @@ type Keepalive struct {
 	minInterval time.Duration
 	maxInterval time.Duration
 
-	ctx *common.Gactx // child of the Client's Gactx; carries logger + cancel
+	ctx *common.Context // child of the Client's Gactx; carries logger + cancel
 
 	mu       sync.Mutex
 	lastSent time.Time
@@ -36,7 +36,7 @@ type Keepalive struct {
 // NewKeepalive constructs a keepalive loop for conn. Default cadence is 10–15s.
 // parent is the Client's Gactx; a child scope is derived for Stop() and the
 // logger inherits the parent fields (vni, vmac, ...) plus component=keepalive.
-func NewKeepalive(parent *common.Gactx, conn transport.Conn, selfMAC common.VMAC) *Keepalive {
+func NewKeepalive(parent *common.Context, conn transport.Conn, selfMAC common.VMAC) *Keepalive {
 	return &Keepalive{
 		conn:        conn,
 		selfMAC:     selfMAC,

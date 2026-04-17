@@ -31,7 +31,7 @@ import (
 
 // Device is the unified TUN+Conn TAP device.
 type Device struct {
-	ctx     *common.Gactx // child of the Client's Gactx; carries logger + cancel
+	ctx     *common.Context // child of the Client's Gactx; carries logger + cancel
 	tun     *tunPkg.Tun
 	conn    transport.Conn
 	selfMAC common.VMAC
@@ -49,7 +49,7 @@ type Device struct {
 // New constructs a Device. It does not start any goroutines; call Start.
 // parent is the Client's Gactx; a child scope is derived so vtap log lines
 // inherit vni/vmac and carry component=vtap.
-func New(parent *common.Gactx, tun *tunPkg.Tun, conn transport.Conn, selfMAC common.VMAC, selfIP netip.Prefix) *Device {
+func New(parent *common.Context, tun *tunPkg.Tun, conn transport.Conn, selfMAC common.VMAC, selfIP netip.Prefix) *Device {
 	d := &Device{
 		ctx:     parent.Child(log.Fields{"component": "vtap"}),
 		tun:     tun,

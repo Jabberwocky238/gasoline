@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/netip"
@@ -29,7 +30,7 @@ type TunOpener interface {
 // tap.Device that owns TUN ⇄ ARP/Eth ⇄ Conn for the lifetime of the session.
 type Client struct {
 	mu  sync.Mutex
-	ctx *common.Gactx // cancel scope + logger, shared with sub-components
+	ctx *common.Context // cancel scope + logger, shared with sub-components
 
 	cfg            *common.ClientConfig
 	dialer         transport.Dialer
@@ -78,7 +79,7 @@ func New(cfg *common.ClientConfig) (*Client, error) {
 	return &Client{
 		cfg:    cfg,
 		dialer: dialer,
-		ctx:    common.NewGactx(nil, entry),
+		ctx:    common.NewGasolineCtx(context.Background(), entry),
 	}, nil
 }
 

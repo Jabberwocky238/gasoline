@@ -11,12 +11,12 @@ import (
 
 type Dialer struct {
 	vmac common.VMAC
-	vni      common.VNI
-	auth     auth.ClientAuthenticator
+	vni  common.VNI
+	auth auth.ClientAuthenticator
 }
 
 func NewDialer(vmac common.VMAC, vni common.VNI, auth auth.ClientAuthenticator) *Dialer {
-	return &Dialer{vmac:     vmac, vni: vni, auth: auth}
+	return &Dialer{vmac: vmac, vni: vni, auth: auth}
 }
 
 func (d *Dialer) Dial(endpoint string) (transport.Conn, *protocol.HandshakeResult, error) {

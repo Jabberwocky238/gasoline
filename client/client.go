@@ -3,13 +3,12 @@ package client
 import (
 	"context"
 	"fmt"
-	"net"
 	"net/netip"
 	"sync"
 
 	log "github.com/sirupsen/logrus"
-	socks5 "github.com/things-go/go-socks5"
 
+	"github.com/jabberwocky238/gasoline/client/quicksocks5"
 	tap "github.com/jabberwocky238/gasoline/client/vtap"
 	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
@@ -32,10 +31,10 @@ type Client struct {
 	mu  sync.Mutex
 	ctx *common.Context // cancel scope + logger, shared with sub-components
 
-	cfg            *common.ClientConfig
-	dialer         transport.Dialer
-	tunOpener      TunOpener
-	socks5Listener net.Listener
+	cfg          *common.ClientConfig
+	dialer       transport.Dialer
+	tunOpener    TunOpener
+	socks5Server *quicksocks5.Server
 
 	tun       *tunPkg.Tun
 	dev       *tap.Device
@@ -184,8 +183,8 @@ func (c *Client) Close() error {
 	if c.keepalive != nil {
 		c.keepalive.Stop()
 	}
-	if c.socks5Listener != nil {
-		c.socks5Listener.Close()
+	if c.socks5Server != nil {
+		c.socks5Server.Close()
 	}
 	if c.dev != nil {
 		c.dev.Close()
@@ -194,25 +193,11 @@ func (c *Client) Close() error {
 }
 
 func (c *Client) startSocks5() error {
-	addr := fmt.Sprintf("0.0.0.0:%d", c.cfg.Socks5Port)
-	ln, err := net.Listen("tcp", addr)
+	srv, err := quicksocks5.Start(c.ctx, c.cfg.Socks5Port, c.ctx.Logger())
 	if err != nil {
-		return fmt.Errorf("listen %s: %w", addr, err)
+		return err
 	}
-	c.socks5Listener = ln
-
-	server := socks5.NewServer()
-	logger := c.ctx.Logger().WithField("component", "socks5")
-	go func() {
-		logger.Infof("SOCKS5 proxy listening on %s", addr)
-		if err := server.Serve(ln); err != nil {
-			select {
-			case <-c.ctx.Done():
-			default:
-				logger.Errorf("SOCKS5 server error: %v", err)
-			}
-		}
-	}()
+	c.socks5Server = srv
 	return nil
 }
 

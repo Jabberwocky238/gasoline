@@ -11,6 +11,7 @@ import (
 	"github.com/jabberwocky238/gasoline/client/quicksocks5"
 	tap "github.com/jabberwocky238/gasoline/client/vtap"
 	"github.com/jabberwocky238/gasoline/common"
+	"github.com/jabberwocky238/gasoline/common/config"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/transport"
 	"github.com/jabberwocky238/gasoline/transport/quic"
@@ -31,7 +32,7 @@ type Client struct {
 	mu  sync.Mutex
 	ctx *common.Context // cancel scope + logger, shared with sub-components
 
-	cfg          *common.ClientConfig
+	cfg          *config.ClientConfig
 	dialer       transport.Dialer
 	tunOpener    TunOpener
 	socks5Server *quicksocks5.Server
@@ -54,7 +55,7 @@ func (c *Client) SetPlatformTunOpener(opener TunOpener) {
 	c.tunOpener = opener
 }
 
-func New(cfg *common.ClientConfig) (*Client, error) {
+func New(cfg *config.ClientConfig) (*Client, error) {
 	clientAuth, err := auth.ParseClientAuth(cfg.AuthStr, []byte("default-fingerprint"))
 	if err != nil {
 		return nil, fmt.Errorf("auth: %w", err)
@@ -71,7 +72,7 @@ func New(cfg *common.ClientConfig) (*Client, error) {
 	}
 	entry := base.WithFields(log.Fields{
 		"component": "client",
-		"vni":       uint32(cfg.VNI),
+		"vni":       cfg.VNI.String(),
 		"vmac":      fmt.Sprintf("%02x:%02x:%02x:%02x:%02x:%02x", cfg.VMAC[0], cfg.VMAC[1], cfg.VMAC[2], cfg.VMAC[3], cfg.VMAC[4], cfg.VMAC[5]),
 	})
 

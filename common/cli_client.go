@@ -8,11 +8,13 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"github.com/jabberwocky238/gasoline/common/config"
 )
 
 // RegisterClientFlags registers all client CLI flags on the given FlagSet.
 // Returns a function that resolves flags + config file into ClientConfig.
-func RegisterClientFlags(fs *flag.FlagSet) func() *ClientConfig {
+func RegisterClientFlags(fs *flag.FlagSet) func() *config.ClientConfig {
 	configFile := fs.String("c", "", "config file path (YAML)")
 	endpoint := fs.String("endpoint", "", "server address (required)")
 	transportType := fs.String("transport", "quic", "transport type: tcp, udp, quic")
@@ -22,9 +24,9 @@ func RegisterClientFlags(fs *flag.FlagSet) func() *ClientConfig {
 	tunName := fs.String("tun-name", "", "TUN device name")
 	socks5Port := fs.Int("quick-socks5", 0, "SOCKS5 proxy port (0=disabled, must be >1024)")
 
-	return func() *ClientConfig {
+	return func() *config.ClientConfig {
 		if *configFile != "" {
-			cfg, err := LoadConfig(*configFile)
+			cfg, err := config.LoadConfig(*configFile)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Config: %v\n", err)
 				os.Exit(1)
@@ -80,7 +82,7 @@ func RegisterClientFlags(fs *flag.FlagSet) func() *ClientConfig {
 			os.Exit(1)
 		}
 
-		return &ClientConfig{
+		return &config.ClientConfig{
 			Endpoint:   *endpoint,
 			Transport:  *transportType,
 			AuthStr:    *authStr,

@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/jabberwocky238/gasoline/common/config"
 )
 
 // RegisterOperatorFlags registers all operator CLI flags on the given FlagSet.
 // Returns a function that resolves flags + config file into OperatorConfig.
-func RegisterOperatorFlags(fs *flag.FlagSet) func() *OperatorConfig {
+func RegisterOperatorFlags(fs *flag.FlagSet) func() *config.OperatorConfig {
 	configFile := fs.String("c", "", "config file path (YAML)")
 	opListen := fs.String("op-listen", "0.0.0.0:6677", "inter-operator bind address")
 	opAddrClaim := fs.String("op-addr-claim", "", "address this operator claims to peers (host:port, public-reachable)")
@@ -24,13 +26,13 @@ func RegisterOperatorFlags(fs *flag.FlagSet) func() *OperatorConfig {
 	enableK8s := fs.Bool("enable-k8s", false, "enable k8s VNetConfig informer hot-reload backend")
 	logLevel := fs.String("log-level", "info", "log level: trace, debug, info, warn, error")
 
-	return func() *OperatorConfig {
-		result := &OperatorConfig{
-			NetworkAuth: make(map[VNI]string),
+	return func() *config.OperatorConfig {
+		result := &config.OperatorConfig{
+			NetworkAuth: make(map[config.VNI]string),
 		}
 
 		if *configFile != "" {
-			cfg, err := LoadConfig(*configFile)
+			cfg, err := config.LoadConfig(*configFile)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Config: %v\n", err)
 				os.Exit(1)
@@ -66,7 +68,7 @@ func RegisterOperatorFlags(fs *flag.FlagSet) func() *OperatorConfig {
 			}
 		}
 
-		specs, err := ParseListenerSpecs(*listenSpec)
+		specs, err := config.ParseListenerSpecs(*listenSpec)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Listen: %v\n", err)
 			os.Exit(1)

@@ -14,6 +14,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/jabberwocky238/gasoline/common"
+	"github.com/jabberwocky238/gasoline/common/config"
 	"github.com/jabberwocky238/gasoline/operator/ctrl"
 	"github.com/jabberwocky238/gasoline/operator/vxlan"
 	"github.com/jabberwocky238/gasoline/protocol"
@@ -82,7 +83,7 @@ type connPort struct{ conn transport.Conn }
 
 func (p *connPort) SendFrame(frame []byte) error { return p.conn.WritePacket(frame) }
 
-func New(cfg *common.OperatorConfig) (*Operator, error) {
+func New(cfg *config.OperatorConfig) (*Operator, error) {
 	logger := log.New()
 	if cfg.LogLevel != "" {
 		lvl, err := log.ParseLevel(cfg.LogLevel)

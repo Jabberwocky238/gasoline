@@ -1,4 +1,4 @@
-package common
+package config
 
 import (
 	"strings"
@@ -61,7 +61,6 @@ func TestParseListenerSpecs_SkipsEmptyEntries(t *testing.T) {
 }
 
 func TestParseListenerSpecs_IPv6BindAddr(t *testing.T) {
-	// Everything after "://" is the raw addr; IPv6 literal survives intact.
 	got, err := ParseListenerSpecs("tcp://[::1]:9000")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

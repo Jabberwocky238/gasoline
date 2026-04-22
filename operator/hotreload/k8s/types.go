@@ -3,8 +3,9 @@
 // Where fswatch monitors a directory of `vni-N.yaml` files and translates
 // each into one (VNetPool, AuthResolver) entry, this package watches the
 // VNetConfig CRD via an informer and does the same translation. The
-// payload schema mirrors common.NetworkEntry one-for-one (vnet / cidr /
-// auth), so a YAML on disk and a CR in the cluster are interchangeable.
+// payload schema mirrors common.VnetConfig one-for-one (vnet / cidr /
+// auth / anycast_ips), so a YAML on disk and a CR in the cluster are
+// interchangeable.
 //
 // External deps (added by `go mod tidy` after first build):
 //
@@ -45,9 +46,10 @@ type VNetConfig struct {
 	Status VNetConfigStatus `json:"status,omitempty"`
 }
 
-// VNetConfigSpec maps to common.NetworkEntry: { vnet, cidr, auth }.
+// VNetConfigSpec maps to common.VnetConfig: { vnet, cidr, auth }.
 // Auth is the canonical "hmac:id:secret" string form. Empty Auth means
-// "fall back to the operator's default".
+// "fall back to the operator's default". (anycast_ips is accepted by
+// common.VnetConfig but not yet mirrored into the CRD schema.)
 type VNetConfigSpec struct {
 	VNet uint64 `json:"vnet"`
 	CIDR string `json:"cidr"`

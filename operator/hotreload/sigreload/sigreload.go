@@ -23,6 +23,7 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/jabberwocky238/gasoline/common"
+	"github.com/jabberwocky238/gasoline/common/config"
 	"github.com/jabberwocky238/gasoline/operator"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
 )
@@ -127,7 +128,7 @@ func (w *Watcher) rescan() {
 }
 
 func (w *Watcher) loadFile(path string) {
-	cfg, err := common.LoadVNetConfig(path)
+	cfg, err := config.LoadVNetConfig(path)
 	if err != nil {
 		w.log.Errorf("sigreload: %v", err)
 		return

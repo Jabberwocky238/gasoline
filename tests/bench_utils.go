@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jabberwocky238/gasoline/common"
+	"github.com/jabberwocky238/gasoline/common/config"
 	"github.com/jabberwocky238/gasoline/operator"
 	"github.com/jabberwocky238/gasoline/transport"
 )
@@ -26,9 +27,9 @@ const (
 func startBenchOperator(t *testing.T, uuid [16]byte, tp string) *operator.Operator {
 	t.Helper()
 	vnetStr := fmt.Sprintf("%d:%s", benchVNetNum, benchVNetCIDR)
-	cfg := &common.OperatorConfig{
+	cfg := &config.OperatorConfig{
 		UUID:            &uuid,
-		ClientListeners: []common.ListenerSpec{{Transport: tp, Addr: "127.0.0.1:0"}},
+		ClientListeners: []config.ListenerSpec{{Transport: tp, Addr: "127.0.0.1:0"}},
 		OpListenAddr:    "127.0.0.1:0",
 		AuthStr:         "noauth",
 		Network:         vnetStr,

@@ -13,3 +13,12 @@
 [submodule "cilium"]
 	path = cilium
 	url = https://github.com/cilium/cilium.git
+[submodule "sing-box"]
+	path = sing-box
+	url = https://github.com/SagerNet/sing-box.git
+[submodule "sing-tun"]
+	path = sing-tun
+	url = https://github.com/SagerNet/sing-tun.git
+[submodule "cloudflared"]
+	path = cloudflared
+	url = https://github.com/cloudflare/cloudflared.git

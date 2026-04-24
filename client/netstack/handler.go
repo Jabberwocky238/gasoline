@@ -72,16 +72,13 @@ func (s *Stack) handleUDP(req *udp.ForwarderRequest) bool {
 	id := req.ID()
 	dst := addrFromTcpip(id.LocalAddress)
 	dstPort := id.LocalPort
+	target := netip.AddrPortFrom(dst, dstPort)
 
 	decision := s.classifyDial(dst)
-	if decision != dialPhysical {
-		// SOCKS5 UDP ASSOCIATE across the overlay is not implemented yet;
-		// drop rather than leak. Future work: either add a mux channel on the
-		// overlay transport or run SOCKS5 ASSOCIATE over gonet.UDPConn.
-		return true
-	}
-	if s.cfg.PhysicalDialer == nil {
-		return true
+	switch decision {
+	case dialPhysical, dialSocks5:
+	default:
+		return true // drop
 	}
 
 	var wq waiter.Queue
@@ -91,18 +88,34 @@ func (s *Stack) handleUDP(req *udp.ForwarderRequest) bool {
 	}
 	downstream := gonet.NewUDPConn(&wq, ep)
 
-	go s.proxyUDP(downstream, netip.AddrPortFrom(dst, dstPort))
+	go s.proxyUDP(downstream, target, decision)
 	return true
 }
 
-// proxyUDP shuttles datagrams between an accepted gonet.UDPConn and a
-// physical-NIC-bound PacketConn for as long as traffic flows.
-func (s *Stack) proxyUDP(downstream *gonet.UDPConn, target netip.AddrPort) {
+// proxyUDP shuttles datagrams between an accepted gonet.UDPConn and an
+// upstream net.PacketConn for as long as either side sees traffic within
+// UDPIdleTimeout. The upstream shape depends on the dial decision:
+//
+//   - dialPhysical ⇒ PhysicalDialer.ListenPacket, WriteTo(target), ReadFrom.
+//   - dialSocks5   ⇒ dialSocks5UDP, whose WriteTo wraps SOCKS5 UDP headers
+//     and ReadFrom strips them. Caller's address arg to WriteTo is ignored
+//     because the target is fixed at dial time.
+func (s *Stack) proxyUDP(downstream *gonet.UDPConn, target netip.AddrPort, decision dialDecision) {
 	defer downstream.Close()
 
-	// A physical-bypass packet conn, unconnected so we can send to `target`
-	// explicitly. The caller's ListenPacket should bind to the physical iface.
-	upstream, err := s.cfg.PhysicalDialer.ListenPacket(s.ctx, "udp", ":0")
+	idle := s.cfg.udpIdleTimeout()
+	writeTO := s.cfg.udpWriteTimeout()
+
+	var (
+		upstream net.PacketConn
+		err      error
+	)
+	switch decision {
+	case dialPhysical:
+		upstream, err = s.cfg.PhysicalDialer.ListenPacket(s.ctx, "udp", ":0")
+	case dialSocks5:
+		upstream, err = s.dialSocks5UDP(s.ctx, target)
+	}
 	if err != nil {
 		return
 	}
@@ -110,40 +123,71 @@ func (s *Stack) proxyUDP(downstream *gonet.UDPConn, target netip.AddrPort) {
 
 	targetUDP := &net.UDPAddr{IP: target.Addr().AsSlice(), Port: int(target.Port())}
 
-	// downstream → upstream
+	// Shared "first side to error out wins" channel: whichever direction
+	// hits an error (including idle timeout) triggers both closes via
+	// defer. cap=2 so the second sender never blocks on the unreceiver.
+	done := make(chan struct{}, 2)
+
+	// downstream (app) → upstream
 	go func() {
-		buf := make([]byte, 64*1024)
+		defer func() { done <- struct{}{} }()
+		bufPtr := getProxyBuf()
+		defer putProxyBuf(bufPtr)
+		buf := *bufPtr
 		for {
-			_ = downstream.SetReadDeadline(time.Now().Add(60 * time.Second))
+			_ = downstream.SetReadDeadline(time.Now().Add(idle))
 			n, err := downstream.Read(buf)
 			if err != nil {
-				upstream.Close()
 				return
 			}
+			_ = upstream.SetWriteDeadline(time.Now().Add(writeTO))
 			if _, err := upstream.WriteTo(buf[:n], targetUDP); err != nil {
 				return
 			}
 		}
 	}()
-	// upstream → downstream
-	buf := make([]byte, 64*1024)
-	for {
-		_ = upstream.SetReadDeadline(time.Now().Add(60 * time.Second))
-		n, _, err := upstream.ReadFrom(buf)
-		if err != nil {
-			return
+
+	// upstream → downstream (app)
+	go func() {
+		defer func() { done <- struct{}{} }()
+		bufPtr := getProxyBuf()
+		defer putProxyBuf(bufPtr)
+		buf := *bufPtr
+		for {
+			_ = upstream.SetReadDeadline(time.Now().Add(idle))
+			n, _, err := upstream.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			_ = downstream.SetWriteDeadline(time.Now().Add(writeTO))
+			if _, err := downstream.Write(buf[:n]); err != nil {
+				return
+			}
 		}
-		if _, err := downstream.Write(buf[:n]); err != nil {
-			return
-		}
-	}
+	}()
+
+	<-done
 }
 
-// splice is the usual full-duplex copy with one done signal.
+// splice is the usual full-duplex copy with one done signal. Uses pooled
+// buffers via io.CopyBuffer so we don't allocate a fresh 32K per direction
+// per flow; the pool buffer is only actually used when neither end
+// implements WriterTo/ReaderFrom (which is the common case for gvisor's
+// gonet.TCPConn on at least one side).
 func splice(a, b net.Conn) {
 	done := make(chan struct{}, 2)
-	go func() { _, _ = io.Copy(a, b); done <- struct{}{} }()
-	go func() { _, _ = io.Copy(b, a); done <- struct{}{} }()
+	go func() {
+		bufPtr := getProxyBuf()
+		defer putProxyBuf(bufPtr)
+		_, _ = io.CopyBuffer(a, b, *bufPtr)
+		done <- struct{}{}
+	}()
+	go func() {
+		bufPtr := getProxyBuf()
+		defer putProxyBuf(bufPtr)
+		_, _ = io.CopyBuffer(b, a, *bufPtr)
+		done <- struct{}{}
+	}()
 	<-done
 }
 

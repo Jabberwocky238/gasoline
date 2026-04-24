@@ -297,6 +297,145 @@ func TestE2EUDPPhysicalDial(t *testing.T) {
 	}
 }
 
+// ---- test 5b: UDP physical round-trip with payloads ----------------------
+
+// TestE2EUDPPhysicalRoundTrip wires a capture-and-inject fake PacketConn as
+// the physical upstream, feeds an IPv4 UDP packet through the stack, and:
+//  1. Asserts the app's payload surfaces on the fake upstream's WriteTo with
+//     the correct destination addr.
+//  2. Injects a reply on the fake upstream's incoming side and asserts the
+//     gvisor UDP reassembler emits a UDP packet back to the app on
+//     OnTunWrite carrying the exact reply payload with dport = original
+//     sport.
+//
+// This closes the payload-round-trip gap that TestE2EUDPPhysicalDial left.
+func TestE2EUDPPhysicalRoundTrip(t *testing.T) {
+	fake := newFakePacketConn()
+	dialer := &fakePacketDialer{pc: fake}
+
+	tunOut := make(chan []byte, 64)
+	s, err := New(Config{
+		LocalIP: netip.MustParseAddr("10.0.0.5"),
+		MTU:     1500,
+		OverlayRanges: []netip.Prefix{
+			netip.MustParsePrefix("10.0.0.0/24"),
+		},
+		Mode: ModeDirect,
+		OnTunWrite: func(pkt []byte) error {
+			cp := make([]byte, len(pkt))
+			copy(cp, pkt)
+			tunOut <- cp
+			return nil
+		},
+		OnOverlayWrite:  func(_ []byte) error { return nil },
+		OnOverlayBypass: func(_ []byte) error { return nil },
+		PhysicalDialer:  dialer,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Close()
+
+	const appSport uint16 = 33333
+	query := []byte("dns-query")
+	app := netip.MustParseAddr("10.0.0.5")
+	dst := netip.MustParseAddr("8.8.8.8")
+	s.HandleTunInbound(buildUDPPkt(app, dst, appSport, 53, query))
+
+	// 1. Upstream WriteTo.
+	select {
+	case out := <-fake.outgoing:
+		if !bytes.Equal(out.data, query) {
+			t.Fatalf("upstream payload: got %x, want %x", out.data, query)
+		}
+		if got := out.addr.String(); got != "8.8.8.8:53" {
+			t.Fatalf("upstream addr: got %s, want 8.8.8.8:53", got)
+		}
+	case <-time.After(mediumDeadline):
+		t.Fatalf("no upstream WriteTo within %s", mediumDeadline)
+	}
+
+	// 2. Inject reply and observe on OnTunWrite.
+	reply := []byte("dns-reply")
+	fake.incoming <- reply
+	deadline := time.After(mediumDeadline)
+	for {
+		select {
+		case out := <-tunOut:
+			info, ok := parseUDPPacket(out)
+			if !ok {
+				continue // not UDP — noise from other flows or ICMP
+			}
+			if info.dport != appSport {
+				continue
+			}
+			if !bytes.Equal(info.payload, reply) {
+				t.Fatalf("downstream payload: got %x, want %x", info.payload, reply)
+			}
+			if info.src != dst {
+				t.Fatalf("downstream src: got %s, want %s", info.src, dst)
+			}
+			return
+		case <-deadline:
+			t.Fatalf("no UDP reply to app on OnTunWrite within %s", mediumDeadline)
+		}
+	}
+}
+
+// ---- test 5c: SOCKS5 UDP header codec unit tests -------------------------
+
+// TestSocks5UDPHeaderRoundTrip exercises buildSocks5UDPHeader /
+// parseSocks5UDPHeader for v4 and v6 targets and confirms that FRAG != 0
+// or unknown ATYP are rejected.
+func TestSocks5UDPHeaderRoundTrip(t *testing.T) {
+	cases := []struct {
+		name   string
+		target netip.AddrPort
+	}{
+		{"ipv4", netip.MustParseAddrPort("8.8.8.8:53")},
+		{"ipv6", netip.MustParseAddrPort("[2001:4860:4860::8888]:53")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hdr := buildSocks5UDPHeader(tc.target)
+			payload := []byte("x")
+			pkt := append(append([]byte{}, hdr...), payload...)
+			off, err := parseSocks5UDPHeader(pkt)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if off != len(hdr) {
+				t.Fatalf("header length mismatch: parse=%d build=%d", off, len(hdr))
+			}
+			if !bytes.Equal(pkt[off:], payload) {
+				t.Fatalf("payload: got %x want %x", pkt[off:], payload)
+			}
+		})
+	}
+
+	// FRAG != 0 must be rejected.
+	bad := []byte{0, 0, 0x01, 0x01, 8, 8, 8, 8, 0, 53}
+	if _, err := parseSocks5UDPHeader(bad); err == nil {
+		t.Fatal("expected FRAG != 0 to be rejected")
+	}
+
+	// Unknown ATYP must be rejected.
+	bad[2] = 0
+	bad[3] = 0x05
+	if _, err := parseSocks5UDPHeader(bad); err == nil {
+		t.Fatal("expected unknown ATYP to be rejected")
+	}
+
+	// Truncation must be rejected.
+	trunc := []byte{0, 0, 0, 0x01, 8, 8, 8} // IPv4 header short by 1 + port
+	if _, err := parseSocks5UDPHeader(trunc); err == nil {
+		t.Fatal("expected truncated header to be rejected")
+	}
+}
+
 // ---- test 6: full SOCKS5 handshake + bidirectional data + teardown --------
 
 // TestE2ESocks5HandshakeAndData glues two netstack.Stack instances back to
@@ -372,6 +511,170 @@ func TestE2ESocks5HandshakeAndData(t *testing.T) {
 	case <-server.closed:
 	case <-time.After(mediumDeadline):
 		t.Fatalf("peer io.Copy did not return after client close")
+	}
+}
+
+// ---- test 6b: full SOCKS5 UDP ASSOCIATE round-trip ------------------------
+
+// TestE2ESocks5UDP extends the back-to-back harness to exercise the UDP
+// ASSOCIATE path end-to-end:
+//
+//	app UDP ─► client NIC-TUN ─► handleUDP ─► dialSocks5UDP
+//	   │              ctrl TCP ─► peer NIC-TUN ─► handleTCP ─► peer mock
+//	   │              (CMD=3 → BND reply over control pipe)
+//	   ▼
+//	wrapped UDP to BND ─► client NIC-OVERLAY ─► peer NIC-TUN ─►
+//	handleUDP (peer) ─► mock UDP listener ─► unwrap ─► test channel
+//
+// Return path is symmetric: test pushes a reply, mock UDP listener wraps
+// it into a SOCKS5 UDP datagram, peer's gvisor ships it back over NIC-TUN,
+// glue delivers to client's NIC-OVERLAY, client's socks5UDPPacketConn
+// strips the header, client's proxyUDP writes unwrapped bytes to the app
+// endpoint, client's gvisor emits the reply UDP packet out NIC-TUN where
+// OnTunWrite captures it. Assertions cover payload + target + source.
+func TestE2ESocks5UDP(t *testing.T) {
+	bnd := netip.MustParseAddrPort("10.0.0.1:10080")
+	peerMock := newSocks5PeerMockUDP(bnd)
+
+	clientTunOut := make(chan []byte, 64)
+	clientToPeer := make(chan []byte, 256)
+	peerToClient := make(chan []byte, 256)
+
+	peerCfg := Config{
+		LocalIP: netip.MustParseAddr("10.0.0.1"),
+		MTU:     1500,
+		OverlayRanges: []netip.Prefix{
+			netip.MustParsePrefix("10.0.0.0/24"),
+		},
+		OnTunWrite: func(pkt []byte) error {
+			cp := make([]byte, len(pkt))
+			copy(cp, pkt)
+			peerToClient <- cp
+			return nil
+		},
+		OnOverlayWrite:  func(_ []byte) error { return nil },
+		OnOverlayBypass: func(_ []byte) error { return nil },
+		PhysicalDialer:  peerMock,
+	}
+	peer, err := New(peerCfg)
+	if err != nil {
+		t.Fatalf("peer New: %v", err)
+	}
+	if err := peer.Start(); err != nil {
+		t.Fatalf("peer Start: %v", err)
+	}
+	defer peer.Close()
+
+	clientCfg := Config{
+		LocalIP: netip.MustParseAddr("10.0.0.5"),
+		MTU:     1500,
+		OverlayRanges: []netip.Prefix{
+			netip.MustParsePrefix("10.0.0.0/24"),
+		},
+		Mode:       ModeSocks5,
+		Socks5Peer: netip.MustParseAddrPort("10.0.0.1:1080"),
+		OnTunWrite: func(pkt []byte) error {
+			cp := make([]byte, len(pkt))
+			copy(cp, pkt)
+			clientTunOut <- cp
+			return nil
+		},
+		OnOverlayWrite: func(pkt []byte) error {
+			cp := make([]byte, len(pkt))
+			copy(cp, pkt)
+			clientToPeer <- cp
+			return nil
+		},
+		OnOverlayBypass: func(_ []byte) error { return nil },
+		PhysicalDialer:  newStubDialer(),
+	}
+	client, err := New(clientCfg)
+	if err != nil {
+		t.Fatalf("client New: %v", err)
+	}
+	if err := client.Start(); err != nil {
+		t.Fatalf("client Start: %v", err)
+	}
+	defer client.Close()
+
+	quit := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case pkt := <-clientToPeer:
+				peer.HandleTunInbound(pkt)
+			case <-quit:
+				return
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case pkt := <-peerToClient:
+				client.HandleOverlayInbound(pkt)
+			case <-quit:
+				return
+			}
+		}
+	}()
+	defer func() { close(quit); wg.Wait() }()
+
+	// Trigger: app UDP to 8.8.8.8:53.
+	const appSport uint16 = 33333
+	query := []byte("dns-query")
+	s := netip.MustParseAddr("10.0.0.5")
+	d := netip.MustParseAddr("8.8.8.8")
+	client.HandleTunInbound(buildUDPPkt(s, d, appSport, 53, query))
+
+	// 1. Control channel handshake completed (peer wrote CMD=3 success reply).
+	select {
+	case <-peerMock.handshakeDone:
+	case <-time.After(handshakeDeadline):
+		t.Fatal("UDP ASSOCIATE handshake did not complete within deadline")
+	}
+
+	// 2. Peer mock's UDP relay saw the unwrapped payload + real target.
+	select {
+	case got := <-peerMock.udpIncoming:
+		if !bytes.Equal(got.payload, query) {
+			t.Fatalf("peer payload: got %x, want %x", got.payload, query)
+		}
+		if got.target != netip.MustParseAddrPort("8.8.8.8:53") {
+			t.Fatalf("peer target: got %s, want 8.8.8.8:53", got.target)
+		}
+	case <-time.After(handshakeDeadline):
+		t.Fatal("peer mock did not receive unwrapped UDP payload")
+	}
+
+	// 3. Peer pushes a reply; client must see the reply as a UDP packet.
+	reply := []byte("dns-reply")
+	peerMock.udpOutgoing <- udpReply{
+		payload: reply,
+		src:     netip.MustParseAddrPort("8.8.8.8:53"),
+	}
+	deadline := time.After(handshakeDeadline)
+	for {
+		select {
+		case out := <-clientTunOut:
+			info, ok := parseUDPPacket(out)
+			if !ok || info.dport != appSport {
+				continue
+			}
+			if !bytes.Equal(info.payload, reply) {
+				t.Fatalf("reply payload: got %x, want %x", info.payload, reply)
+			}
+			if info.src.String() != "8.8.8.8" {
+				t.Fatalf("reply src: got %s, want 8.8.8.8", info.src)
+			}
+			return
+		case <-deadline:
+			t.Fatal("no UDP reply to app on client's OnTunWrite")
+		}
 	}
 }
 
@@ -757,6 +1060,333 @@ func buildUDPPkt(src, dst netip.Addr, srcPort, dstPort uint16, payload []byte) [
 	copy(udp[udpHdrLen:], payload)
 	binary.BigEndian.PutUint16(udp[6:8], udpChecksum(src, dst, udp))
 	return pkt
+}
+
+// udpPacketInfo carries the fields UDP e2e tests typically assert.
+type udpPacketInfo struct {
+	src, dst     netip.Addr
+	sport, dport uint16
+	payload      []byte
+}
+
+func parseUDPPacket(pkt []byte) (udpPacketInfo, bool) {
+	if len(pkt) < 28 {
+		return udpPacketInfo{}, false
+	}
+	if pkt[0]>>4 != 4 {
+		return udpPacketInfo{}, false
+	}
+	ihl := int(pkt[0]&0x0f) * 4
+	if len(pkt) < ihl+8 {
+		return udpPacketInfo{}, false
+	}
+	if pkt[9] != 17 {
+		return udpPacketInfo{}, false
+	}
+	udp := pkt[ihl:]
+	udpLen := int(binary.BigEndian.Uint16(udp[4:6]))
+	if udpLen < 8 || ihl+udpLen > len(pkt) {
+		return udpPacketInfo{}, false
+	}
+	return udpPacketInfo{
+		src:     netip.AddrFrom4([4]byte{pkt[12], pkt[13], pkt[14], pkt[15]}),
+		dst:     netip.AddrFrom4([4]byte{pkt[16], pkt[17], pkt[18], pkt[19]}),
+		sport:   binary.BigEndian.Uint16(udp[0:2]),
+		dport:   binary.BigEndian.Uint16(udp[2:4]),
+		payload: udp[8:udpLen],
+	}, true
+}
+
+// fakePacketConn is a test double for net.PacketConn. It captures every
+// WriteTo on `outgoing` and delivers whatever bytes are pushed onto
+// `incoming` as ReadFrom returns. SetReadDeadline / SetWriteDeadline are
+// no-ops — tests close the conn to unblock instead.
+type fakePacketConn struct {
+	incoming  chan []byte
+	outgoing  chan outgoingDGram
+	closeCh   chan struct{}
+	closeOnce sync.Once
+}
+
+type outgoingDGram struct {
+	data []byte
+	addr net.Addr
+}
+
+func newFakePacketConn() *fakePacketConn {
+	return &fakePacketConn{
+		incoming: make(chan []byte, 16),
+		outgoing: make(chan outgoingDGram, 16),
+		closeCh:  make(chan struct{}),
+	}
+}
+
+func (f *fakePacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	select {
+	case data := <-f.incoming:
+		return copy(p, data), &net.UDPAddr{IP: net.IPv4(8, 8, 8, 8).To4(), Port: 53}, nil
+	case <-f.closeCh:
+		return 0, nil, net.ErrClosed
+	}
+}
+
+func (f *fakePacketConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	select {
+	case <-f.closeCh:
+		return 0, net.ErrClosed
+	default:
+	}
+	cp := make([]byte, len(p))
+	copy(cp, p)
+	select {
+	case f.outgoing <- outgoingDGram{data: cp, addr: addr}:
+		return len(p), nil
+	case <-f.closeCh:
+		return 0, net.ErrClosed
+	}
+}
+
+func (f *fakePacketConn) Close() error {
+	f.closeOnce.Do(func() { close(f.closeCh) })
+	return nil
+}
+
+func (f *fakePacketConn) LocalAddr() net.Addr                { return &net.UDPAddr{Port: 0} }
+func (f *fakePacketConn) SetDeadline(_ time.Time) error      { return nil }
+func (f *fakePacketConn) SetReadDeadline(_ time.Time) error  { return nil }
+func (f *fakePacketConn) SetWriteDeadline(_ time.Time) error { return nil }
+
+// fakePacketDialer satisfies Dialer by returning a single fakePacketConn on
+// ListenPacket. DialContext is not implemented; tests that need both TCP
+// and UDP fakes should wire two separate dialers or compose manually.
+type fakePacketDialer struct {
+	pc *fakePacketConn
+}
+
+func (d *fakePacketDialer) DialContext(_ context.Context, _ string, _ string) (net.Conn, error) {
+	return nil, errors.New("fakePacketDialer: TCP dial not implemented")
+}
+
+func (d *fakePacketDialer) ListenPacket(_ context.Context, _ string, _ string) (net.PacketConn, error) {
+	return d.pc, nil
+}
+
+// ---- SOCKS5 UDP peer mock -------------------------------------------------
+
+// socks5PeerMockUDP implements Dialer with BOTH sides of a SOCKS5 UDP
+// ASSOCIATE responder: DialContext on TCP serves the control channel
+// (greeting + CMD=3 + BND reply), ListenPacket returns a fake PacketConn
+// that parses every SOCKS5 UDP datagram written to it and exposes the
+// unwrapped payload on udpIncoming for assertion. Replies pushed to
+// udpOutgoing are wrapped with a SOCKS5 UDP header and returned on the
+// listener's ReadFrom.
+type socks5PeerMockUDP struct {
+	bnd netip.AddrPort // advertised in the UDP ASSOCIATE reply
+
+	handshakeDone chan struct{}
+	handshakeOnce sync.Once
+	udpIncoming   chan udpCaptured
+	udpOutgoing   chan udpReply
+
+	listener *fakeUDPRelayConn
+}
+
+type udpCaptured struct {
+	payload []byte
+	target  netip.AddrPort
+	peerSrc net.Addr
+}
+
+type udpReply struct {
+	payload []byte
+	src     netip.AddrPort
+}
+
+func newSocks5PeerMockUDP(bnd netip.AddrPort) *socks5PeerMockUDP {
+	m := &socks5PeerMockUDP{
+		bnd:           bnd,
+		handshakeDone: make(chan struct{}),
+		udpIncoming:   make(chan udpCaptured, 16),
+		udpOutgoing:   make(chan udpReply, 16),
+	}
+	m.listener = &fakeUDPRelayConn{
+		mock:    m,
+		closeCh: make(chan struct{}),
+	}
+	return m
+}
+
+func (m *socks5PeerMockUDP) DialContext(_ context.Context, _ string, _ string) (net.Conn, error) {
+	a, b := net.Pipe()
+	go m.tcpServerLoop(b)
+	return a, nil
+}
+
+func (m *socks5PeerMockUDP) ListenPacket(_ context.Context, _ string, _ string) (net.PacketConn, error) {
+	return m.listener, nil
+}
+
+// tcpServerLoop speaks just enough SOCKS5 to accept greeting + one CMD=3
+// request, reply with the configured BND, and then hold the control
+// connection open until the client closes. The UDP ASSOCIATE contract
+// requires the control conn to stay alive for the life of the UDP relay.
+func (m *socks5PeerMockUDP) tcpServerLoop(c net.Conn) {
+	defer c.Close()
+
+	head := make([]byte, 2)
+	if _, err := io.ReadFull(c, head); err != nil {
+		return
+	}
+	if head[0] != 0x05 || head[1] == 0 {
+		return
+	}
+	if _, err := io.ReadFull(c, make([]byte, head[1])); err != nil {
+		return
+	}
+	if _, err := c.Write([]byte{0x05, 0x00}); err != nil {
+		return
+	}
+
+	req := make([]byte, 4)
+	if _, err := io.ReadFull(c, req); err != nil {
+		return
+	}
+	if req[0] != 0x05 {
+		return
+	}
+	// Read and discard the requested ADDR+PORT (wildcard from real clients).
+	var skip int
+	switch req[3] {
+	case 0x01:
+		skip = 4
+	case 0x04:
+		skip = 16
+	case 0x03:
+		l := make([]byte, 1)
+		if _, err := io.ReadFull(c, l); err != nil {
+			return
+		}
+		skip = int(l[0])
+	default:
+		return
+	}
+	if _, err := io.ReadFull(c, make([]byte, skip+2)); err != nil {
+		return
+	}
+
+	// Only CMD=3 (UDP ASSOCIATE) is meaningful here — CONNECT is exercised
+	// elsewhere; fail others fast so a miswired test blows up instead of
+	// hanging.
+	if req[1] != 0x03 {
+		return
+	}
+
+	// Reply: VER=5 REP=0 RSV=0 ATYP=1 BND.ADDR BND.PORT.
+	b := m.bnd.Addr().As4()
+	var port [2]byte
+	binary.BigEndian.PutUint16(port[:], m.bnd.Port())
+	reply := []byte{0x05, 0x00, 0x00, 0x01, b[0], b[1], b[2], b[3], port[0], port[1]}
+	if _, err := c.Write(reply); err != nil {
+		return
+	}
+
+	m.handshakeOnce.Do(func() { close(m.handshakeDone) })
+
+	// Keep the control open until client closes — matches real RFC 1928
+	// semantics where the UDP relay is torn down when control drops.
+	_, _ = io.Copy(io.Discard, c)
+}
+
+// fakeUDPRelayConn is what peer.handleUDP receives from ListenPacket. Every
+// WriteTo is a SOCKS5-wrapped datagram from the client; we parse the
+// header, hand the inner payload + target off to the test via udpIncoming.
+// Every ReadFrom pulls from udpOutgoing, builds a SOCKS5-wrapped reply.
+type fakeUDPRelayConn struct {
+	mock      *socks5PeerMockUDP
+	closeCh   chan struct{}
+	closeOnce sync.Once
+}
+
+func (f *fakeUDPRelayConn) WriteTo(p []byte, addr net.Addr) (int, error) {
+	select {
+	case <-f.closeCh:
+		return 0, net.ErrClosed
+	default:
+	}
+	hdrLen, err := parseSocks5UDPHeader(p)
+	if err != nil {
+		return 0, err
+	}
+	target, err := extractSocks5UDPTarget(p[:hdrLen])
+	if err != nil {
+		return 0, err
+	}
+	payload := make([]byte, len(p)-hdrLen)
+	copy(payload, p[hdrLen:])
+	select {
+	case f.mock.udpIncoming <- udpCaptured{payload: payload, target: target, peerSrc: addr}:
+		return len(p), nil
+	case <-f.closeCh:
+		return 0, net.ErrClosed
+	}
+}
+
+func (f *fakeUDPRelayConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	select {
+	case r := <-f.mock.udpOutgoing:
+		hdr := buildSocks5UDPHeader(r.src)
+		buf := make([]byte, 0, len(hdr)+len(r.payload))
+		buf = append(buf, hdr...)
+		buf = append(buf, r.payload...)
+		n := copy(p, buf)
+		return n, &net.UDPAddr{IP: f.mock.bnd.Addr().AsSlice(), Port: int(f.mock.bnd.Port())}, nil
+	case <-f.closeCh:
+		return 0, nil, net.ErrClosed
+	}
+}
+
+func (f *fakeUDPRelayConn) Close() error {
+	f.closeOnce.Do(func() { close(f.closeCh) })
+	return nil
+}
+
+func (f *fakeUDPRelayConn) LocalAddr() net.Addr {
+	return &net.UDPAddr{IP: f.mock.bnd.Addr().AsSlice(), Port: int(f.mock.bnd.Port())}
+}
+
+func (f *fakeUDPRelayConn) SetDeadline(_ time.Time) error      { return nil }
+func (f *fakeUDPRelayConn) SetReadDeadline(_ time.Time) error  { return nil }
+func (f *fakeUDPRelayConn) SetWriteDeadline(_ time.Time) error { return nil }
+
+// extractSocks5UDPTarget reads ATYP+ADDR+PORT from a validated SOCKS5 UDP
+// header (callers should have called parseSocks5UDPHeader first and
+// confirmed no error). Returns the dst endpoint carried in the header.
+func extractSocks5UDPTarget(hdr []byte) (netip.AddrPort, error) {
+	if len(hdr) < 4 {
+		return netip.AddrPort{}, errors.New("socks5 udp target: too short")
+	}
+	off := 4
+	var addr netip.Addr
+	switch hdr[3] {
+	case 0x01:
+		if len(hdr) < off+6 {
+			return netip.AddrPort{}, errors.New("socks5 udp target: ipv4 truncated")
+		}
+		addr = netip.AddrFrom4([4]byte{hdr[4], hdr[5], hdr[6], hdr[7]})
+		off += 4
+	case 0x04:
+		if len(hdr) < off+18 {
+			return netip.AddrPort{}, errors.New("socks5 udp target: ipv6 truncated")
+		}
+		var a [16]byte
+		copy(a[:], hdr[4:20])
+		addr = netip.AddrFrom16(a)
+		off += 16
+	default:
+		return netip.AddrPort{}, fmt.Errorf("socks5 udp target: atyp %d not supported", hdr[3])
+	}
+	port := binary.BigEndian.Uint16(hdr[off : off+2])
+	return netip.AddrPortFrom(addr, port), nil
 }
 
 func udpChecksum(src, dst netip.Addr, udp []byte) uint16 {

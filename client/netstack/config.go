@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/netip"
+	"time"
 )
 
 // Dialer is the interface the caller supplies for non-stack egress (physical
@@ -94,6 +95,19 @@ type Config struct {
 	// into the OS TUN (bind to the physical interface or add route exclusion
 	// for the target IP). If nil, flows that would require it are dropped.
 	PhysicalDialer Dialer
+
+	// UDPIdleTimeout is the idle timeout for a single UDP flow. A flow is
+	// torn down if neither direction sees a packet for this long. If zero,
+	// defaults to 60s. Setting this too low will break protocols with long
+	// idle periods (DTLS keepalives, some IoT heartbeats); too high holds
+	// per-flow resources (upstream PacketConn, gvisor endpoint) past their
+	// useful life.
+	UDPIdleTimeout time.Duration
+
+	// UDPWriteTimeout caps how long a UDP send may block on either the
+	// upstream or downstream side. If zero, defaults to 5s. This exists so
+	// a wedged receiver can't stall a proxy goroutine indefinitely.
+	UDPWriteTimeout time.Duration
 }
 
 // useSocks5 is the sole gate for public-destination flows. Returns true iff
@@ -108,4 +122,18 @@ func (c *Config) mtu() uint32 {
 		return 1500
 	}
 	return c.MTU
+}
+
+func (c *Config) udpIdleTimeout() time.Duration {
+	if c.UDPIdleTimeout == 0 {
+		return 60 * time.Second
+	}
+	return c.UDPIdleTimeout
+}
+
+func (c *Config) udpWriteTimeout() time.Duration {
+	if c.UDPWriteTimeout == 0 {
+		return 5 * time.Second
+	}
+	return c.UDPWriteTimeout
 }

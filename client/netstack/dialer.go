@@ -46,7 +46,27 @@ func (s *Stack) dialSocks5(ctx context.Context, target netip.AddrPort) (net.Conn
 		conn.Close()
 		return nil, fmt.Errorf("socks5 handshake: %w", err)
 	}
-	return conn, nil
+	// Register the local port so MaybeHandleOverlayInbound can route return
+	// traffic back into the stack instead of letting it hit the OS TUN.
+	localPort := uint16(conn.LocalAddr().(*net.TCPAddr).Port)
+	s.registerFlow(protoTCP, localPort)
+	return &trackedTCPConn{Conn: conn, stack: s, port: localPort}, nil
+}
+
+// trackedTCPConn wraps a gonet.TCPConn returned from dialSocks5 so that the
+// stack's flow-table registration is cleaned up whenever the caller closes
+// the connection. Wrapping keeps the outer net.Conn contract identical and
+// adds a single sync.Once around the unregister call.
+type trackedTCPConn struct {
+	net.Conn
+	stack *Stack
+	port  uint16
+	once  sync.Once
+}
+
+func (c *trackedTCPConn) Close() error {
+	c.once.Do(func() { c.stack.unregisterFlow(protoTCP, c.port) })
+	return c.Conn.Close()
 }
 
 // socks5ClientHandshake runs the no-auth SOCKS5 greeting and a single CONNECT
@@ -152,13 +172,17 @@ func (s *Stack) dialSocks5UDP(ctx context.Context, target netip.AddrPort) (net.P
 	if err != nil {
 		return nil, fmt.Errorf("dial socks5 ctrl: %w", err)
 	}
+	ctrlPort := uint16(ctrl.LocalAddr().(*net.TCPAddr).Port)
+	s.registerFlow(protoTCP, ctrlPort)
 
 	bnd, err := socks5UDPAssociate(ctrl)
 	if err != nil {
+		s.unregisterFlow(protoTCP, ctrlPort)
 		ctrl.Close()
 		return nil, fmt.Errorf("socks5 UDP associate: %w", err)
 	}
 	if bnd.Addr().Is4() != s.cfg.LocalIP.Is4() {
+		s.unregisterFlow(protoTCP, ctrlPort)
 		ctrl.Close()
 		return nil, fmt.Errorf("socks5 BND family mismatch: got %s", bnd.Addr())
 	}
@@ -169,11 +193,14 @@ func (s *Stack) dialSocks5UDP(ctx context.Context, target netip.AddrPort) (net.P
 
 	udpConn, err := gonet.DialUDP(s.ipStack, &udpLocal, &udpRemote, proto)
 	if err != nil {
+		s.unregisterFlow(protoTCP, ctrlPort)
 		ctrl.Close()
 		return nil, fmt.Errorf("dial socks5 udp relay: %w", err)
 	}
+	udpPort := uint16(udpConn.LocalAddr().(*net.UDPAddr).Port)
+	s.registerFlow(protoUDP, udpPort)
 
-	return newSocks5UDPPacketConn(ctrl, udpConn, target), nil
+	return newSocks5UDPPacketConn(ctrl, udpConn, target, s, ctrlPort, udpPort), nil
 }
 
 // socks5UDPAssociate runs the SOCKS5 no-auth greeting then sends a UDP
@@ -259,14 +286,24 @@ type socks5UDPPacketConn struct {
 
 	rdBuf     []byte // reused across ReadFrom calls; caller is single-reader
 	closeOnce sync.Once
+
+	// stack+ports carry the flow-table registration we must unregister on
+	// Close. Zero stack means "don't touch the flow table" (used by unit
+	// tests that construct this type directly without going through a Stack).
+	stack    *Stack
+	ctrlPort uint16
+	udpPort  uint16
 }
 
-func newSocks5UDPPacketConn(ctrl, udp net.Conn, target netip.AddrPort) *socks5UDPPacketConn {
+func newSocks5UDPPacketConn(ctrl, udp net.Conn, target netip.AddrPort, s *Stack, ctrlPort, udpPort uint16) *socks5UDPPacketConn {
 	c := &socks5UDPPacketConn{
-		ctrl:   ctrl,
-		udp:    udp,
-		target: target,
-		rdBuf:  make([]byte, 64*1024+64), // 64K payload + ample header slack
+		ctrl:     ctrl,
+		udp:      udp,
+		target:   target,
+		rdBuf:    make([]byte, 64*1024+64),
+		stack:    s,
+		ctrlPort: ctrlPort,
+		udpPort:  udpPort,
 	}
 	// Watchdog: if the control connection dies (peer restart, RST, etc.),
 	// tear down the whole wrapper so proxyUDP's Read loop unblocks.
@@ -308,6 +345,10 @@ func (c *socks5UDPPacketConn) Close() error {
 	c.closeOnce.Do(func() {
 		_ = c.udp.Close()
 		_ = c.ctrl.Close()
+		if c.stack != nil {
+			c.stack.unregisterFlow(protoTCP, c.ctrlPort)
+			c.stack.unregisterFlow(protoUDP, c.udpPort)
+		}
 	})
 	return nil
 }

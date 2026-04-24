@@ -310,3 +310,68 @@ func tcpChecksum(src, dst netip.Addr, tcp []byte) uint16 {
 func scenarioName(mode Mode, dst string) string {
 	return mode.String() + "/" + dst
 }
+
+// ---- MaybeHandleOverlayInbound --------------------------------------------
+
+// TestMaybeHandleOverlayInbound exercises the flow-table-gated inbound
+// dispatch used by the gasoline adapter: register a (proto, port) to mimic
+// a dialSocks5 having just succeeded, craft overlay packets that match or
+// miss, and verify the bool return. Also covers malformed input and
+// non-TCP/UDP protocols.
+func TestMaybeHandleOverlayInbound(t *testing.T) {
+	s := newTestStack(t, stdCfg(ModeDirect, newStubDialer(), map[string]*atomic.Int32{}))
+	defer s.Close()
+
+	const trackedPort uint16 = 54321
+	s.registerFlow(protoTCP, trackedPort)
+
+	self := netip.MustParseAddr("10.0.0.5")
+	peer := netip.MustParseAddr("10.0.0.1")
+
+	// Matching TCP packet dst.port == trackedPort → consumed.
+	pkt := buildTCPSyn(peer, self, 1080, trackedPort)
+	if !s.MaybeHandleOverlayInbound(pkt) {
+		t.Fatal("matching TCP packet was not consumed")
+	}
+
+	// Non-matching dst.port → not consumed.
+	pkt2 := buildTCPSyn(peer, self, 1080, trackedPort+1)
+	if s.MaybeHandleOverlayInbound(pkt2) {
+		t.Fatal("non-matching TCP packet was consumed")
+	}
+
+	// Matching UDP dst.port with the same number but different proto → miss.
+	udpPkt := buildUDPPkt(peer, self, 1080, trackedPort, []byte("x"))
+	if s.MaybeHandleOverlayInbound(udpPkt) {
+		t.Fatal("TCP/UDP proto mismatch should not consume")
+	}
+
+	// Register UDP too, then the same packet should be consumed.
+	s.registerFlow(protoUDP, trackedPort)
+	if !s.MaybeHandleOverlayInbound(udpPkt) {
+		t.Fatal("matching UDP packet was not consumed after UDP register")
+	}
+
+	// After unregister, the same TCP packet is no longer consumed.
+	s.unregisterFlow(protoTCP, trackedPort)
+	if s.MaybeHandleOverlayInbound(pkt) {
+		t.Fatal("TCP packet consumed after unregister")
+	}
+
+	// Malformed inputs all return false without panicking.
+	if s.MaybeHandleOverlayInbound(nil) {
+		t.Fatal("nil pkt should not consume")
+	}
+	if s.MaybeHandleOverlayInbound([]byte{0x45}) {
+		t.Fatal("truncated IPv4 should not consume")
+	}
+
+	// ICMP (proto 1) with matching port pattern must miss — only TCP/UDP
+	// are tracked.
+	icmp := make([]byte, 20+8)
+	icmp[0] = 0x45
+	icmp[9] = 1 // proto = ICMP
+	if s.MaybeHandleOverlayInbound(icmp) {
+		t.Fatal("ICMP packet should not consume")
+	}
+}

@@ -41,9 +41,62 @@ type Stack struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
+	// flows tracks (proto, localPort) pairs belonging to endpoints the stack
+	// dialed outward on NIC-OVERLAY. Used by MaybeHandleOverlayInbound to
+	// discriminate "return traffic for my synthesized connection" from
+	// peer-to-peer transparent traffic that belongs on the OS TUN. Keys are
+	// flowKey values; values are unused.
+	flows sync.Map
+
 	mu      sync.Mutex
 	started bool
 	closed  bool
+}
+
+// flowKey identifies a stack-owned outbound flow on NIC-OVERLAY. proto is
+// the transport number as it appears in the IPv4 Protocol field / IPv6
+// Next Header field: 6 for TCP, 17 for UDP.
+type flowKey struct {
+	proto uint8
+	port  uint16
+}
+
+// Transport protocol numbers as they appear in IPv4 Protocol / IPv6 Next
+// Header. Exported for callers that drive RegisterFlow directly from a
+// custom dial path (the adapter package and tests).
+const (
+	ProtoTCP uint8 = 6
+	ProtoUDP uint8 = 17
+)
+
+// Internal aliases kept for readability inside the package.
+const (
+	protoTCP = ProtoTCP
+	protoUDP = ProtoUDP
+)
+
+// RegisterFlow records that the stack has an active endpoint bound to
+// (proto, port) on NIC-OVERLAY. Called automatically by dialSocks5 and
+// dialSocks5UDP; exposed so higher-level integrations that introduce their
+// own outbound paths can participate in MaybeHandleOverlayInbound routing.
+func (s *Stack) RegisterFlow(proto uint8, port uint16) {
+	s.flows.Store(flowKey{proto, port}, struct{}{})
+}
+
+// UnregisterFlow removes a previously registered (proto, port). Safe to
+// call more than once; extra deletes are no-ops.
+func (s *Stack) UnregisterFlow(proto uint8, port uint16) {
+	s.flows.Delete(flowKey{proto, port})
+}
+
+// internal getters/setters retained for readability.
+func (s *Stack) registerFlow(proto uint8, port uint16)   { s.RegisterFlow(proto, port) }
+func (s *Stack) unregisterFlow(proto uint8, port uint16) { s.UnregisterFlow(proto, port) }
+
+// hasFlow reports whether (proto, port) is currently registered.
+func (s *Stack) hasFlow(proto uint8, port uint16) bool {
+	_, ok := s.flows.Load(flowKey{proto, port})
+	return ok
 }
 
 // New constructs the stack but does not spawn any goroutines. Call Start.
@@ -208,6 +261,73 @@ func (s *Stack) HandleOverlayInbound(ipPkt []byte) {
 		return
 	}
 	s.inject(s.ovlEP, ipPkt)
+}
+
+// MaybeHandleOverlayInbound decides on the caller's behalf whether an IP
+// packet arriving from the overlay belongs to the stack (a synthesized
+// upstream's return traffic) or to a peer-to-peer flow that should be
+// delivered straight to the OS TUN.
+//
+// The gasoline integration uses this at the overlay ingress point:
+//
+//	if !stack.MaybeHandleOverlayInbound(ipPkt) {
+//	    tun.Write(ipPkt) // peer-to-peer transparent
+//	}
+//
+// Returns true if the packet was injected into the stack and MUST NOT be
+// forwarded to the OS TUN by the caller. Returns false for anything the
+// stack does not own: malformed, non-TCP/UDP, or (proto,dstPort) not in
+// the flow table. Callers deliver those to the TUN themselves.
+//
+// IPv6 extension headers are not unrolled here — gvisor's own outbound
+// packets don't emit them, and gasoline's overlay transport would be the
+// only thing producing ext-header frames for overlay-return traffic, which
+// it does not do today. Should that change, this function should grow a
+// header walker.
+func (s *Stack) MaybeHandleOverlayInbound(ipPkt []byte) bool {
+	proto, dstPort, ok := parseTransportDst(ipPkt)
+	if !ok {
+		return false
+	}
+	if !s.hasFlow(proto, dstPort) {
+		return false
+	}
+	s.inject(s.ovlEP, ipPkt)
+	return true
+}
+
+// parseTransportDst pulls (proto, dst port) out of a raw IPv4 or IPv6
+// packet. Returns ok=false for malformed input, non-TCP/UDP, or IPv6 with
+// extension headers.
+func parseTransportDst(pkt []byte) (proto uint8, dstPort uint16, ok bool) {
+	if len(pkt) < 1 {
+		return 0, 0, false
+	}
+	switch pkt[0] >> 4 {
+	case 4:
+		if len(pkt) < 20 {
+			return 0, 0, false
+		}
+		ihl := int(pkt[0]&0x0f) * 4
+		if ihl < 20 || len(pkt) < ihl+4 {
+			return 0, 0, false
+		}
+		proto = pkt[9]
+		if proto != protoTCP && proto != protoUDP {
+			return 0, 0, false
+		}
+		return proto, uint16(pkt[ihl+2])<<8 | uint16(pkt[ihl+3]), true
+	case 6:
+		if len(pkt) < 44 {
+			return 0, 0, false
+		}
+		proto = pkt[6] // Next Header
+		if proto != protoTCP && proto != protoUDP {
+			return 0, 0, false
+		}
+		return proto, uint16(pkt[42])<<8 | uint16(pkt[43]), true
+	}
+	return 0, 0, false
 }
 
 // inject is the common path for pushing an inbound packet into one of our

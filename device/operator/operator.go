@@ -31,37 +31,27 @@ type Operator struct {
 
 	dataListenAddr  string
 	clientListeners map[string]transport.Listener
-	authResolver    *staticAuthResolver
-
-	state *operatorState
-}
-
-// staticAuthResolver resolves per-VNI auth from a fixed map.
-type staticAuthResolver struct {
-	byVNI map[protocol.VNI_Ty]auth.ServerAuthenticator
-}
-
-func (r *staticAuthResolver) Resolve(vni protocol.VNI_Ty) (auth.ServerAuthenticator, error) {
-	a, ok := r.byVNI[vni]
-	if !ok {
-		return nil, fmt.Errorf("no auth registered for vni %d", vni)
-	}
-	return a, nil
+	state           *operatorState
 }
 
 func New(cfg *StaticOperatorConfig) (*Operator, error) {
 	logger := log.New()
 	logger.SetLevel(cfg.LogLevel)
-
 	root := common.NewLogContext(nil, logger)
 
-	resolver := &staticAuthResolver{byVNI: make(map[protocol.VNI_Ty]auth.ServerAuthenticator)}
+	state := newOperatorState(root)
+	// init vni config and auth resolver
 	for vni, entry := range cfg.Network {
-		if entry.Auth != nil {
-			resolver.byVNI[vni] = entry.Auth
+		prefix, err := netip.ParsePrefix(entry.CIDR)
+		if err != nil {
+			root.Cancel()
+			return nil, fmt.Errorf("vni %d cidr %q: %w", vni, entry.CIDR, err)
 		}
+		state.registerVNI(vni, entry.Auth)
+		root.Log().Infof("VNet %d: %s", vni, prefix)
 	}
 
+	// init client listeners
 	if len(cfg.ClientListeners) == 0 {
 		root.Cancel()
 		return nil, fmt.Errorf("no client listeners configured")
@@ -73,26 +63,18 @@ func New(cfg *StaticOperatorConfig) (*Operator, error) {
 			closeAll(clientListeners)
 			return nil, fmt.Errorf("duplicate listener transport %q", spec.Transport)
 		}
-		ln, err := createClientListener(spec.Transport, spec.Addr, resolver)
+		ln, err := createClientListener(spec.Transport, spec.Addr, func(vni protocol.VNI_Ty) (auth.ServerAuthenticator, error) {
+			if entry, ok := state.vnets[vni]; ok {
+				return entry.authenticator, nil
+			}
+			return nil, fmt.Errorf("no config for vni %d", vni)
+		})
 		if err != nil {
 			root.Cancel()
 			closeAll(clientListeners)
 			return nil, fmt.Errorf("listener %s/%s: %w", spec.Transport, spec.Addr, err)
 		}
 		clientListeners[spec.Transport] = ln
-	}
-
-	state := newOperatorState(root)
-
-	for vni, entry := range cfg.Network {
-		prefix, err := netip.ParsePrefix(entry.CIDR)
-		if err != nil {
-			root.Cancel()
-			closeAll(clientListeners)
-			return nil, fmt.Errorf("vni %d cidr %q: %w", vni, entry.CIDR, err)
-		}
-		state.registerVNI(vni, entry.Auth)
-		root.Log().Infof("VNet %d: %s", vni, prefix)
 	}
 
 	var uuid [16]byte
@@ -108,7 +90,6 @@ func New(cfg *StaticOperatorConfig) (*Operator, error) {
 		uuid:            uuid,
 		dataListenAddr:  cfg.OpListenAddr,
 		clientListeners: clientListeners,
-		authResolver:    resolver,
 		state:           state,
 	}, nil
 }
@@ -275,7 +256,7 @@ func (o *Operator) routineReaper() {
 
 // --------------- Client listener helpers ---------------
 
-func createClientListener(transportType, addr string, resolver auth.AuthResolver) (transport.Listener, error) {
+func createClientListener(transportType, addr string, resolver auth.AuthResolverFn) (transport.Listener, error) {
 	switch transportType {
 	case "tcp":
 		return transportTcp.NewListener(addr, resolver)

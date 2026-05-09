@@ -87,7 +87,7 @@ func ClientHandshake(rw io.ReadWriter, preassignedConfig *protocol.PreassignedSe
 // ServerHandshake performs the handshake on the server side.
 func ServerHandshake(
 	rw io.ReadWriter,
-	resolver auth.AuthResolver,
+	resolver auth.AuthResolverFn,
 ) (*HandshakeResult, error) {
 	var hello ClientHello
 	if err := hello.Decode(rw); err != nil {
@@ -97,7 +97,7 @@ func ServerHandshake(
 		return nil, fmt.Errorf("version mismatch: got %d, want %d", hello.Version, HandshakeVersion)
 	}
 
-	authenticator, err := resolver.Resolve(hello.VNI)
+	authenticator, err := resolver(hello.VNI)
 	if err != nil {
 		sendFail(rw, HandshakeAuthFail)
 		return nil, fmt.Errorf("resolve auth for vni %d: %w", hello.VNI, err)

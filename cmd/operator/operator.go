@@ -25,12 +25,6 @@ import (
 	transportUdp "github.com/jabberwocky238/gasoline/transport/udp"
 )
 
-type HotReloader interface {
-	Close() error
-}
-
-type HotReloaderBuilder func(pools *VNetPoolMap, resolver *auth.MapResolver, logger *log.Logger) (HotReloader, error)
-
 // Operator is the per-process control + data plane orchestrator.
 //
 // Data plane structure:
@@ -54,17 +48,13 @@ type Operator struct {
 
 	dataListenAddr   string
 	dataExternalAddr string
-	Peers            *PeerOperatorTable
 
 	clientListeners map[string]transport.Listener
-	Reloaders       map[string]HotReloader
 
 	state *operatorState
 	Stats *stats.Engine
 
 	authResolver *auth.MapResolver
-
-	vxlanDev *vxlan.Device
 }
 
 func New(cfg *OperatorConfig) (*Operator, error) {

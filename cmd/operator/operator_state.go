@@ -6,34 +6,13 @@ import (
 	"sync"
 
 	"github.com/jabberwocky238/gasoline/common"
-	"github.com/jabberwocky238/gasoline/device/vtep"
-	"github.com/jabberwocky238/gasoline/device/vxlan"
 	"github.com/jabberwocky238/gasoline/protocol"
 )
 
-// vniEntry is the per-VNI L2 state owned by the operator.
-//
-//   - vtep         the L2 forwarder for this VNI. Its FDB learns where
-//     every MAC lives (a client port for locally-attached
-//     clients, the vxlanPort for off-box peers).
-//   - vxlanPort    operator↔operator side of this VNI; one shared
-//     underlay socket (operatorState.vxlanDev) carries
-//     every VNI's vxlanPort.
-//   - clients      MAC → ClientPeer for every client of this VNI
-//     currently attached to *this* operator.
 type vniEntry struct {
-	vtep      *vtep.Device
-	vxlanPort *vxlan.Port
-
 	mu      sync.RWMutex
-	clients map[common.VMAC]*PeerClient
+	clients map[protocol.VNI_Ty]*PeerClient
 }
-
-// VTEP exposes the per-VNI vtep.Device for diagnostics / tests.
-func (v *vniEntry) VTEP() *vtep.Device { return v.vtep }
-
-// VxlanPort exposes the per-VNI vxlan.Port for diagnostics / tests.
-func (v *vniEntry) VxlanPort() *vxlan.Port { return v.vxlanPort }
 
 // Clients returns a snapshot copy of the per-VNI client map.
 func (v *vniEntry) Clients() []*PeerClient {
@@ -55,11 +34,11 @@ func (v *vniEntry) Clients() []*PeerClient {
 // peer registered before its first VNI is created still propagates
 // to the resulting Port.
 type operatorState struct {
-	ctx      *common.GasolineGeneralContext
-	vxlanDev *vxlan.Device
+	ctx *common.GasolineGeneralContext
 
 	mu    sync.RWMutex
 	vnets map[protocol.VNI_Ty]*vniEntry
+	Peers *PeerOperatorTable
 
 	seedMu    sync.Mutex
 	peerSeeds map[netip.AddrPort]struct{}
@@ -69,7 +48,8 @@ func newOperatorState(ctx *common.GasolineGeneralContext, vxlanDev *vxlan.Device
 	return &operatorState{
 		ctx:       ctx,
 		vxlanDev:  vxlanDev,
-		vnets:     make(map[common.VNI]*vniEntry),
+		vnets:     make(map[protocol.VNI_Ty]*vniEntry),
+		Peers:     NewPeerOperatorTable(),
 		peerSeeds: make(map[netip.AddrPort]struct{}),
 	}
 }

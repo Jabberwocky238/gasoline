@@ -45,3 +45,9 @@ type ServerAuthenticator interface {
 	// that bind the response to the client identity (e.g. HMAC).
 	VerifyResponse(cid protocol.CID_Ty, challenge, response []byte) error
 }
+
+// AuthResolver resolves a ServerAuthenticator for a given VNI.
+// Used by the handshake to pick the correct per-VNet auth strategy.
+type AuthResolver interface {
+	Resolve(vni protocol.VNI_Ty) (ServerAuthenticator, error)
+}

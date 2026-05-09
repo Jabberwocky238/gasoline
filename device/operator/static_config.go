@@ -1,6 +1,8 @@
 package operator
 
 import (
+	"net/netip"
+
 	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/sirupsen/logrus"
@@ -8,9 +10,10 @@ import (
 
 // StaticOperatorVNetConfig describes one VNI: '<vni>:<cidr>'.
 type StaticOperatorVNetConfig struct {
-	VNI  protocol.VNI_Ty
-	CIDR string
-	Auth auth.ServerAuthenticator
+	VNI          protocol.VNI_Ty
+	CIDR         string
+	Auth         auth.ServerAuthenticator
+	PresetCIDmap map[protocol.CID_Ty]netip.Prefix
 }
 
 // StaticOperatorConfig is the resolved configuration handed to New.

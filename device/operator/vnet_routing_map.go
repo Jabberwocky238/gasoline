@@ -8,7 +8,6 @@ package operator
 
 import (
 	"encoding/binary"
-	"encoding/hex"
 	"fmt"
 	"math/bits"
 	"net/netip"
@@ -71,19 +70,8 @@ func (s *operatorState) dispatchRoute(args []string) string {
 	}
 }
 
-// parseCID decodes the 16-char hex string the gasoctl CLI sends.
-func parseCID(s string) (protocol.CID_Ty, error) {
-	var cid protocol.CID_Ty
-	b, err := hex.DecodeString(s)
-	if err != nil {
-		return cid, fmt.Errorf("bad cid %q: %v", s, err)
-	}
-	if len(b) != len(cid) {
-		return cid, fmt.Errorf("bad cid %q: want %d bytes, got %d", s, len(cid), len(b))
-	}
-	copy(cid[:], b)
-	return cid, nil
-}
+// parseCID decodes a CID from gasoctl. Decimal by default, "0x..." for hex.
+func parseCID(s string) (protocol.CID_Ty, error) { return protocol.ParseCID(s) }
 
 func errReply(msg string) string { return "ERR " + msg }
 

@@ -2,7 +2,6 @@ package main
 
 import (
 	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"strconv"
 	"strings"
@@ -89,7 +88,8 @@ func lastOr(vs []string, fallback string) string {
 	return vs[len(vs)-1]
 }
 
-// resolveCID parses a hex-encoded CID or generates a random one if s is empty.
+// resolveCID parses a CID (decimal default, "0x..." for hex) or
+// generates a random one if s is empty.
 func resolveCID(s string) (protocol.CID_Ty, error) {
 	var cid protocol.CID_Ty
 	if s == "" {
@@ -98,13 +98,5 @@ func resolveCID(s string) (protocol.CID_Ty, error) {
 		}
 		return cid, nil
 	}
-	b, err := hex.DecodeString(s)
-	if err != nil {
-		return cid, err
-	}
-	if len(b) != len(cid) {
-		return cid, fmt.Errorf("must be %d bytes, got %d", len(cid), len(b))
-	}
-	copy(cid[:], b)
-	return cid, nil
+	return protocol.ParseCID(s)
 }

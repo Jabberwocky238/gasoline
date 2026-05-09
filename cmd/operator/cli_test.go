@@ -42,7 +42,7 @@ func TestRegisterOperatorCLIParam_Defaults(t *testing.T) {
 func TestRegisterOperatorCLIParam_RepeatedListenAndNetwork(t *testing.T) {
 	cfg, err := RegisterOperatorCLIParam(map[string][]string{
 		"listen":  {"tcp://127.0.0.1:1000", "tls://127.0.0.1:2000"},
-		"network": {"1:10.1.0.0/16", "2:10.2.0.0/16"},
+		"network": {"1:10.1.0.0/16:noauth", "2:10.2.0.0/16:noauth"},
 	})
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
@@ -81,7 +81,7 @@ func TestRegisterOperatorCLIParam_SingleValuedTakesLast(t *testing.T) {
 
 func TestRegisterOperatorCLIParam_DuplicateVNI(t *testing.T) {
 	_, err := RegisterOperatorCLIParam(map[string][]string{
-		"network": {"5:10.5.0.0/16", "5:10.6.0.0/16"},
+		"network": {"5:10.5.0.0/16:noauth", "5:10.6.0.0/16:noauth"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "duplicate vni") {
 		t.Fatalf("err = %v, want duplicate vni error", err)
@@ -107,20 +107,32 @@ func TestRegisterOperatorCLIParam_UnknownKey(t *testing.T) {
 }
 
 func TestParseNetworkEntry(t *testing.T) {
-	t.Run("ok", func(t *testing.T) {
-		got, err := parseNetworkEntry("7:10.7.0.0/24")
+	t.Run("noauth", func(t *testing.T) {
+		got, err := parseNetworkEntry("7:10.7.0.0/24:noauth")
 		if err != nil {
 			t.Fatalf("err: %v", err)
 		}
-		if got.VNI != 7 || got.CIDR != "10.7.0.0/24" {
+		if got.VNI != 7 || got.CIDR != "10.7.0.0/24" || got.Auth == nil {
+			t.Errorf("got %+v", got)
+		}
+	})
+	t.Run("hmac", func(t *testing.T) {
+		got, err := parseNetworkEntry("7:10.7.0.0/24:hmac:id1:secret1")
+		if err != nil {
+			t.Fatalf("err: %v", err)
+		}
+		if got.VNI != 7 || got.CIDR != "10.7.0.0/24" || got.Auth == nil {
 			t.Errorf("got %+v", got)
 		}
 	})
 
 	cases := map[string]string{
-		"missing colon": "abc",
-		"bad vni":       "x:10.0.0.0/24",
-		"empty cidr":    "1:",
+		"missing auth":      "7:10.7.0.0/24",
+		"only vni":          "abc",
+		"bad vni":           "x:10.0.0.0/24:noauth",
+		"empty cidr":        "1::noauth",
+		"empty auth type":   "1:10.0.0.0/24:",
+		"unknown auth type": "1:10.0.0.0/24:bogus:",
 	}
 	for name, in := range cases {
 		t.Run(name, func(t *testing.T) {

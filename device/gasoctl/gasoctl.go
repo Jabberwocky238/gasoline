@@ -21,7 +21,6 @@ package gasoctl
 
 import (
 	"bufio"
-	"encoding/hex"
 	"fmt"
 	"net"
 	"strings"
@@ -85,7 +84,8 @@ func (c *Client) Send(args []string) (string, error) {
 	return strings.TrimRight(reply, "\r\n"), nil
 }
 
-// FormatCID renders a CID as the 16-char hex string the CLI accepts.
+// FormatCID renders a CID as the decimal uint64 string the CLI accepts.
+// (For hex output, callers can prefix the result with "0x" themselves.)
 func FormatCID(cid protocol.CID_Ty) string {
-	return hex.EncodeToString(cid[:])
+	return protocol.FormatCID(cid)
 }

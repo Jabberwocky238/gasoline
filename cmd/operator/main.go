@@ -25,7 +25,8 @@ func main() {
 	collect(ParamOpListen, "VXLAN UDP data-plane bind address (default 0.0.0.0:6677)")
 	collect(ParamLogLevel, "log level: trace, debug, info, warn, error (default info)")
 	collect(ParamListen, "client listener '<schema>://<addr>' (repeatable; default quic://:8443)")
-	collect(ParamNetwork, "vnet entry '<vni>:<cidr>' (repeatable; default 0:10.0.0.0/24)")
+	collect(ParamNetwork, "vnet entry '<vni>:<cidr>:<authtype>[:<authdata>]' (repeatable; default 0:10.0.0.0/24:noauth)")
+	collect(ParamPreset, "preset cid->prefix '<vni>:<cid-hex>:<prefix>' (repeatable)")
 	ipcSocket := flag.String("ipc", defaultIPCSocket, "gasoctl IPC unix socket path")
 	dryRun := flag.Bool("dry-run", false, "parse and validate config, print it, then exit")
 
@@ -79,7 +80,10 @@ func printConfig(cfg *operator.StaticOperatorConfig, ipcSocket string) {
 	}
 	fmt.Println("network:")
 	for vni, n := range cfg.Network {
-		fmt.Printf("  - vni=%d cidr=%s auth=%T\n", vni, n.CIDR, n.Auth)
+		fmt.Printf("  - vni=%d cidr=%s auth=%T preset=%d\n", vni, n.CIDR, n.Auth, len(n.PresetCIDmap))
+		for cid, pfx := range n.PresetCIDmap {
+			fmt.Printf("      %x -> %s\n", cid, pfx)
+		}
 	}
 }
 

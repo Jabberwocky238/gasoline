@@ -25,7 +25,6 @@ package cordinator
 
 import (
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -208,7 +207,7 @@ func (c *Cordinator) handleRoutesList(w http.ResponseWriter, r *http.Request) {
 	v.mu.RLock()
 	out := make([]routeEntry, 0, len(v.routes))
 	for cid, pfx := range v.routes {
-		out = append(out, routeEntry{CID: hex.EncodeToString(cid[:]), Prefix: pfx.String()})
+		out = append(out, routeEntry{CID: protocol.FormatCID(cid), Prefix: pfx.String()})
 	}
 	v.mu.RUnlock()
 	writeJSON(w, out)
@@ -387,7 +386,7 @@ func (c *Cordinator) snapshotTo(ws *websocket.Conn) {
 			_, _ = ws.Write([]byte(fmt.Sprintf("auth set %d %s\n", vni, serializeAuth(v.authType, v.authEntries))))
 		}
 		for cid, pfx := range v.routes {
-			_, _ = ws.Write([]byte(fmt.Sprintf("route set %d %s %s\n", vni, hex.EncodeToString(cid[:]), pfx.String())))
+			_, _ = ws.Write([]byte(fmt.Sprintf("route set %d %s %s\n", vni, protocol.FormatCID(cid), pfx.String())))
 		}
 		v.mu.RUnlock()
 	}
@@ -446,21 +445,8 @@ func parseVNI(s string) (protocol.VNI_Ty, error) {
 	return protocol.VNI_Ty(v), nil
 }
 
-func parseCID(s string) (protocol.CID_Ty, error) {
-	var cid protocol.CID_Ty
-	if s == "" {
-		return cid, fmt.Errorf("cid: missing")
-	}
-	b, err := hex.DecodeString(s)
-	if err != nil {
-		return cid, fmt.Errorf("bad cid %q: %v", s, err)
-	}
-	if len(b) != len(cid) {
-		return cid, fmt.Errorf("bad cid %q: want %d bytes, got %d", s, len(cid), len(b))
-	}
-	copy(cid[:], b)
-	return cid, nil
-}
+// parseCID decodes a CID. Decimal by default; "0x..." for hex.
+func parseCID(s string) (protocol.CID_Ty, error) { return protocol.ParseCID(s) }
 
 // parseAuth splits an auth spec string into (type, entries).
 //

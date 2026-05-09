@@ -50,7 +50,16 @@ func New(cfg *StaticOperatorConfig) (*Operator, error) {
 			return nil, fmt.Errorf("vni %d cidr %q: %w", vni, entry.CIDR, err)
 		}
 		state.registerVNI(vni, entry.Auth)
-		root.Log().Infof("VNet %d: %s", vni, prefix)
+		// Seed preassigned cid->prefix bindings into this VNI's
+		// routingMap so handshakes succeed before any coordinator
+		// pushes routes.
+		if len(entry.PresetCIDmap) > 0 {
+			vn, _ := state.vni(vni)
+			for cid, pfx := range entry.PresetCIDmap {
+				vn.routingMap.Set(cid, pfx)
+			}
+		}
+		root.Log().Infof("VNet %d: %s (%d preset routes)", vni, prefix, len(entry.PresetCIDmap))
 	}
 
 	// init client listeners

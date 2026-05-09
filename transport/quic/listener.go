@@ -21,10 +21,10 @@ import (
 
 type Listener struct {
 	inner    *quic.Listener
-	resolver auth.AuthResolver
+	resolver auth.AuthResolverFn
 }
 
-func NewListener(addr string, resolver auth.AuthResolver, tlsConf *tls.Config) (*Listener, error) {
+func NewListener(addr string, resolver auth.AuthResolverFn, tlsConf *tls.Config) (*Listener, error) {
 	ln, err := quic.ListenAddr(addr, tlsConf, nil)
 	if err != nil {
 		return nil, err

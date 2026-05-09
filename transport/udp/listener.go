@@ -19,7 +19,7 @@ const peerIncomingCap = 8192
 
 type Listener struct {
 	rawConn  *net.UDPConn
-	resolver auth.AuthResolver
+	resolver auth.AuthResolverFn
 
 	// peers is guarded by MutexGuard: map[netip.AddrPort]*virtualPeer
 	// Using netip.AddrPort as key avoids per-packet string allocation from remoteAddr.String().
@@ -40,7 +40,7 @@ type acceptResult struct {
 	result *handshake.HandshakeResult
 }
 
-func NewListener(addr string, resolver auth.AuthResolver) (*Listener, error) {
+func NewListener(addr string, resolver auth.AuthResolverFn) (*Listener, error) {
 	udpAddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
 		return nil, err

@@ -10,10 +10,10 @@ import (
 
 type Listener struct {
 	inner    net.Listener
-	resolver auth.AuthResolver
+	resolver auth.AuthResolverFn
 }
 
-func NewListener(addr string, resolver auth.AuthResolver) (*Listener, error) {
+func NewListener(addr string, resolver auth.AuthResolverFn) (*Listener, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err

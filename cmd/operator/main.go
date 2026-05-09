@@ -12,10 +12,26 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+const defaultIPCSocket = "/var/run/gasoline/operator.sock"
+
 func main() {
-	params, err := parseCLI(os.Args[1:])
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "operator: %v\n", err)
+	params := make(map[string][]string)
+	collect := func(name, usage string) {
+		flag.Func(name, usage, func(v string) error {
+			params[name] = append(params[name], v)
+			return nil
+		})
+	}
+	collect(ParamOpListen, "VXLAN UDP data-plane bind address (default 0.0.0.0:6677)")
+	collect(ParamLogLevel, "log level: trace, debug, info, warn, error (default info)")
+	collect(ParamListen, "client listener '<schema>://<addr>' (repeatable; default quic://:8443)")
+	collect(ParamNetwork, "vnet entry '<vni>:<cidr>' (repeatable; default 0:10.0.0.0/24)")
+	ipcSocket := flag.String("ipc", defaultIPCSocket, "gasoctl IPC unix socket path")
+	dryRun := flag.Bool("dry-run", false, "parse and validate config, print it, then exit")
+
+	flag.Parse()
+	if rest := flag.Args(); len(rest) > 0 {
+		fmt.Fprintf(os.Stderr, "operator: unexpected args: %s\n", strings.Join(rest, " "))
 		os.Exit(2)
 	}
 
@@ -23,6 +39,11 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "operator: %v\n", err)
 		os.Exit(2)
+	}
+
+	if *dryRun {
+		printConfig(cfg, *ipcSocket)
+		return
 	}
 
 	op, err := operator.New(cfg)
@@ -33,38 +54,33 @@ func main() {
 		log.Fatalf("operator start: %v", err)
 	}
 
-	log.Infof("Operator %x started", op.UUID())
+	ipc, err := operator.NewIPC(op.State(), *ipcSocket)
+	if err != nil {
+		log.Fatalf("ipc init: %v", err)
+	}
+	if err := ipc.Start(); err != nil {
+		log.Fatalf("ipc start: %v", err)
+	}
+
+	log.Infof("Operator %x started; ipc on %s", op.UUID(), ipc.Path())
 	waitForSignal()
-	op.Close()
+
+	_ = ipc.Close()
+	_ = op.Close()
 }
 
-// parseCLI uses the standard flag package to turn os.Args-style tokens into
-// a map[string][]string keyed by option name. Repeatable options accumulate;
-// single-valued options end up as a 1-element slice.
-func parseCLI(args []string) (map[string][]string, error) {
-	fs := flag.NewFlagSet("operator", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-
-	out := make(map[string][]string)
-	collect := func(name, usage string) {
-		fs.Func(name, usage, func(v string) error {
-			out[name] = append(out[name], v)
-			return nil
-		})
+func printConfig(cfg *operator.StaticOperatorConfig, ipcSocket string) {
+	fmt.Printf("op-listen: %s\n", cfg.OpListenAddr)
+	fmt.Printf("log-level: %s\n", cfg.LogLevel)
+	fmt.Printf("ipc:       %s\n", ipcSocket)
+	fmt.Println("listeners:")
+	for _, l := range cfg.ClientListeners {
+		fmt.Printf("  - %s://%s\n", l.Transport, l.Addr)
 	}
-
-	collect(ParamOpListen, "VXLAN UDP data-plane bind address (default 0.0.0.0:6677)")
-	collect(ParamLogLevel, "log level: trace, debug, info, warn, error (default info)")
-	collect(ParamListen, "client listener '<schema>://<addr>' (repeatable; default quic://:8443)")
-	collect(ParamNetwork, "vnet entry '<vni>:<cidr>' (repeatable; default 0:10.0.0.0/24)")
-
-	if err := fs.Parse(args); err != nil {
-		return nil, err
+	fmt.Println("network:")
+	for vni, n := range cfg.Network {
+		fmt.Printf("  - vni=%d cidr=%s auth=%T\n", vni, n.CIDR, n.Auth)
 	}
-	if rest := fs.Args(); len(rest) > 0 {
-		return nil, fmt.Errorf("unexpected positional arguments: %s", strings.Join(rest, " "))
-	}
-	return out, nil
 }
 
 func waitForSignal() {

@@ -2,11 +2,8 @@ package operator
 
 import (
 	"context"
-	"errors"
-	"net/netip"
 	"sync"
 
-	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol"
 )
 
@@ -30,6 +27,6 @@ func newOperatorState(ctx context.Context) *operatorState {
 	return &operatorState{
 		ctx:   ctx,
 		vnets: make(map[protocol.VNI_Ty]*vniEntry),
-		Peers: NewPeerOperatorTable(),
+		Peers: NewPeerTable(),
 	}
 }

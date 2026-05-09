@@ -2,11 +2,21 @@ package operator
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"net/netip"
 
 	"github.com/jabberwocky238/gasoline/common"
+	"github.com/jabberwocky238/gasoline/protocol"
 )
+
+// addToAddrV4 returns base + delta (host order) as an IPv4 netip.Addr.
+func addToAddrV4(base netip.Addr, delta uint32) netip.Addr {
+	b := base.As4()
+	v := binary.BigEndian.Uint32(b[:]) + delta
+	binary.BigEndian.PutUint32(b[:], v)
+	return netip.AddrFrom4(b)
+}
 
 // v4State is the guarded mutable state for an IPv4 pool. Nil on IPv6 pools.
 type v4State struct {
@@ -24,6 +34,7 @@ type v4State struct {
 //	ReserveIP / UnreserveIP / ReleaseIP are no-ops on v6 pools since
 //	there is no shared allocation table to coordinate.
 type VNetIpPool struct {
+	VNI      protocol.VNI_Ty
 	Prefix   netip.Prefix
 	baseAddr netip.Addr
 
@@ -72,7 +83,7 @@ func (p *VNetIpPool) allocateV4() (netip.Addr, error) {
 			}
 
 			if !wrapped && s.next == start {
-				err = fmt.Errorf("IP pool exhausted for vni %s", p.VNI)
+				err = fmt.Errorf("IP pool exhausted for vni %d", p.VNI)
 				return
 			}
 			if s.next == start {
@@ -110,7 +121,10 @@ func (p *VNetIpPool) deriveV6(sessionID [16]byte) netip.Addr {
 	// Hash input = sessionID (16B) + VNI (3B big-endian)
 	h := sha256.New()
 	h.Write(sessionID[:])
-	vb := p.VNI.Bytes3()
+	var vb [3]byte
+	vb[0] = byte(p.VNI >> 16)
+	vb[1] = byte(p.VNI >> 8)
+	vb[2] = byte(p.VNI)
 	h.Write(vb[:])
 	sum := h.Sum(nil)
 

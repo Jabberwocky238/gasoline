@@ -1,0 +1,144 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gasoline
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: vnetconfigs.gasoline.jabberwocky238.io
+spec:
+  group: gasoline.jabberwocky238.io
+  scope: Namespaced
+  names:
+    plural: vnetconfigs
+    singular: vnetconfig
+    kind: VNetConfig
+    listKind: VNetConfigList
+    shortNames:
+      - vnc
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: VNI
+          type: integer
+          jsonPath: .spec.vnet
+        - name: CIDR
+          type: string
+          jsonPath: .spec.cidr
+        - name: Applied
+          type: date
+          jsonPath: .status.lastApplied
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: [vnet, cidr]
+              properties:
+                vnet:
+                  type: integer
+                  minimum: 0
+                  maximum: 16777215
+                cidr:
+                  type: string
+                auth:
+                  type: string
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: gasoline-operator
+  namespace: gasoline
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: gasoline-operator
+rules:
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "create"]
+  - apiGroups: ["gasoline.jabberwocky238.io"]
+    resources: ["vnetconfigs"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["gasoline.jabberwocky238.io"]
+    resources: ["vnetconfigs/status"]
+    verbs: ["update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: gasoline-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: gasoline-operator
+subjects:
+  - kind: ServiceAccount
+    name: gasoline-operator
+    namespace: gasoline
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: gasoline-operator
+  namespace: gasoline
+  labels:
+    app: gasoline-operator
+spec:
+  selector:
+    matchLabels:
+      app: gasoline-operator
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: gasoline-operator
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      serviceAccountName: gasoline-operator
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: externalip
+                    operator: Exists
+      tolerations:
+        - operator: Exists
+      containers:
+        - name: operator
+          image: ghcr.io/jabberwocky238/gasoline:latest # TODO: pin a digest
+          imagePullPolicy: Always
+          args:
+            - "operator"
+            - "--listen=quic://:20000;tls://:20001;udp://:20002"
+            - "--op-listen=:5555"
+            - "--op-addr-claim=$(EXTERNAL_IP):5555"
+            - "--auth=noauth"
+            - "--enable-k8s"
+            - "--op-addr-discover=163.245.211.144:5555"
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: EXTERNAL_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.labels['externalip']
+---
+

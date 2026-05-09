@@ -1,0 +1,29 @@
+[Unit]
+Description=Gasoline Operator
+Documentation=https://github.com/jabberwocky238/gasoline
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/gasoline/operator.env
+ExecStart=/usr/local/bin/gasoline operator -c /etc/gasoline/operator.yaml --watch-vni=/etc/gasoline/vni.d --enable-fswatch --enable-sigreload
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=1048576
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/log/gasoline /var/lib/gasoline
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+StandardOutput=append:/var/log/gasoline/operator.log
+StandardError=append:/var/log/gasoline/operator.log
+
+[Install]
+WantedBy=multi-user.target

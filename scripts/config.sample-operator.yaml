@@ -1,0 +1,26 @@
+# Gasoline Operator Configuration
+# Usage: gasoline operator -c config.sample-server.yaml
+
+listen: "quic://0.0.0.0:8443;tls://0.0.0.0:18443"
+op-listen: "0.0.0.0:6677"
+op-addr-claim: "10.0.0.1:6677"
+# op-addr-discover: "peer1.example.com:6677,peer2.example.com:6677"
+
+# Global default auth (used when a VNet has no per-VNet auth)
+auth: "noauth"
+
+# Each network can override auth independently
+network:
+  - vnet: 200
+    cidr: "10.0.0.0/24"
+    # auth: "noauth"  # inherits global default
+  - vnet: 1000
+    cidr: "192.168.200.0/24"
+    # auth: "hmac:client1:mysecret;client2:othersecret"
+    auth:
+      - type: hmac
+        clients:
+          - name: client1
+            secret: mysecret
+          - name: client2
+            secret: othersecret

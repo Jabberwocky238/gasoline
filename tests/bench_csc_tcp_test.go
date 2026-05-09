@@ -1,0 +1,32 @@
+package tests
+
+import (
+	"testing"
+
+	"github.com/jabberwocky238/gasoline/common"
+	"github.com/jabberwocky238/gasoline/protocol/auth"
+	"github.com/jabberwocky238/gasoline/transport/tcp"
+)
+
+func TestCSC_TCP(t *testing.T) {
+	op, vni := setupSingleOperator(t, "tcp")
+	defer op.Close()
+
+	connA, resultA, err := tcp.NewDialer(common.VMAC{0x02, 0, 0, 0, 0, 0x01}, vni, &auth.NoAuthClient{}).Dial(op.ClientAddr())
+	if err != nil {
+		t.Fatalf("ClientA dial: %v", err)
+	}
+	defer connA.Close()
+
+	connB, resultB, err := tcp.NewDialer(common.VMAC{0x02, 0, 0, 0, 0, 0x02}, vni, &auth.NoAuthClient{}).Dial(op.ClientAddr())
+	if err != nil {
+		t.Fatalf("ClientB dial: %v", err)
+	}
+	defer connB.Close()
+
+	clientAIP := resultA.Config.IPPrefix.Addr()
+	clientBIP := resultB.Config.IPPrefix.Addr()
+	t.Logf("ClientA=%s  ClientB=%s", clientAIP, clientBIP)
+
+	runTransfer(t, "CSC-TCP", connA, connB, clientAIP, clientBIP, resultA.VMAC, resultB.VMAC)
+}

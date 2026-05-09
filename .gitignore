@@ -1,0 +1,9 @@
+*.exe
+
+build/
+_device/
+
+*.prof
+bin/*
+
+enzyme-connect-control/

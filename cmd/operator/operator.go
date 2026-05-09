@@ -3,8 +3,6 @@ package operator
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/binary"
 	"fmt"
 	"math/big"
 	"net"
@@ -16,7 +14,6 @@ import (
 	"github.com/jabberwocky238/gasoline/cmd/operator/stats"
 	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/device/vxlan"
-	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/transport"
 	transportQuic "github.com/jabberwocky238/gasoline/transport/quic"
@@ -42,9 +39,9 @@ import (
 type Operator struct {
 	ctx    context.Context
 	cancel context.CancelFunc
-	gctx   *common.GasolineGeneralContext // wrapper used by vxlan/vtep
-	log    *log.Logger
-	uuid   [16]byte
+
+	log  *log.Logger
+	uuid [16]byte
 
 	dataListenAddr   string
 	dataExternalAddr string
@@ -53,19 +50,13 @@ type Operator struct {
 
 	state *operatorState
 	Stats *stats.Engine
-
-	authResolver *auth.MapResolver
 }
 
-func New(cfg *OperatorConfig) (*Operator, error) {
+func New(cfg *StaticOperatorConfig) (*Operator, error) {
 	logger := log.New()
 	logger.SetLevel(cfg.LogLevel)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	gctx := common.NewGasolineCtx(ctx, log.NewEntry(logger))
-
-	var pools *VNetPoolMap
-	var resolver *auth.MapResolver
 	clientListeners := make(map[string]transport.Listener)
 
 	seed, _ := rand.Int(rand.Reader, big.NewInt(1<<32))

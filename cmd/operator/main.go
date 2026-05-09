@@ -21,26 +21,19 @@ func isFlagSet(fs *flag.FlagSet, name string) bool {
 	return found
 }
 
-type OperatorConfig struct {
+type StaticOperatorConfig struct {
 	UUID            *[16]byte
 	ClientListeners []ListenerSpec
 	OpListenAddr    string // VXLAN UDP bind address ("host:port")
 	OpExternalAddr  string // UDP endpoint claimed to the coordinator
-	AuthStr         string
-	NetworkAuth     map[VNI]string
-	Network         string
-	StatsAddr       string
-	WatchDir        string
-	EnableFswatch   bool
-	EnableSigreload bool
-	EnableK8s       bool
-	K8sNamespace    string
-	LogLevel        logrus.Level
+
+	Network  map[VNI]string
+	LogLevel logrus.Level
 }
 
 // RegisterOperatorFlags registers all operator CLI flags on the given FlagSet.
 // Returns a function that resolves flags + config file into OperatorConfig.
-func RegisterOperatorFlags(fs *flag.FlagSet) func() *OperatorConfig {
+func RegisterOperatorFlags(fs *flag.FlagSet) func() *StaticOperatorConfig {
 	configFile := fs.String("c", "", "config file path (YAML)")
 	opListen := fs.String("op-listen", "0.0.0.0:6677", "VXLAN UDP data-plane bind address")
 	opAddrClaim := fs.String("op-addr-claim", "", "UDP endpoint this operator claims to the coordinator (host:port, peer-reachable)")
@@ -53,8 +46,8 @@ func RegisterOperatorFlags(fs *flag.FlagSet) func() *OperatorConfig {
 	enableK8s := fs.Bool("enable-k8s", false, "enable k8s VNetConfig informer hot-reload backend")
 	logLevel := fs.String("log-level", "info", "log level: trace, debug, info, warn, error")
 
-	return func() *OperatorConfig {
-		result := &OperatorConfig{
+	return func() *StaticOperatorConfig {
+		result := &StaticOperatorConfig{
 			NetworkAuth: make(map[config.VNI]string),
 		}
 

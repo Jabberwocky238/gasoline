@@ -1,6 +1,7 @@
 package operator
 
 import (
+	"context"
 	"errors"
 	"net/netip"
 	"sync"
@@ -8,22 +9,6 @@ import (
 	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol"
 )
-
-type vniEntry struct {
-	mu      sync.RWMutex
-	clients map[protocol.VNI_Ty]*PeerClient
-}
-
-// Clients returns a snapshot copy of the per-VNI client map.
-func (v *vniEntry) Clients() []*PeerClient {
-	v.mu.RLock()
-	defer v.mu.RUnlock()
-	out := make([]*PeerClient, 0, len(v.clients))
-	for _, cp := range v.clients {
-		out = append(out, cp)
-	}
-	return out
-}
 
 // operatorState owns every VNI's L2 plane and the shared underlay
 // socket multiplexer. vniEntry rows are created lazily on the first
@@ -34,20 +19,16 @@ func (v *vniEntry) Clients() []*PeerClient {
 // peer registered before its first VNI is created still propagates
 // to the resulting Port.
 type operatorState struct {
-	ctx *common.GasolineGeneralContext
+	ctx context.Context
 
 	mu    sync.RWMutex
 	vnets map[protocol.VNI_Ty]*vniEntry
 	Peers *PeerOperatorTable
-
-	seedMu    sync.Mutex
-	peerSeeds map[netip.AddrPort]struct{}
 }
 
-func newOperatorState(ctx *common.GasolineGeneralContext, vxlanDev *vxlan.Device) *operatorState {
+func newOperatorState(ctx context.Context) *operatorState {
 	return &operatorState{
 		ctx:       ctx,
-		vxlanDev:  vxlanDev,
 		vnets:     make(map[protocol.VNI_Ty]*vniEntry),
 		Peers:     NewPeerOperatorTable(),
 		peerSeeds: make(map[netip.AddrPort]struct{}),
@@ -198,51 +179,4 @@ func (s *operatorState) CloseAll() {
 	for _, vn := range vnets {
 		vn.vtep.Close()
 	}
-}
-
-// SeedAllPeers pushes addr into every existing vniEntry's vxlan peer
-// set AND records it in the operator-wide seed roster so future
-// vniEntry creations inherit it. Called from Operator.AddPeer.
-func (s *operatorState) SeedAllPeers(addr netip.AddrPort) {
-	s.seedMu.Lock()
-	s.peerSeeds[addr] = struct{}{}
-	s.seedMu.Unlock()
-
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, vn := range s.vnets {
-		if vn.vxlanPort != nil {
-			vn.vxlanPort.AddSeed(addr)
-		}
-	}
-}
-
-// UnseedAllPeers removes addr from the seed roster and from every
-// existing vniEntry.
-func (s *operatorState) UnseedAllPeers(addr netip.AddrPort) {
-	s.seedMu.Lock()
-	delete(s.peerSeeds, addr)
-	s.seedMu.Unlock()
-
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, vn := range s.vnets {
-		if vn.vxlanPort != nil {
-			vn.vxlanPort.RemoveSeed(addr)
-		}
-	}
-}
-
-// --------------- announce ---------------
-
-// buildAnnounceFrame returns a fixed-size Ethernet frame whose only
-// purpose is to seed remote vtep FDBs with srcMAC. Sent over the
-// VNI's vxlan.Port at client-attach time so peer operators learn
-// "this MAC lives behind us" before the client sends any real
-// traffic. EtherType is vtep.EtherTypeControl, which the receiving
-// vtep treats as FDB-only (no forwarding).
-func buildAnnounceFrame(srcMAC common.VMAC) []byte {
-	frame := make([]byte, common.EthHeaderSize)
-	vtep.WriteEthHeader(frame, common.EthBroadcastMAC, srcMAC, vtep.EtherTypeControl)
-	return frame
 }

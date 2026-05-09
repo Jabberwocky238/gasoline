@@ -23,8 +23,7 @@ type v4State struct {
 //
 //	ReserveIP / UnreserveIP / ReleaseIP are no-ops on v6 pools since
 //	there is no shared allocation table to coordinate.
-type VNetPool struct {
-	VNI      common.VNI
+type VNetIpPool struct {
 	Prefix   netip.Prefix
 	baseAddr netip.Addr
 
@@ -33,19 +32,19 @@ type VNetPool struct {
 }
 
 // IsV4 reports whether this pool allocates IPv4 addresses.
-func (p *VNetPool) IsV4() bool { return p.Prefix.Addr().Is4() }
+func (p *VNetIpPool) IsV4() bool { return p.Prefix.Addr().Is4() }
 
 // AllocateIP returns an IP for the given session.
 // For IPv4 pools, the sessionID is ignored (sequential allocation).
 // For IPv6 pools, the IP is deterministically derived from (sessionID, VNI).
-func (p *VNetPool) AllocateIP(sessionID [16]byte) (netip.Addr, error) {
+func (p *VNetIpPool) AllocateIP(sessionID [16]byte) (netip.Addr, error) {
 	if !p.IsV4() {
 		return p.deriveV6(sessionID), nil
 	}
 	return p.allocateV4()
 }
 
-func (p *VNetPool) allocateV4() (netip.Addr, error) {
+func (p *VNetIpPool) allocateV4() (netip.Addr, error) {
 	var (
 		out netip.Addr
 		err error
@@ -104,7 +103,7 @@ func (p *VNetPool) allocateV4() (netip.Addr, error) {
 //
 // Because the host-bit space is sparse (≥ 64 bits for typical /64 prefixes),
 // collision probability across ~10^9 concurrent sessions is negligible.
-func (p *VNetPool) deriveV6(sessionID [16]byte) netip.Addr {
+func (p *VNetIpPool) deriveV6(sessionID [16]byte) netip.Addr {
 	base := p.baseAddr.As16()
 	bits := p.Prefix.Bits()
 
@@ -132,7 +131,7 @@ func (p *VNetPool) deriveV6(sessionID [16]byte) netip.Addr {
 }
 
 // ReleaseIP returns an IPv4 address back to the pool. No-op for IPv6.
-func (p *VNetPool) ReleaseIP(ip netip.Addr) {
+func (p *VNetIpPool) ReleaseIP(ip netip.Addr) {
 	if !ip.Is4() || p.v4 == nil {
 		return
 	}
@@ -147,7 +146,7 @@ func (p *VNetPool) ReleaseIP(ip netip.Addr) {
 }
 
 // ReserveIP marks an IPv4 address as in-use. No-op for IPv6 (stateless).
-func (p *VNetPool) ReserveIP(ip netip.Addr) {
+func (p *VNetIpPool) ReserveIP(ip netip.Addr) {
 	if !ip.Is4() || p.v4 == nil {
 		return
 	}
@@ -156,7 +155,7 @@ func (p *VNetPool) ReserveIP(ip netip.Addr) {
 }
 
 // UnreserveIP removes an IPv4 reservation. No-op for IPv6.
-func (p *VNetPool) UnreserveIP(ip netip.Addr) {
+func (p *VNetIpPool) UnreserveIP(ip netip.Addr) {
 	if !ip.Is4() || p.v4 == nil {
 		return
 	}
@@ -166,7 +165,7 @@ func (p *VNetPool) UnreserveIP(ip netip.Addr) {
 
 // InUseCount returns the number of currently allocated IPv4 addresses.
 // Always 0 for IPv6 pools (stateless).
-func (p *VNetPool) InUseCount() int {
+func (p *VNetIpPool) InUseCount() int {
 	if p.v4 == nil {
 		return 0
 	}
@@ -175,7 +174,7 @@ func (p *VNetPool) InUseCount() int {
 	return n
 }
 
-func (p *VNetPool) ipToSeqV4(ip netip.Addr) uint32 {
+func (p *VNetIpPool) ipToSeqV4(ip netip.Addr) uint32 {
 	b4 := ip.As4()
 	ipVal := uint32(b4[0])<<24 | uint32(b4[1])<<16 | uint32(b4[2])<<8 | uint32(b4[3])
 	base4 := p.baseAddr.As4()
@@ -186,9 +185,8 @@ func (p *VNetPool) ipToSeqV4(ip netip.Addr) uint32 {
 // NewVNetPool creates a single VNet pool for the given VNI and CIDR prefix.
 // For v4 prefixes, seed controls the starting offset to spread allocations
 // across operators. For v6, seed is ignored.
-func NewVNetPool(vni common.VNI, prefix netip.Prefix, seed uint32) *VNetPool {
-	p := &VNetPool{
-		VNI:      vni,
+func NewVNetPool(prefix netip.Prefix, seed uint32) *VNetIpPool {
+	p := &VNetIpPool{
 		Prefix:   prefix,
 		baseAddr: prefix.Addr(),
 	}

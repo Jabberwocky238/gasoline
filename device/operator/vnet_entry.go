@@ -6,20 +6,20 @@ import (
 	"github.com/jabberwocky238/gasoline/protocol/auth"
 )
 
-// vniEntry holds per-VNI runtime state: the active client set and its
-// auth strategy.
+// vniEntry holds per-VNI runtime state: the active client set, the
+// authoritative cid<->prefix routing table, and its auth strategy.
 type vniEntry struct {
 	mu            sync.RWMutex
 	authenticator auth.ServerAuthenticator
 	clients       map[uint32]*PeerClient // keyed by SessionIndex
-	pool          *VNetIpPool
+	routingMap    *vnetRoutingMap
 }
 
-func newVniEntry(authn auth.ServerAuthenticator, pool *VNetIpPool) *vniEntry {
+func newVniEntry(authn auth.ServerAuthenticator) *vniEntry {
 	return &vniEntry{
 		authenticator: authn,
 		clients:       make(map[uint32]*PeerClient),
-		pool:          pool,
+		routingMap:    newVnetRoutingMap(),
 	}
 }
 

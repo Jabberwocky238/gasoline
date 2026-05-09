@@ -14,8 +14,8 @@ import (
 // don't admit clients for unknown VNIs.
 type operatorState struct {
 	ctx context.Context
+	mu  sync.RWMutex
 
-	mu    sync.RWMutex
 	vnets map[protocol.VNI_Ty]*vniEntry
 	Peers *PeerOperatorTable
 }
@@ -28,10 +28,10 @@ func newOperatorState(ctx context.Context) *operatorState {
 	}
 }
 
-func (s *operatorState) registerVNI(vni protocol.VNI_Ty, authn auth.ServerAuthenticator, pool *VNetIpPool) {
+func (s *operatorState) registerVNI(vni protocol.VNI_Ty, authn auth.ServerAuthenticator) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.vnets[vni] = newVniEntry(authn, pool)
+	s.vnets[vni] = newVniEntry(authn)
 }
 
 func (s *operatorState) vni(vni protocol.VNI_Ty) (*vniEntry, bool) {

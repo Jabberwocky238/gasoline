@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
-	"math/big"
 	"net/netip"
 	"time"
 
@@ -88,8 +87,6 @@ func New(cfg *StaticOperatorConfig) (*Operator, error) {
 
 	state := newOperatorState(ctx)
 
-	seedBig, _ := rand.Int(rand.Reader, big.NewInt(1<<32))
-	seed := uint32(seedBig.Int64())
 	for vni, entry := range cfg.Network {
 		prefix, err := netip.ParsePrefix(entry.CIDR)
 		if err != nil {
@@ -97,9 +94,7 @@ func New(cfg *StaticOperatorConfig) (*Operator, error) {
 			closeAll(clientListeners)
 			return nil, fmt.Errorf("vni %d cidr %q: %w", vni, entry.CIDR, err)
 		}
-		pool := NewVNetPool(prefix, seed)
-		pool.VNI = vni
-		state.registerVNI(vni, entry.Auth, pool)
+		state.registerVNI(vni, entry.Auth)
 		logger.Infof("VNet %d: %s", vni, prefix)
 	}
 

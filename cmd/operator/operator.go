@@ -23,33 +23,17 @@ import (
 )
 
 // Operator is the per-process control + data plane orchestrator.
-//
-// Data plane structure:
-//
-//	+-----------------+      +---------------+
-//	|  vxlan.Device   |◄────►| operatorState |─── per-VNI ───► vniEntry { vtep, vxlanPort, clients }
-//	| shared underlay |      |               |
-//	+-----------------+      +---------------+
-//
-// Each VNI gets its own vtep.Device (selfMAC=zero — operator is a
-// pure forwarder, never an endpoint). Clients attaching to this
-// operator are wrapped as clientPort and added to the matching VNI's
-// vtep. Inter-operator traffic for that VNI rides the shared
-// vxlan.Device underlay through the VNI's vxlan.Port.
 type Operator struct {
 	ctx    context.Context
 	cancel context.CancelFunc
+	cfg    *StaticOperatorConfig
 
 	log  *log.Logger
 	uuid [16]byte
 
-	dataListenAddr   string
-	dataExternalAddr string
-
 	clientListeners map[string]transport.Listener
 
 	state *operatorState
-	Stats *stats.Engine
 }
 
 func New(cfg *StaticOperatorConfig) (*Operator, error) {

@@ -10,6 +10,10 @@ type ListenerSpec struct {
 	Addr      string
 }
 
+// tcp://:8080
+// quic://:8443
+// tls://[::1]:9000
+// udp://0.0.0.0:6677
 func ParseListenerSpecs(s string) ([]ListenerSpec, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -17,7 +21,7 @@ func ParseListenerSpecs(s string) ([]ListenerSpec, error) {
 	}
 	var out []ListenerSpec
 	seen := make(map[string]struct{})
-	for _, raw := range strings.Split(s, ";") {
+	for raw := range strings.SplitSeq(s, ";") {
 		raw = strings.TrimSpace(raw)
 		if raw == "" {
 			continue

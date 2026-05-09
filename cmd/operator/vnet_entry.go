@@ -1,12 +1,8 @@
 package operator
 
 import (
-	"context"
-	"errors"
-	"net/netip"
 	"sync"
 
-	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
 )

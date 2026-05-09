@@ -3,11 +3,16 @@ package handshake
 import (
 	"fmt"
 	"io"
+	"net/netip"
 	"sync/atomic"
 
 	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
 )
+
+// RouteResolverFn returns the routable prefix configured for (vni, cid).
+// Returning a non-nil error fails the handshake with HandshakeNoRoute.
+type RouteResolverFn func(vni protocol.VNI_Ty, cid protocol.CID_Ty) (netip.Prefix, error)
 
 var sessionIndexCounter atomic.Uint32
 
@@ -29,6 +34,7 @@ type HandshakeResult struct {
 	SessionIndex   uint32
 	CID            protocol.CID_Ty
 	VNI            protocol.VNI_Ty
+	Prefix         netip.Prefix // assigned by the server's route resolver
 	SessionContext *protocol.SessionContext
 }
 
@@ -84,10 +90,13 @@ func ClientHandshake(rw io.ReadWriter, preassignedConfig *protocol.PreassignedSe
 	}, nil
 }
 
-// ServerHandshake performs the handshake on the server side.
+// ServerHandshake performs the handshake on the server side. The
+// routeResolver is consulted after auth succeeds; if it returns an
+// error the handshake is rejected with HandshakeNoRoute.
 func ServerHandshake(
 	rw io.ReadWriter,
 	resolver auth.AuthResolverFn,
+	routeResolver RouteResolverFn,
 ) (*HandshakeResult, error) {
 	var hello ClientHello
 	if err := hello.Decode(rw); err != nil {
@@ -129,6 +138,16 @@ func ServerHandshake(
 		return nil, fmt.Errorf("auth verify: %w", err)
 	}
 
+	if routeResolver == nil {
+		sendFail(rw, HandshakeNoRoute)
+		return nil, fmt.Errorf("no route resolver configured for vni %d", hello.VNI)
+	}
+	prefix, err := routeResolver(hello.VNI, hello.CID)
+	if err != nil {
+		sendFail(rw, HandshakeNoRoute)
+		return nil, fmt.Errorf("resolve route for vni %d cid %x: %w", hello.VNI, hello.CID, err)
+	}
+
 	idx := nextSessionIndex()
 	assign := &ServerAssign{
 		Code:         HandshakeOK,
@@ -142,6 +161,7 @@ func ServerHandshake(
 		SessionIndex: idx,
 		CID:          hello.CID,
 		VNI:          hello.VNI,
+		Prefix:       prefix,
 	}, nil
 }
 

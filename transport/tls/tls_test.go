@@ -1,6 +1,7 @@
 package tls
 
 import (
+	"net/netip"
 	"bytes"
 	"crypto/sha256"
 	"sync"
@@ -18,6 +19,13 @@ func testResolver(a auth.ServerAuthenticator) auth.AuthResolverFn {
 	}
 }
 
+
+func testRoutes() handshake.RouteResolverFn {
+	return func(vni protocol.VNI_Ty, cid protocol.CID_Ty) (netip.Prefix, error) {
+		return netip.MustParsePrefix("10.0.0.1/32"), nil
+	}
+}
+
 func newTestCfg(cid protocol.CID_Ty) protocol.PreassignedSessionConfig {
 	return protocol.NewPreassignedSessionConfig(cid, 0)
 }
@@ -29,7 +37,7 @@ func TestTLSHandshakeAndPacket(t *testing.T) {
 		t.Fatalf("GenerateServerTLS: %v", err)
 	}
 
-	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth), serverTLS)
+	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth), testRoutes(), serverTLS)
 	if err != nil {
 		t.Fatalf("NewListener: %v", err)
 	}
@@ -140,7 +148,7 @@ func TestTLSMultiplePackets(t *testing.T) {
 		t.Fatalf("GenerateServerTLS: %v", err)
 	}
 
-	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth), serverTLS)
+	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth), testRoutes(), serverTLS)
 	if err != nil {
 		t.Fatalf("NewListener: %v", err)
 	}
@@ -212,7 +220,7 @@ func TestTLSHMACAuth(t *testing.T) {
 		t.Fatalf("GenerateServerTLS: %v", err)
 	}
 
-	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth), serverTLS)
+	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth), testRoutes(), serverTLS)
 	if err != nil {
 		t.Fatalf("NewListener: %v", err)
 	}
@@ -259,7 +267,7 @@ func TestTLSUserPassAuth(t *testing.T) {
 		t.Fatalf("GenerateServerTLS: %v", err)
 	}
 
-	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth), serverTLS)
+	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth), testRoutes(), serverTLS)
 	if err != nil {
 		t.Fatalf("NewListener: %v", err)
 	}

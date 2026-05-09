@@ -1,6 +1,7 @@
 package operator
 
 import (
+	"context"
 	"crypto/rand"
 	"fmt"
 	"net/netip"
@@ -9,6 +10,7 @@ import (
 	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
+	"github.com/jabberwocky238/gasoline/protocol/handshake"
 	"github.com/jabberwocky238/gasoline/transport"
 	transportQuic "github.com/jabberwocky238/gasoline/transport/quic"
 	transportTcp "github.com/jabberwocky238/gasoline/transport/tcp"
@@ -37,7 +39,7 @@ type Operator struct {
 func New(cfg *StaticOperatorConfig) (*Operator, error) {
 	logger := log.New()
 	logger.SetLevel(cfg.LogLevel)
-	root := common.NewLogContext(nil, logger)
+	root := common.NewLogContext(context.Background(), logger)
 
 	state := newOperatorState(root)
 	// init vni config and auth resolver
@@ -63,12 +65,24 @@ func New(cfg *StaticOperatorConfig) (*Operator, error) {
 			closeAll(clientListeners)
 			return nil, fmt.Errorf("duplicate listener transport %q", spec.Transport)
 		}
-		ln, err := createClientListener(spec.Transport, spec.Addr, func(vni protocol.VNI_Ty) (auth.ServerAuthenticator, error) {
+		authResolver := func(vni protocol.VNI_Ty) (auth.ServerAuthenticator, error) {
 			if entry, ok := state.vnets[vni]; ok {
 				return entry.authenticator, nil
 			}
 			return nil, fmt.Errorf("no config for vni %d", vni)
-		})
+		}
+		routeResolver := func(vni protocol.VNI_Ty, cid protocol.CID_Ty) (netip.Prefix, error) {
+			entry, ok := state.vnets[vni]
+			if !ok {
+				return netip.Prefix{}, fmt.Errorf("no config for vni %d", vni)
+			}
+			pfx, ok := entry.routingMap.LookupByCID(cid)
+			if !ok {
+				return netip.Prefix{}, fmt.Errorf("no route assigned for cid %x", cid)
+			}
+			return pfx, nil
+		}
+		ln, err := createClientListener(spec.Transport, spec.Addr, authResolver, routeResolver)
 		if err != nil {
 			root.Cancel()
 			closeAll(clientListeners)
@@ -248,24 +262,24 @@ func (o *Operator) routineReaper() {
 
 // --------------- Client listener helpers ---------------
 
-func createClientListener(transportType, addr string, resolver auth.AuthResolverFn) (transport.Listener, error) {
+func createClientListener(transportType, addr string, resolver auth.AuthResolverFn, routes handshake.RouteResolverFn) (transport.Listener, error) {
 	switch transportType {
 	case "tcp":
-		return transportTcp.NewListener(addr, resolver)
+		return transportTcp.NewListener(addr, resolver, routes)
 	case "udp":
-		return transportUdp.NewListener(addr, resolver)
+		return transportUdp.NewListener(addr, resolver, routes)
 	case "quic":
 		tlsConf, err := transportQuic.GenerateServerTLS()
 		if err != nil {
 			return nil, err
 		}
-		return transportQuic.NewListener(addr, resolver, tlsConf)
+		return transportQuic.NewListener(addr, resolver, routes, tlsConf)
 	case "tls":
 		tlsConf, err := transportQuic.GenerateServerTLS()
 		if err != nil {
 			return nil, err
 		}
-		return transportTls.NewListener(addr, resolver, tlsConf)
+		return transportTls.NewListener(addr, resolver, routes, tlsConf)
 	default:
 		return nil, fmt.Errorf("unknown transport: %s", transportType)
 	}

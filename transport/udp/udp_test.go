@@ -1,6 +1,7 @@
 package udp
 
 import (
+	"net/netip"
 	"bytes"
 	"sync"
 	"testing"
@@ -16,13 +17,20 @@ func testResolver(a auth.ServerAuthenticator) auth.AuthResolverFn {
 	}
 }
 
+
+func testRoutes() handshake.RouteResolverFn {
+	return func(vni protocol.VNI_Ty, cid protocol.CID_Ty) (netip.Prefix, error) {
+		return netip.MustParsePrefix("10.0.0.1/32"), nil
+	}
+}
+
 func newTestCfg(cid protocol.CID_Ty) protocol.PreassignedSessionConfig {
 	return protocol.NewPreassignedSessionConfig(cid, 0)
 }
 
 func TestUDPHandshakeAndPacket(t *testing.T) {
 	serverAuth := &auth.NoAuthServer{}
-	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth))
+	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth), testRoutes())
 	if err != nil {
 		t.Fatalf("NewListener: %v", err)
 	}
@@ -127,7 +135,7 @@ func TestUDPHandshakeAndPacket(t *testing.T) {
 
 func TestUDPMultiplePackets(t *testing.T) {
 	serverAuth := &auth.NoAuthServer{}
-	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth))
+	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth), testRoutes())
 	if err != nil {
 		t.Fatalf("NewListener: %v", err)
 	}
@@ -187,7 +195,7 @@ func TestUDPMultiplePackets(t *testing.T) {
 func TestUDPMultipleClients(t *testing.T) {
 	serverAuth := &auth.NoAuthServer{}
 
-	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth))
+	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth), testRoutes())
 	if err != nil {
 		t.Fatalf("NewListener: %v", err)
 	}

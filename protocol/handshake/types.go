@@ -11,6 +11,7 @@ const (
 	HandshakeUnknownFail HandshakeCode = 0x01
 	HandshakeAuthFail    HandshakeCode = 0x02
 	HandshakeQOS         HandshakeCode = 0x03
+	HandshakeNoRoute     HandshakeCode = 0x04
 )
 
 type HandshakeCryptoSuite uint16

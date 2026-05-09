@@ -1,6 +1,7 @@
 package tcp
 
 import (
+	"net/netip"
 	"bytes"
 	"crypto/sha256"
 	"sync"
@@ -17,13 +18,20 @@ func testResolver(a auth.ServerAuthenticator) auth.AuthResolverFn {
 	}
 }
 
+
+func testRoutes() handshake.RouteResolverFn {
+	return func(vni protocol.VNI_Ty, cid protocol.CID_Ty) (netip.Prefix, error) {
+		return netip.MustParsePrefix("10.0.0.1/32"), nil
+	}
+}
+
 func newTestCfg(cid protocol.CID_Ty) protocol.PreassignedSessionConfig {
 	return protocol.NewPreassignedSessionConfig(cid, 0)
 }
 
 func TestTCPHandshakeAndPacket(t *testing.T) {
 	serverAuth := &auth.NoAuthServer{}
-	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth))
+	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth), testRoutes())
 	if err != nil {
 		t.Fatalf("NewListener: %v", err)
 	}
@@ -129,7 +137,7 @@ func TestTCPHandshakeAndPacket(t *testing.T) {
 
 func TestTCPMultiplePackets(t *testing.T) {
 	serverAuth := &auth.NoAuthServer{}
-	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth))
+	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth), testRoutes())
 	if err != nil {
 		t.Fatalf("NewListener: %v", err)
 	}
@@ -195,7 +203,7 @@ func TestTCPHMACAuth(t *testing.T) {
 		},
 	}
 	clientAuth := &auth.HMACClient{ID: "testclient", Secret: []byte("test-shared-secret-1234")}
-	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth))
+	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth), testRoutes())
 	if err != nil {
 		t.Fatalf("NewListener: %v", err)
 	}
@@ -236,7 +244,7 @@ func TestTCPUserPassAuth(t *testing.T) {
 		UserID:   "alice",
 		Password: "password123",
 	}
-	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth))
+	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth), testRoutes())
 	if err != nil {
 		t.Fatalf("NewListener: %v", err)
 	}

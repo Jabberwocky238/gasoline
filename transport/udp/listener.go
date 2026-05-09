@@ -20,6 +20,7 @@ const peerIncomingCap = 8192
 type Listener struct {
 	rawConn  *net.UDPConn
 	resolver auth.AuthResolverFn
+	routes   handshake.RouteResolverFn
 
 	// peers is guarded by MutexGuard: map[netip.AddrPort]*virtualPeer
 	// Using netip.AddrPort as key avoids per-packet string allocation from remoteAddr.String().
@@ -40,7 +41,7 @@ type acceptResult struct {
 	result *handshake.HandshakeResult
 }
 
-func NewListener(addr string, resolver auth.AuthResolverFn) (*Listener, error) {
+func NewListener(addr string, resolver auth.AuthResolverFn, routes handshake.RouteResolverFn) (*Listener, error) {
 	udpAddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
 		return nil, err
@@ -55,6 +56,7 @@ func NewListener(addr string, resolver auth.AuthResolverFn) (*Listener, error) {
 	l := &Listener{
 		rawConn:  rawConn,
 		resolver: resolver,
+		routes:   routes,
 		peers:    common.WithGuard(make(map[netip.AddrPort]*virtualPeer)),
 		acceptCh: make(chan acceptResult, 16),
 	}
@@ -120,7 +122,7 @@ func (l *Listener) readLoop() {
 // On failure, cleans up the peer entry.
 func (l *Listener) handshakePeer(vp *virtualPeer, key netip.AddrPort) {
 	adapter := newVirtualStreamAdapter(l.rawConn, vp.remoteAddr, vp.incoming)
-	result, err := handshake.ServerHandshake(adapter, l.resolver)
+	result, err := handshake.ServerHandshake(adapter, l.resolver, l.routes)
 	if err != nil {
 		l.peers.Write(func(m *map[netip.AddrPort]*virtualPeer) {
 			delete(*m, key)

@@ -11,14 +11,15 @@ import (
 type Listener struct {
 	inner    net.Listener
 	resolver auth.AuthResolverFn
+	routes   handshake.RouteResolverFn
 }
 
-func NewListener(addr string, resolver auth.AuthResolverFn) (*Listener, error) {
+func NewListener(addr string, resolver auth.AuthResolverFn, routes handshake.RouteResolverFn) (*Listener, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, err
 	}
-	return &Listener{inner: ln, resolver: resolver}, nil
+	return &Listener{inner: ln, resolver: resolver, routes: routes}, nil
 }
 
 func (l *Listener) Accept() (transport.Conn, *handshake.HandshakeResult, error) {
@@ -27,7 +28,7 @@ func (l *Listener) Accept() (transport.Conn, *handshake.HandshakeResult, error) 
 		return nil, nil, err
 	}
 	// Handshake over raw TCP stream
-	result, err := handshake.ServerHandshake(raw, l.resolver)
+	result, err := handshake.ServerHandshake(raw, l.resolver, l.routes)
 	if err != nil {
 		raw.Close()
 		return nil, nil, err

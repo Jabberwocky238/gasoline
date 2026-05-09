@@ -12,14 +12,15 @@ import (
 type Listener struct {
 	inner    net.Listener
 	resolver auth.AuthResolverFn
+	routes   handshake.RouteResolverFn
 }
 
-func NewListener(addr string, resolver auth.AuthResolverFn, tlsConf *tls.Config) (*Listener, error) {
+func NewListener(addr string, resolver auth.AuthResolverFn, routes handshake.RouteResolverFn, tlsConf *tls.Config) (*Listener, error) {
 	ln, err := tls.Listen("tcp", addr, tlsConf)
 	if err != nil {
 		return nil, err
 	}
-	return &Listener{inner: ln, resolver: resolver}, nil
+	return &Listener{inner: ln, resolver: resolver, routes: routes}, nil
 }
 
 func (l *Listener) Accept() (transport.Conn, *handshake.HandshakeResult, error) {
@@ -35,7 +36,7 @@ func (l *Listener) Accept() (transport.Conn, *handshake.HandshakeResult, error) 
 		return nil, nil, err
 	}
 	// Gasoline handshake over TLS stream
-	result, err := handshake.ServerHandshake(tlsConn, l.resolver)
+	result, err := handshake.ServerHandshake(tlsConn, l.resolver, l.routes)
 	if err != nil {
 		tlsConn.Close()
 		return nil, nil, err

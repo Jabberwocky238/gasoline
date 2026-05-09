@@ -1,7 +1,6 @@
 package operator
 
 import (
-	"context"
 	"crypto/rand"
 	"fmt"
 	"net/netip"
@@ -25,11 +24,9 @@ import (
 // operator (an L2 broadcast switch per VNI). Inter-operator traffic
 // is out of scope until the underlay is brought back.
 type Operator struct {
-	ctx    context.Context
-	cancel context.CancelFunc
-	cfg    *StaticOperatorConfig
+	lctx *common.LogContext
+	cfg  *StaticOperatorConfig
 
-	log  *log.Logger
 	uuid [16]byte
 
 	dataListenAddr  string
@@ -56,7 +53,7 @@ func New(cfg *StaticOperatorConfig) (*Operator, error) {
 	logger := log.New()
 	logger.SetLevel(cfg.LogLevel)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	root := common.NewLogContext(nil, logger)
 
 	resolver := &staticAuthResolver{byVNI: make(map[protocol.VNI_Ty]auth.ServerAuthenticator)}
 	for vni, entry := range cfg.Network {
@@ -66,36 +63,36 @@ func New(cfg *StaticOperatorConfig) (*Operator, error) {
 	}
 
 	if len(cfg.ClientListeners) == 0 {
-		cancel()
+		root.Cancel()
 		return nil, fmt.Errorf("no client listeners configured")
 	}
 	clientListeners := make(map[string]transport.Listener)
 	for _, spec := range cfg.ClientListeners {
 		if _, dup := clientListeners[spec.Transport]; dup {
-			cancel()
+			root.Cancel()
 			closeAll(clientListeners)
 			return nil, fmt.Errorf("duplicate listener transport %q", spec.Transport)
 		}
 		ln, err := createClientListener(spec.Transport, spec.Addr, resolver)
 		if err != nil {
-			cancel()
+			root.Cancel()
 			closeAll(clientListeners)
 			return nil, fmt.Errorf("listener %s/%s: %w", spec.Transport, spec.Addr, err)
 		}
 		clientListeners[spec.Transport] = ln
 	}
 
-	state := newOperatorState(ctx)
+	state := newOperatorState(root)
 
 	for vni, entry := range cfg.Network {
 		prefix, err := netip.ParsePrefix(entry.CIDR)
 		if err != nil {
-			cancel()
+			root.Cancel()
 			closeAll(clientListeners)
 			return nil, fmt.Errorf("vni %d cidr %q: %w", vni, entry.CIDR, err)
 		}
 		state.registerVNI(vni, entry.Auth)
-		logger.Infof("VNet %d: %s", vni, prefix)
+		root.Log().Infof("VNet %d: %s", vni, prefix)
 	}
 
 	var uuid [16]byte
@@ -106,10 +103,8 @@ func New(cfg *StaticOperatorConfig) (*Operator, error) {
 	}
 
 	return &Operator{
-		ctx:             ctx,
-		cancel:          cancel,
+		lctx:            root,
 		cfg:             cfg,
-		log:             logger,
 		uuid:            uuid,
 		dataListenAddr:  cfg.OpListenAddr,
 		clientListeners: clientListeners,
@@ -150,7 +145,7 @@ func (o *Operator) RemovePeer(uuid [16]byte) {
 
 func (o *Operator) Start() error {
 	for tp, ln := range o.clientListeners {
-		o.log.Infof("Client endpoint (%s) listening on %s", tp, ln.Addr())
+		o.lctx.Log().Infof("Client endpoint (%s) listening on %s", tp, ln.Addr())
 		go o.routineAcceptClients(tp, ln)
 	}
 	go o.routineReaper()
@@ -158,7 +153,7 @@ func (o *Operator) Start() error {
 }
 
 func (o *Operator) Close() error {
-	o.cancel()
+	o.lctx.Cancel()
 	closeAll(o.clientListeners)
 	if o.state != nil {
 		o.state.closeAll()
@@ -175,9 +170,10 @@ func closeAll(lns map[string]transport.Listener) {
 // --------------- Client data plane ---------------
 
 func (o *Operator) routineAcceptClients(tp string, ln transport.Listener) {
+	logger := o.lctx.Log()
 	for {
 		select {
-		case <-o.ctx.Done():
+		case <-o.lctx.Done():
 			return
 		default:
 		}
@@ -185,10 +181,10 @@ func (o *Operator) routineAcceptClients(tp string, ln transport.Listener) {
 		conn, result, err := ln.Accept()
 		if err != nil {
 			select {
-			case <-o.ctx.Done():
+			case <-o.lctx.Done():
 				return
 			default:
-				o.log.Errorf("Client accept failed (%s): %v", tp, err)
+				logger.Errorf("Client accept failed (%s): %v", tp, err)
 				continue
 			}
 		}
@@ -199,23 +195,24 @@ func (o *Operator) routineAcceptClients(tp string, ln transport.Listener) {
 		cp := newPeerClient(conn, result)
 		vn, err := o.state.addClient(cp)
 		if err != nil {
-			o.log.Errorf("attach client %d to VNI %d: %v", cp.SessionIndex, cp.VNI, err)
+			logger.Errorf("attach client %d to VNI %d: %v", cp.SessionIndex, cp.VNI, err)
 			_ = conn.Close()
 			continue
 		}
 
-		o.log.Infof("Client %d connected on VNI %d from %s",
+		logger.Infof("Client %d connected on VNI %d from %s",
 			cp.SessionIndex, cp.VNI, conn.RemoteAddr())
 		go o.routineReadFromClient(cp, vn)
 	}
 }
 
 func (o *Operator) routineReadFromClient(cp *PeerClient, vn *vniEntry) {
+	logger := o.lctx.Log()
 	defer func() {
 		o.state.removeClient(cp)
 		_ = cp.Conn.Close()
 		cp.closed.Store(true)
-		o.log.Infof("Client %d disconnected", cp.SessionIndex)
+		logger.Infof("Client %d disconnected", cp.SessionIndex)
 	}()
 
 	bufPtr := common.GetBuffer()
@@ -224,14 +221,14 @@ func (o *Operator) routineReadFromClient(cp *PeerClient, vn *vniEntry) {
 
 	for {
 		select {
-		case <-o.ctx.Done():
+		case <-o.lctx.Done():
 			return
 		default:
 		}
 
 		n, err := cp.Conn.ReadPacket(readBuf)
 		if err != nil {
-			o.log.Debugf("Read from client %d: %v", cp.SessionIndex, err)
+			logger.Debugf("Read from client %d: %v", cp.SessionIndex, err)
 			return
 		}
 		if n == 0 {
@@ -247,20 +244,21 @@ func (o *Operator) routineReadFromClient(cp *PeerClient, vn *vniEntry) {
 				continue
 			}
 			if err := other.Conn.WritePacket(frame); err != nil {
-				o.log.Debugf("forward to client %d: %v", other.SessionIndex, err)
+				logger.Debugf("forward to client %d: %v", other.SessionIndex, err)
 			}
 		}
 	}
 }
 
 func (o *Operator) routineReaper() {
+	logger := o.lctx.Log()
 	const idleTimeout = 60 * time.Second
 	ticker := time.NewTicker(idleTimeout / 2)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-o.ctx.Done():
+		case <-o.lctx.Done():
 			return
 		case <-ticker.C:
 		}
@@ -268,7 +266,7 @@ func (o *Operator) routineReaper() {
 		now := time.Now()
 		for _, cp := range o.state.snapshot() {
 			if now.Sub(cp.Conn.LastActive()) > idleTimeout {
-				o.log.Warnf("Reaping idle client %d", cp.SessionIndex)
+				logger.Warnf("Reaping idle client %d", cp.SessionIndex)
 				_ = cp.Conn.Close()
 			}
 		}

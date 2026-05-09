@@ -8,12 +8,84 @@ package operator
 
 import (
 	"encoding/binary"
+	"encoding/hex"
+	"fmt"
 	"math/bits"
 	"net/netip"
 	"sync"
 
 	"github.com/jabberwocky238/gasoline/protocol"
 )
+
+// dispatchRoute parses the args of a `route ...` gasoctl command and
+// applies it to s. Returns the gasoctl reply line.
+func (s *operatorState) dispatchRoute(args []string) string {
+	if len(args) == 0 {
+		return errReply("route: missing subcommand")
+	}
+	switch args[0] {
+	case "set":
+		if len(args) != 3 {
+			return errReply("route set: usage 'route set <cid> <prefix>'")
+		}
+		cid, err := parseCID(args[1])
+		if err != nil {
+			return errReply(err.Error())
+		}
+		pfx, err := netip.ParsePrefix(args[2])
+		if err != nil {
+			return errReply(fmt.Sprintf("bad prefix %q: %v", args[2], err))
+		}
+		if err := s.routeSet(cid, pfx); err != nil {
+			return errReply(err.Error())
+		}
+		return "OK"
+
+	case "get":
+		if len(args) != 2 {
+			return errReply("route get: usage 'route get <cid>'")
+		}
+		cid, err := parseCID(args[1])
+		if err != nil {
+			return errReply(err.Error())
+		}
+		pfx, ok := s.routeGet(cid)
+		if !ok {
+			return errReply("not found")
+		}
+		return "OK " + pfx.String()
+
+	case "del":
+		if len(args) != 2 {
+			return errReply("route del: usage 'route del <cid>'")
+		}
+		cid, err := parseCID(args[1])
+		if err != nil {
+			return errReply(err.Error())
+		}
+		s.routeDel(cid)
+		return "OK"
+
+	default:
+		return errReply(fmt.Sprintf("route: unknown op %q", args[0]))
+	}
+}
+
+// parseCID decodes the 16-char hex string the gasoctl CLI sends.
+func parseCID(s string) (protocol.CID_Ty, error) {
+	var cid protocol.CID_Ty
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		return cid, fmt.Errorf("bad cid %q: %v", s, err)
+	}
+	if len(b) != len(cid) {
+		return cid, fmt.Errorf("bad cid %q: want %d bytes, got %d", s, len(cid), len(b))
+	}
+	copy(cid[:], b)
+	return cid, nil
+}
+
+func errReply(msg string) string { return "ERR " + msg }
 
 type routingTrieNode struct {
 	cid       protocol.CID_Ty

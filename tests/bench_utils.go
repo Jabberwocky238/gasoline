@@ -10,78 +10,91 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jabberwocky238/gasoline/cmd/operator"
 	"github.com/jabberwocky238/gasoline/common"
-	"github.com/jabberwocky238/gasoline/common/config"
-	"github.com/jabberwocky238/gasoline/device/vtep"
+	"github.com/jabberwocky238/gasoline/device/operator"
+	"github.com/jabberwocky238/gasoline/protocol"
+	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/transport"
+	"github.com/sirupsen/logrus"
 )
 
 const (
-	benchVNetNum  = 200
-	benchVNetCIDR = "10.0.200.0/24"
-	benchPayload  = 1380
-	benchRoundSz  = 10 * 1024 * 1024
-	benchRounds   = 10
+	benchVNI      protocol.VNI_Ty = 200
+	benchVNetCIDR                 = "10.0.200.0/24"
+	benchPayload                  = 1380
+	benchRoundSz                  = 10 * 1024 * 1024
+	benchRounds                   = 10
 )
 
-func startBenchOperator(t *testing.T, uuid [16]byte, tp string) *operator.Operator {
+// benchSetup is the per-test fixture.
+type benchSetup struct {
+	op   *operator.Operator
+	vni  protocol.VNI_Ty
+	cidA protocol.CID_Ty
+	cidB protocol.CID_Ty
+	pfxA netip.Prefix
+	pfxB netip.Prefix
+}
+
+// startBenchOperator spins up a single operator listening on tp at an
+// ephemeral port. Two CIDs are pre-bound to two prefixes inside the VNI
+// so client handshakes succeed without a coordinator.
+func startBenchOperator(t *testing.T, tp string) *benchSetup {
 	t.Helper()
-	vnetStr := fmt.Sprintf("%d:%s", benchVNetNum, benchVNetCIDR)
-	cfg := &config.OperatorConfig{
-		UUID:            &uuid,
-		ClientListeners: []config.ListenerSpec{{Transport: tp, Addr: "127.0.0.1:0"}},
-		OpListenAddr:    "127.0.0.1:0",
-		AuthStr:         "noauth",
-		Network:         vnetStr,
-		StatsAddr:       "",
-		LogLevel:        "error",
+
+	cidA := protocol.CID_Ty{0, 0, 0, 0, 0, 0, 0, 0xA1}
+	cidB := protocol.CID_Ty{0, 0, 0, 0, 0, 0, 0, 0xB1}
+	pfxA := netip.MustParsePrefix("10.0.200.10/32")
+	pfxB := netip.MustParsePrefix("10.0.200.11/32")
+
+	uuid := [16]byte{0xA0}
+	cfg := &operator.StaticOperatorConfig{
+		UUID: &uuid,
+		ClientListeners: []operator.ListenerSpec{
+			{Transport: tp, Addr: "127.0.0.1:0"},
+		},
+		OpListenAddr: "127.0.0.1:0",
+		Network: map[protocol.VNI_Ty]operator.StaticOperatorVNetConfig{
+			benchVNI: {
+				VNI:  benchVNI,
+				CIDR: benchVNetCIDR,
+				Auth: &auth.NoAuthServer{},
+				PresetCIDmap: map[protocol.CID_Ty]netip.Prefix{
+					cidA: pfxA,
+					cidB: pfxB,
+				},
+			},
+		},
+		LogLevel: logrus.ErrorLevel,
 	}
+
 	op, err := operator.New(cfg)
 	if err != nil {
-		t.Fatalf("new operator %x: %v", uuid, err)
+		t.Fatalf("operator.New: %v", err)
 	}
 	if err := op.Start(); err != nil {
-		t.Fatalf("start operator %x: %v", uuid, err)
+		t.Fatalf("operator.Start: %v", err)
 	}
-	op.SetExternalAddr(op.DataPlaneAddr())
-	return op
-}
-
-func setupSingleOperator(t *testing.T, tp string) (*operator.Operator, common.VNI) {
-	t.Helper()
-	vni := common.VNI(benchVNetNum)
-	op := startBenchOperator(t, [16]byte{0xA0}, tp)
-	return op, vni
-}
-
-func setupOperators(t *testing.T, tp string) (*operator.Operator, *operator.Operator, common.VNI) {
-	t.Helper()
-	vni := common.VNI(benchVNetNum)
-	opA := startBenchOperator(t, [16]byte{0xA0}, tp)
-	opB := startBenchOperator(t, [16]byte{0xB0}, tp)
-
-	apA, errA := netip.ParseAddrPort(opA.DataPlaneAddr())
-	apB, errB := netip.ParseAddrPort(opB.DataPlaneAddr())
-	if errA != nil || errB != nil {
-		t.Fatalf("parse data-plane addr: A=%v B=%v", errA, errB)
+	return &benchSetup{
+		op:   op,
+		vni:  benchVNI,
+		cidA: cidA,
+		cidB: cidB,
+		pfxA: pfxA,
+		pfxB: pfxB,
 	}
-	opA.AddPeer(opB.UUID(), apB)
-	opB.AddPeer(opA.UUID(), apA)
-	waitFor(t, 2*time.Second, func() bool {
-		return opA.ConnectedOperators() >= 1 && opB.ConnectedOperators() >= 1
-	})
-	return opA, opB, vni
 }
 
+// makeIPv4Packet builds a minimal IPv4 packet (no checksum). The
+// operator's forwardFrame doesn't validate checksums.
 func makeIPv4Packet(src, dst netip.Addr, payload []byte) []byte {
 	totalLen := 20 + len(payload)
 	pkt := make([]byte, totalLen)
-	pkt[0] = 0x45
+	pkt[0] = 0x45 // version=4, IHL=5
 	pkt[2] = byte(totalLen >> 8)
 	pkt[3] = byte(totalLen)
-	pkt[8] = 64
-	pkt[9] = 17
+	pkt[8] = 64 // TTL
+	pkt[9] = 17 // proto = UDP
 	s4 := src.As4()
 	d4 := dst.As4()
 	copy(pkt[12:16], s4[:])
@@ -90,7 +103,11 @@ func makeIPv4Packet(src, dst netip.Addr, payload []byte) []byte {
 	return pkt
 }
 
-func runTransfer(t *testing.T, label string, connA, connB transport.Conn, srcIP, dstIP netip.Addr, srcMAC, dstMAC common.VMAC) {
+// runTransfer pumps benchRounds * benchRoundSz bytes from connA to
+// connB through the operator's L3 forwarder. The operator looks up
+// dst IP -> dst CID via routingMap and writes the packet straight to
+// connB.
+func runTransfer(t *testing.T, label string, connA, connB transport.Conn, srcIP, dstIP netip.Addr) {
 	t.Helper()
 
 	pktsPerRound := benchRoundSz / benchPayload
@@ -108,15 +125,8 @@ func runTransfer(t *testing.T, label string, connA, connB transport.Conn, srcIP,
 	for i := range payload {
 		payload[i] = byte(i)
 	}
-	ipPkt := makeIPv4Packet(srcIP, dstIP, payload)
+	wire := makeIPv4Packet(srcIP, dstIP, payload)
 
-	// Operator data plane is L2 — wrap the IP packet in an Ethernet header
-	// (dstMAC = clientB's VMAC, srcMAC = clientA's VMAC) before sending.
-	wire := make([]byte, common.EthHeaderSize+len(ipPkt))
-	vtep.WriteEthHeader(wire, dstMAC, srcMAC, vtep.EtherTypeIPv4)
-	copy(wire[common.EthHeaderSize:], ipPkt)
-
-	// CPU profile — output to project root
 	profilePath := fmt.Sprintf("../cpu_%s.prof", label)
 	f, err := os.Create(profilePath)
 	if err != nil {
@@ -127,12 +137,10 @@ func runTransfer(t *testing.T, label string, connA, connB transport.Conn, srcIP,
 	defer func() {
 		pprof.StopCPUProfile()
 		t.Logf("CPU profile saved to %s", profilePath)
-		t.Logf("  View: go tool pprof -http=:8080 %s", profilePath)
 	}()
 
 	var rxTotal atomic.Int64
 	var wg sync.WaitGroup
-
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -140,7 +148,7 @@ func runTransfer(t *testing.T, label string, connA, connB transport.Conn, srcIP,
 		for {
 			n, err := connB.ReadPacket(buf)
 			if err != nil {
-				return // connB closed, exit
+				return
 			}
 			if n > 0 {
 				rxTotal.Add(1)
@@ -150,22 +158,18 @@ func runTransfer(t *testing.T, label string, connA, connB transport.Conn, srcIP,
 
 	start := time.Now()
 	for r := 0; r < benchRounds; r++ {
-		roundStart := time.Now()
 		for p := 0; p < pktsPerRound; p++ {
 			if err := connA.WritePacket(wire); err != nil {
-				t.Fatalf("round %d pkt %d: send error: %v", r, p, err)
+				t.Fatalf("round %d pkt %d: send: %v", r, p, err)
 			}
 		}
-		t.Logf("[%s] round %d/%d sent (%d pkts), tx %.0fms, rx so far %d/%d",
-			label, r+1, benchRounds, pktsPerRound,
-			float64(time.Since(roundStart).Milliseconds()),
-			rxTotal.Load(), totalPkts)
+		t.Logf("[%s] round %d/%d sent (%d pkts), rx so far %d/%d",
+			label, r+1, benchRounds, pktsPerRound, rxTotal.Load(), totalPkts)
 	}
 	txDone := time.Now()
 	txElapsed := txDone.Sub(start)
-	t.Logf("[%s] all rounds sent, TX done in %v, draining...", label, txElapsed.Round(time.Millisecond))
 
-	// Drain: wait up to 5s for remaining packets, stop early if no progress for 1s
+	// Drain: stop after 5s total or 1s of no progress.
 	lastRx := rxTotal.Load()
 	lastChange := time.Now()
 	for {
@@ -185,32 +189,18 @@ func runTransfer(t *testing.T, label string, connA, connB transport.Conn, srcIP,
 		}
 	}
 	elapsed := time.Since(start)
-	connB.Close() // unblock ReadPacket
+	connB.Close()
 	wg.Wait()
 
 	rx := rxTotal.Load()
 	rxMB := float64(rx) * float64(benchPayload) / (1024 * 1024)
 	loss := float64(totalPkts-rx) / float64(totalPkts) * 100
 
-	t.Logf("=== %s C-S-S-C Transfer ===", label)
-	t.Logf("Total TX:   %.0f MB (%d packets)", totalMB, totalPkts)
-	t.Logf("Total RX:   %.2f MB (%d packets)", rxMB, rx)
-	t.Logf("Loss:       %.2f%% (%d packets)", loss, totalPkts-rx)
-	t.Logf("TX time:    %v", txElapsed.Round(time.Millisecond))
-	t.Logf("E2E time:   %v", elapsed.Round(time.Millisecond))
-	t.Logf("TX speed:   %.2f MB/s", totalMB/txElapsed.Seconds())
-	t.Logf("RX speed:   %.2f MB/s", rxMB/elapsed.Seconds())
-	t.Logf("Avg PPS:    %.0f", float64(rx)/elapsed.Seconds())
-}
-
-func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatal("waitFor: timed out")
+	t.Logf("=== %s ===", label)
+	t.Logf("TX:        %.0f MB (%d pkts)", totalMB, totalPkts)
+	t.Logf("RX:        %.2f MB (%d pkts), loss %.2f%%", rxMB, rx, loss)
+	t.Logf("TX time:   %v", txElapsed.Round(time.Millisecond))
+	t.Logf("E2E time:  %v", elapsed.Round(time.Millisecond))
+	t.Logf("TX speed:  %.2f MB/s", totalMB/txElapsed.Seconds())
+	t.Logf("RX speed:  %.2f MB/s, %.0f pps", rxMB/elapsed.Seconds(), float64(rx)/elapsed.Seconds())
 }

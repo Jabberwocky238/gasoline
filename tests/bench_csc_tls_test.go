@@ -3,33 +3,32 @@ package tests
 import (
 	"testing"
 
-	"github.com/jabberwocky238/gasoline/common"
+	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/transport/quic"
 	tlstransport "github.com/jabberwocky238/gasoline/transport/tls"
 )
 
 func TestCSC_TLS(t *testing.T) {
-	op, vni := setupSingleOperator(t, "tls")
-	defer op.Close()
+	bs := startBenchOperator(t, "tls")
+	defer bs.op.Close()
 
 	tlsConf := quic.InsecureClientTLS()
 
-	connA, resultA, err := tlstransport.NewDialer(common.VMAC{0x02, 0, 0, 0, 0, 0x01}, vni, &auth.NoAuthClient{}, tlsConf).Dial(op.ClientAddr())
+	cfgA := protocol.NewPreassignedSessionConfig(bs.cidA, bs.vni)
+	connA, _, err := tlstransport.NewDialer(cfgA, &auth.NoAuthClient{}, tlsConf).Dial(bs.op.ClientAddr())
 	if err != nil {
 		t.Fatalf("ClientA dial: %v", err)
 	}
 	defer connA.Close()
 
-	connB, resultB, err := tlstransport.NewDialer(common.VMAC{0x02, 0, 0, 0, 0, 0x02}, vni, &auth.NoAuthClient{}, tlsConf).Dial(op.ClientAddr())
+	cfgB := protocol.NewPreassignedSessionConfig(bs.cidB, bs.vni)
+	connB, _, err := tlstransport.NewDialer(cfgB, &auth.NoAuthClient{}, tlsConf).Dial(bs.op.ClientAddr())
 	if err != nil {
 		t.Fatalf("ClientB dial: %v", err)
 	}
 	defer connB.Close()
 
-	clientAIP := resultA.Config.IPPrefix.Addr()
-	clientBIP := resultB.Config.IPPrefix.Addr()
-	t.Logf("ClientA=%s  ClientB=%s", clientAIP, clientBIP)
-
-	runTransfer(t, "CSC-TLS", connA, connB, clientAIP, clientBIP, resultA.VMAC, resultB.VMAC)
+	t.Logf("ClientA=%s  ClientB=%s", bs.pfxA.Addr(), bs.pfxB.Addr())
+	runTransfer(t, "CSC-TLS", connA, connB, bs.pfxA.Addr(), bs.pfxB.Addr())
 }

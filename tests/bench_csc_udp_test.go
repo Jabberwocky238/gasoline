@@ -3,30 +3,29 @@ package tests
 import (
 	"testing"
 
-	"github.com/jabberwocky238/gasoline/common"
+	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/transport/udp"
 )
 
 func TestCSC_UDP(t *testing.T) {
-	op, vni := setupSingleOperator(t, "udp")
-	defer op.Close()
+	bs := startBenchOperator(t, "udp")
+	defer bs.op.Close()
 
-	connA, resultA, err := udp.NewDialer(common.VMAC{0x02, 0, 0, 0, 0, 0x01}, vni, &auth.NoAuthClient{}).Dial(op.ClientAddr())
+	cfgA := protocol.NewPreassignedSessionConfig(bs.cidA, bs.vni)
+	connA, _, err := udp.NewDialer(cfgA, &auth.NoAuthClient{}).Dial(bs.op.ClientAddr())
 	if err != nil {
 		t.Fatalf("ClientA dial: %v", err)
 	}
 	defer connA.Close()
 
-	connB, resultB, err := udp.NewDialer(common.VMAC{0x02, 0, 0, 0, 0, 0x02}, vni, &auth.NoAuthClient{}).Dial(op.ClientAddr())
+	cfgB := protocol.NewPreassignedSessionConfig(bs.cidB, bs.vni)
+	connB, _, err := udp.NewDialer(cfgB, &auth.NoAuthClient{}).Dial(bs.op.ClientAddr())
 	if err != nil {
 		t.Fatalf("ClientB dial: %v", err)
 	}
 	defer connB.Close()
 
-	clientAIP := resultA.Config.IPPrefix.Addr()
-	clientBIP := resultB.Config.IPPrefix.Addr()
-	t.Logf("ClientA=%s  ClientB=%s", clientAIP, clientBIP)
-
-	runTransfer(t, "CSC-UDP", connA, connB, clientAIP, clientBIP, resultA.VMAC, resultB.VMAC)
+	t.Logf("ClientA=%s  ClientB=%s", bs.pfxA.Addr(), bs.pfxB.Addr())
+	runTransfer(t, "CSC-UDP", connA, connB, bs.pfxA.Addr(), bs.pfxB.Addr())
 }

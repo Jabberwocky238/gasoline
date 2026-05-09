@@ -10,10 +10,10 @@ import (
 	"github.com/jabberwocky238/gasoline/protocol/handshake"
 )
 
-func testResolver(a auth.ServerAuthenticator) auth.AuthResolver {
-	r := auth.NewMapResolver()
-	r.Set(0, a)
-	return r
+func testResolver(a auth.ServerAuthenticator) auth.AuthResolverFn {
+	return func(vni protocol.VNI_Ty) (auth.ServerAuthenticator, error) {
+		return a, nil
+	}
 }
 
 func newTestCfg(cid protocol.CID_Ty) protocol.PreassignedSessionConfig {

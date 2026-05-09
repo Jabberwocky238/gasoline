@@ -9,17 +9,14 @@ import (
 	"net/netip"
 	"time"
 
-	log "github.com/sirupsen/logrus"
-
-	"github.com/jabberwocky238/gasoline/cmd/operator/stats"
 	"github.com/jabberwocky238/gasoline/common"
-	"github.com/jabberwocky238/gasoline/device/vxlan"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/transport"
 	transportQuic "github.com/jabberwocky238/gasoline/transport/quic"
 	transportTcp "github.com/jabberwocky238/gasoline/transport/tcp"
 	transportTls "github.com/jabberwocky238/gasoline/transport/tls"
 	transportUdp "github.com/jabberwocky238/gasoline/transport/udp"
+	log "github.com/sirupsen/logrus"
 )
 
 // Operator is the per-process control + data plane orchestrator.

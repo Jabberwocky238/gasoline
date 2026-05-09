@@ -13,7 +13,7 @@ type SessionID_Ty [16]byte
 // SessionState holds all mutable session fields. It carries no lock; access
 // is mediated by the enclosing SessionContext.
 type SessionState struct {
-	ipPrefix netip.Prefix   // Client's assigned IP (e.g. 10.0.0.2/24)
+	ip       netip.Addr     // Client's assigned IP (e.g. 10.0.0.2/24)
 	ipRanges []netip.Prefix // Internal network ranges routable via VPN
 }
 
@@ -79,10 +79,10 @@ func (s *SessionContext) SessionID() SessionID_Ty {
 	return s.sessionID
 }
 
-func (s *SessionContext) IPPrefix() netip.Prefix {
+func (s *SessionContext) IP() netip.Addr {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.state.ipPrefix
+	return s.state.ip
 }
 
 func (s *SessionContext) IPRanges() []netip.Prefix {

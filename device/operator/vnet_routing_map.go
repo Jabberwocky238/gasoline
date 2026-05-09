@@ -308,8 +308,9 @@ func (m *vnetRoutingMap) LookupByCID(cid protocol.CID_Ty) (netip.Prefix, bool) {
 // LookupByIP performs longest-prefix-match: returns the cid whose
 // configured prefix is the longest one containing ip.
 func (m *vnetRoutingMap) LookupByIP(ip netip.Addr) (protocol.CID_Ty, bool) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	// fast path, no lock
+	// m.mu.RLock()
+	// defer m.mu.RUnlock()
 	if ip.Is4() {
 		b := ip.As4()
 		return m.v4.lookupLPM(b[:])

@@ -216,17 +216,9 @@ func (o *Operator) routineReadFromClient(cp *PeerClient, vn *vniEntry) {
 			continue
 		}
 
-		// Per-VNI L2 broadcast: forward this frame to every other client
-		// in the same VNI. No FDB / no underlay until those subsystems
-		// come back.
-		frame := append([]byte(nil), readBuf[:n]...)
-		for _, other := range vn.peers(cp.SessionIndex) {
-			if other.closed.Load() {
-				continue
-			}
-			if err := other.Conn.WritePacket(frame); err != nil {
-				logger.Debugf("forward to client %d: %v", other.SessionIndex, err)
-			}
+		// ip routing
+		if err := vn.forwardFrame(readBuf[:n], cp); err != nil {
+			logger.Debugf("Forward from client %d: %v", cp.SessionIndex, err)
 		}
 	}
 }

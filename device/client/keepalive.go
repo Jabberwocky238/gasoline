@@ -5,44 +5,40 @@ import (
 	"sync"
 	"time"
 
-	log "github.com/sirupsen/logrus"
-
 	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/transport"
 )
 
-// Keepalive emits periodic keepalive frames on a transport.Conn and records
-// replies observed via NotifyReply. One Keepalive per connection.
+// Keepalive periodically writes a no-op packet to the transport so the
+// underlying connection (TCP, QUIC, etc.) stays alive on idle paths.
 //
-// Wire protocol: see common.EtherTypeKeepalive.
-// Timer cadence: uniform random in [minInterval, maxInterval), re-rolled
-// after every tick.
+// Wire format: a minimal IP packet with version field set to 3, which
+// is reserved/invalid. The operator data plane silently drops it; no
+// other client would interpret it as a real frame either.
+//
+// Since the operator drops these silently, we expect no reply — the
+// keepalive is fire-and-forget.
 type Keepalive struct {
-	conn    transport.Conn
-	selfMAC common.VMAC
+	conn transport.Conn
 
 	minInterval time.Duration
 	maxInterval time.Duration
 
-	ctx *common.GasolineGeneralContext // child of the Client's Gactx; carries logger + cancel
+	lctx *common.LogContext
 
 	mu       sync.Mutex
 	lastSent time.Time
-	lastRecv time.Time
 	sent     uint64
-	recv     uint64
 }
 
 // NewKeepalive constructs a keepalive loop for conn. Default cadence is 10–15s.
-// parent is the Client's Gactx; a child scope is derived for Stop() and the
-// logger inherits the parent fields (vni, vmac, ...) plus component=keepalive.
-func NewKeepalive(parent *common.GasolineGeneralContext, conn transport.Conn, selfMAC common.VMAC) *Keepalive {
+// parent is the Client's LogContext; a child scope is derived for Stop().
+func NewKeepalive(parent *common.LogContext, conn transport.Conn) *Keepalive {
 	return &Keepalive{
 		conn:        conn,
-		selfMAC:     selfMAC,
 		minInterval: 10 * time.Second,
 		maxInterval: 15 * time.Second,
-		ctx:         parent.Child(log.Fields{"component": "keepalive"}),
+		lctx:        parent.WithField("component", "keepalive"),
 	}
 }
 
@@ -50,21 +46,13 @@ func NewKeepalive(parent *common.GasolineGeneralContext, conn transport.Conn, se
 func (k *Keepalive) Start() { go k.loop() }
 
 // Stop halts the ticker.
-func (k *Keepalive) Stop() { k.ctx.Cancel() }
+func (k *Keepalive) Stop() { k.lctx.Cancel() }
 
-// NotifyReply records that a keepalive reply was observed on the ingress path.
-func (k *Keepalive) NotifyReply() {
-	k.mu.Lock()
-	k.lastRecv = time.Now()
-	k.recv++
-	k.mu.Unlock()
-}
-
-// Stats returns (sent, recv, lastSent, lastRecv) for inspection.
-func (k *Keepalive) Stats() (uint64, uint64, time.Time, time.Time) {
+// Stats returns (sent, lastSent) for inspection.
+func (k *Keepalive) Stats() (uint64, time.Time) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	return k.sent, k.recv, k.lastSent, k.lastRecv
+	return k.sent, k.lastSent
 }
 
 func (k *Keepalive) loop() {
@@ -72,20 +60,27 @@ func (k *Keepalive) loop() {
 		d := k.nextInterval()
 		t := time.NewTimer(d)
 		select {
-		case <-k.ctx.Done():
+		case <-k.lctx.Done():
 			t.Stop()
 			return
 		case <-t.C:
 		}
 		if err := k.sendOnce(); err != nil {
-			k.ctx.Logger().Debugf("keepalive: send: %v", err)
+			k.lctx.Log().Debugf("send: %v", err)
 		}
 	}
 }
 
+// buildKeepalivePacket returns a 20-byte IP-shaped header whose first
+// byte's high nibble (the version field) is 3. Operators drop it.
+func buildKeepalivePacket() []byte {
+	pkt := make([]byte, 20)
+	pkt[0] = 0x30 // version=3, IHL=0
+	return pkt
+}
+
 func (k *Keepalive) sendOnce() error {
-	frame := common.BuildKeepaliveRequest(k.selfMAC)
-	if err := k.conn.WritePacket(frame); err != nil {
+	if err := k.conn.WritePacket(buildKeepalivePacket()); err != nil {
 		return err
 	}
 	k.mu.Lock()

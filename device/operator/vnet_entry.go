@@ -1,6 +1,7 @@
 package operator
 
 import (
+	"net/netip"
 	"sync"
 
 	"github.com/jabberwocky238/gasoline/protocol/auth"
@@ -46,17 +47,70 @@ func (v *vniEntry) Clients() []*PeerClient {
 	return out
 }
 
-// peers returns every client *other* than the given session index.
-// Used to broadcast a frame received from one client to the rest of the VNI.
-func (v *vniEntry) peers(except uint32) []*PeerClient {
-	v.mu.RLock()
-	defer v.mu.RUnlock()
-	out := make([]*PeerClient, 0, len(v.clients))
-	for idx, cp := range v.clients {
-		if idx == except {
-			continue
-		}
-		out = append(out, cp)
+// forwardFrame inspects the IP header of frame, looks up the
+// destination IP in the routing map (longest-prefix-match), finds the
+// owning client by CID, and writes the frame straight to that client.
+//
+// Special case: IP version 3 means "client keepalive". The operator
+// replies with another v3 packet to the same client and stops there —
+// nothing is forwarded onto the VNet. Versions other than 3/4/6 are
+// silently dropped.
+func (v *vniEntry) forwardFrame(frame []byte, src *PeerClient) error {
+	if len(frame) < 1 {
+		return nil
 	}
-	return out
+	version := frame[0] >> 4
+
+	var dst netip.Addr
+	switch version {
+	case 3:
+		if src == nil || src.closed.Load() {
+			return nil
+		}
+		return src.Conn.WritePacket(buildKeepaliveReply())
+	case 4:
+		if len(frame) < 20 {
+			return nil
+		}
+		var b [4]byte
+		copy(b[:], frame[16:20])
+		dst = netip.AddrFrom4(b)
+	case 6:
+		if len(frame) < 40 {
+			return nil
+		}
+		var b [16]byte
+		copy(b[:], frame[24:40])
+		dst = netip.AddrFrom16(b)
+	default:
+		return nil
+	}
+
+	cid, ok := v.routingMap.LookupByIP(dst)
+	if !ok {
+		return nil
+	}
+
+	v.mu.RLock()
+	var target *PeerClient
+	for _, cp := range v.clients {
+		if cp.CID == cid {
+			target = cp
+			break
+		}
+	}
+	v.mu.RUnlock()
+
+	if target == nil || target.closed.Load() || target == src {
+		return nil
+	}
+	return target.Conn.WritePacket(frame)
+}
+
+// buildKeepaliveReply mirrors the client's keepalive shape: a 20-byte
+// IP-header-sized buffer with version 3.
+func buildKeepaliveReply() []byte {
+	pkt := make([]byte, 20)
+	pkt[0] = 0x30
+	return pkt
 }

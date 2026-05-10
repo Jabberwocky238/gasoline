@@ -93,6 +93,7 @@ func New(addr string) *Cordinator {
 // Start binds the HTTP listener and serves REST + websocket.
 func (c *Cordinator) Start() error {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", c.handleHealthz)
 	mux.HandleFunc("GET /api/vnet", c.handleVnetList)
 	mux.HandleFunc("GET /api/vnet/{vni}", c.handleVnetGet)
 	mux.HandleFunc("GET /api/vnet/{vni}/routes", c.handleRoutesList)
@@ -166,6 +167,17 @@ type authPatchBody struct {
 	Type   string            `json:"type,omitempty"` // required only when no auth set yet
 	Add    map[string]string `json:"add,omitempty"`
 	Remove []string          `json:"remove,omitempty"`
+}
+
+// handleHealthz is a simple liveness/readiness probe target. Returns
+// 200 OK with "ok" body when the HTTP server is up. The HTTP listener
+// itself answering already proves the cordinator is alive; we don't
+// gate this on connected operators or stored routes — those are
+// dynamic state, not health.
+func (c *Cordinator) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte("ok"))
 }
 
 func (c *Cordinator) handleVnetList(w http.ResponseWriter, r *http.Request) {

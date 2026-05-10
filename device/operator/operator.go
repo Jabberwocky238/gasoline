@@ -244,13 +244,13 @@ func (o *Operator) routineAcceptClients(tp string, ln transport.Listener) {
 		cp := newPeerClient(conn, sc)
 		vn, err := o.state.addClient(cp)
 		if err != nil {
-			logger.Errorf("attach client %d to VNI %s: %v", cp.sc.SessionIndex, cp.sc.VNI, err)
+			logger.Errorf("attach cid %s sessionindex %d to VNI %s: %v", cp.sc.CID, cp.sc.SessionIndex, cp.sc.VNI, err)
 			_ = conn.Close()
 			continue
 		}
 
-		logger.Infof("Client %d connected on VNI %s from %s",
-			cp.sc.SessionIndex, cp.sc.VNI, conn.RemoteAddr())
+		logger.Infof("cid %s sessionindex %d connected on VNI %s from %s",
+			cp.sc.CID, cp.sc.SessionIndex, cp.sc.VNI, conn.RemoteAddr())
 		go o.routineReadFromClient(cp, vn)
 	}
 }
@@ -261,7 +261,7 @@ func (o *Operator) routineReadFromClient(cp *PeerClient, vn *vniEntry) {
 		o.state.removeClient(cp)
 		_ = cp.Conn.Close()
 		cp.closed.Store(true)
-		logger.Infof("Client %d disconnected", cp.sc.SessionIndex)
+		logger.Infof("cid %s sessionindex %d disconnected", cp.sc.CID, cp.sc.SessionIndex)
 	}()
 
 	bufPtr := common.GetBuffer()
@@ -277,7 +277,7 @@ func (o *Operator) routineReadFromClient(cp *PeerClient, vn *vniEntry) {
 
 		n, err := cp.Conn.ReadPacket(readBuf)
 		if err != nil {
-			logger.Debugf("Read from client %d: %v", cp.sc.SessionIndex, err)
+			logger.Debugf("Read from cid %s sessionindex %d: %v", cp.sc.CID, cp.sc.SessionIndex, err)
 			return
 		}
 		if n == 0 {
@@ -285,7 +285,7 @@ func (o *Operator) routineReadFromClient(cp *PeerClient, vn *vniEntry) {
 		}
 
 		if err := vn.forwardFrame(readBuf[:n], cp); err != nil {
-			logger.Debugf("Forward from client %d: %v", cp.sc.SessionIndex, err)
+			logger.Debugf("Forward from cid %s sessionindex %d: %v", cp.sc.CID, cp.sc.SessionIndex, err)
 		}
 	}
 }
@@ -306,7 +306,7 @@ func (o *Operator) routineReaper() {
 		now := time.Now()
 		for _, cp := range o.state.snapshot() {
 			if now.Sub(cp.Conn.LastActive()) > idleTimeout {
-				logger.Warnf("Reaping idle client %d", cp.sc.SessionIndex)
+				logger.Warnf("Reaping idle cid %s sessionindex %d", cp.sc.CID, cp.sc.SessionIndex)
 				_ = cp.Conn.Close()
 			}
 		}

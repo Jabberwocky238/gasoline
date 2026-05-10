@@ -3,6 +3,7 @@ kind: Namespace
 metadata:
   name: gasoline
 ---
+# https://raw.githubusercontent.com/Jabberwocky238/gasoline/refs/heads/main/scripts/kubernetes/gasoline.yaml
 # Single cordinator instance. The DaemonSet operators dial it.
 apiVersion: apps/v1
 kind: ReplicaSet
@@ -32,6 +33,18 @@ spec:
             - name: http
               containerPort: 8080
               protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
 ---
 # ClusterIP so DaemonSet pods reach the cordinator by DNS:
 #   ws://gasoline-cordinator.gasoline.svc:8080/ws
@@ -95,7 +108,7 @@ spec:
               set -eu
               echo "waiting for gasoline-cordinator..."
               i=0
-              until wget -q -T 2 -O /dev/null http://gasoline-cordinator.gasoline.svc:8080/api/vnet; do
+              until wget -q -T 2 -O /dev/null http://gasoline-cordinator.gasoline.svc:8080/healthz; do
                 i=$((i+1))
                 if [ "$i" -gt 150 ]; then
                   echo "cordinator did not come up within 5 minutes" >&2

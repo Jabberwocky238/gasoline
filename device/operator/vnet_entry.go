@@ -86,25 +86,34 @@ func (v *vniEntry) forwardFrame(frame []byte, src *PeerClient) error {
 		return nil
 	}
 
-	cid, ok := v.routingMap.LookupByIP(dst)
+	target, ok := v.routingMap.LookupByIP(dst)
 	if !ok {
 		return nil
 	}
 
-	v.mu.RLock()
-	var target *PeerClient
-	for _, cp := range v.clients {
-		if cp.CID == cid {
-			target = cp
-			break
+	switch target.Kind {
+	case RouteTargetClient:
+		v.mu.RLock()
+		var cp *PeerClient
+		for _, c := range v.clients {
+			if c.CID == target.CID {
+				cp = c
+				break
+			}
 		}
-	}
-	v.mu.RUnlock()
+		v.mu.RUnlock()
+		if cp == nil || cp.closed.Load() || cp == src {
+			return nil
+		}
+		return cp.Conn.WritePacket(frame)
 
-	if target == nil || target.closed.Load() || target == src {
+	case RouteTargetOperator:
+		// Remote prefix; would be forwarded via the operator-to-operator
+		// underlay. That subsystem (VXLAN/peer fanout) was removed when
+		// vtep was deleted; until it comes back we drop these.
 		return nil
 	}
-	return target.Conn.WritePacket(frame)
+	return nil
 }
 
 // buildKeepaliveReply mirrors the client's keepalive shape: a 20-byte

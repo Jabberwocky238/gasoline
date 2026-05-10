@@ -138,7 +138,7 @@ func (o *Operator) AddPeer(uuid [16]byte, udpAddr netip.AddrPort) {
 	if uuid == o.uuid {
 		return
 	}
-	o.state.Peers.Add(NewPeer(uuid, udpAddr))
+	o.state.Peers.Add(NewPeerOperator(uuid, udpAddr))
 }
 
 func (o *Operator) RemovePeer(uuid [16]byte) {

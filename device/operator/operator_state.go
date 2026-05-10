@@ -24,7 +24,7 @@ type operatorState struct {
 
 	ctrls map[string]Ctrl
 	vnets map[protocol.VNI_Ty]*vniEntry
-	Peers *PeerOperatorTable
+	Peers *PeerTable
 }
 
 func newOperatorState(parent *common.LogContext) *operatorState {

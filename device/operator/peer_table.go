@@ -4,42 +4,42 @@ import (
 	"sync"
 )
 
-// PeerOperatorTable indexes peers by UUID.
-type PeerOperatorTable struct {
+// PeerTable indexes peers by UUID.
+type PeerTable struct {
 	mu    sync.RWMutex
 	peers map[[16]byte]*PeerOperator
 }
 
-func NewPeerTable() *PeerOperatorTable {
-	return &PeerOperatorTable{peers: make(map[[16]byte]*PeerOperator)}
+func NewPeerTable() *PeerTable {
+	return &PeerTable{peers: make(map[[16]byte]*PeerOperator)}
 }
 
-func (t *PeerOperatorTable) Add(p *PeerOperator) {
+func (t *PeerTable) Add(p *PeerOperator) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.peers[p.UUID] = p
 }
 
-func (t *PeerOperatorTable) Remove(uuid [16]byte) {
+func (t *PeerTable) Remove(uuid [16]byte) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	delete(t.peers, uuid)
 }
 
-func (t *PeerOperatorTable) Get(uuid [16]byte) (*PeerOperator, bool) {
+func (t *PeerTable) Get(uuid [16]byte) (*PeerOperator, bool) {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	p, ok := t.peers[uuid]
 	return p, ok
 }
 
-func (t *PeerOperatorTable) Len() int {
+func (t *PeerTable) Len() int {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	return len(t.peers)
 }
 
-func (t *PeerOperatorTable) All() []*PeerOperator {
+func (t *PeerTable) All() []*PeerOperator {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	out := make([]*PeerOperator, 0, len(t.peers))

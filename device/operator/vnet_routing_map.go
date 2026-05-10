@@ -2,9 +2,10 @@ package operator
 
 // Longest-prefix-match routing table for one VNI. The trie portion is
 // adapted from WireGuard's common/allowedips.go (binary patricia trie,
-// LPM lookup, MIT licensed). We store CIDs at trie nodes instead of
-// Peers, and keep a parallel cid->prefix map so removal can be driven
-// from either side and the structure stays bijective.
+// LPM lookup, MIT licensed). Each leaf carries a RouteTarget that is
+// EITHER a local client (CID) OR a remote peer operator (UUID); LPM
+// lookups return that tagged target so the caller knows whether to
+// forward locally or to ship the frame off to another operator.
 
 import (
 	"encoding/binary"
@@ -75,9 +76,35 @@ func parseCID(s string) (protocol.CID_Ty, error) { return protocol.ParseCID(s) }
 
 func errReply(msg string) string { return "ERR " + msg }
 
+// --------------- RouteTarget ---------------
+
+// RouteTargetKind discriminates between a local client and a remote
+// peer operator.
+type RouteTargetKind uint8
+
+const (
+	// RouteTargetClient: the prefix is owned by a client that handshakes
+	// directly with this operator. The CID names that client.
+	RouteTargetClient RouteTargetKind = iota
+
+	// RouteTargetOperator: the prefix is owned by a client that
+	// handshakes with a different operator; OpUUID names that operator
+	// (we look up its data-plane endpoint from operatorState.Peers).
+	RouteTargetOperator
+)
+
+// RouteTarget is the resolved owner of a prefix.
+type RouteTarget struct {
+	Kind   RouteTargetKind
+	CID    protocol.CID_Ty // valid when Kind == RouteTargetClient
+	OpUUID [16]byte        // valid when Kind == RouteTargetOperator
+}
+
+// --------------- trie ---------------
+
 type routingTrieNode struct {
-	cid       protocol.CID_Ty
-	hasCID    bool
+	target    RouteTarget
+	hasTarget bool
 	child     [2]*routingTrieNode
 	cidr      uint8
 	bitAtByte uint8 // cidr / 8
@@ -143,31 +170,31 @@ func newTrieNode(ip []byte, cidr uint8) *routingTrieNode {
 	return n
 }
 
-// insert places (ip, cidr, cid) into *root. If an exact node exists,
-// its cid is replaced (and the old cid returned via prevCID/prevExact).
-func insertCID(root **routingTrieNode, ip []byte, cidr uint8, cid protocol.CID_Ty) (prev protocol.CID_Ty, replaced bool) {
+// insertTarget places (ip, cidr, target) into *root. If an exact node
+// already exists, its target is replaced (and the old one returned).
+func insertTarget(root **routingTrieNode, ip []byte, cidr uint8, target RouteTarget) (prev RouteTarget, replaced bool) {
 	if *root == nil {
 		n := newTrieNode(ip, cidr)
-		n.cid = cid
-		n.hasCID = true
+		n.target = target
+		n.hasTarget = true
 		*root = n
 		return
 	}
 
 	node, exact := (*root).nodePlacement(ip, cidr)
 	if exact {
-		if node.hasCID {
-			prev = node.cid
+		if node.hasTarget {
+			prev = node.target
 			replaced = true
 		}
-		node.cid = cid
-		node.hasCID = true
+		node.target = target
+		node.hasTarget = true
 		return
 	}
 
 	newNode := newTrieNode(ip, cidr)
-	newNode.cid = cid
-	newNode.hasCID = true
+	newNode.target = target
+	newNode.hasTarget = true
 
 	var down *routingTrieNode
 	if node == nil {
@@ -207,13 +234,13 @@ func insertCID(root **routingTrieNode, ip []byte, cidr uint8, cid protocol.CID_T
 	return
 }
 
-// lookupLPM walks the trie returning the cid attached to the deepest
-// node whose prefix matches ip.
-func (n *routingTrieNode) lookupLPM(ip []byte) (cid protocol.CID_Ty, ok bool) {
+// lookupLPM walks the trie returning the target attached to the
+// deepest node whose prefix matches ip.
+func (n *routingTrieNode) lookupLPM(ip []byte) (target RouteTarget, ok bool) {
 	size := uint8(len(ip))
 	for n != nil && commonBits(n.bits, ip) >= n.cidr {
-		if n.hasCID {
-			cid = n.cid
+		if n.hasTarget {
+			target = n.target
 			ok = true
 		}
 		if n.bitAtByte == size {
@@ -224,44 +251,69 @@ func (n *routingTrieNode) lookupLPM(ip []byte) (cid protocol.CID_Ty, ok bool) {
 	return
 }
 
-// removeExact clears the cid on the node matching prefix exactly. This
-// implementation does not prune empty internal nodes — the trie may
-// retain branch nodes after deletion, which is fine for our scale.
+// removeExact clears the target on the node matching prefix exactly.
+// Empty internal nodes are not pruned (fine at our scale).
 func removeExact(root *routingTrieNode, ip []byte, cidr uint8) bool {
 	node, exact := root.nodePlacement(ip, cidr)
-	if !exact || node == nil || !node.hasCID {
+	if !exact || node == nil || !node.hasTarget {
 		return false
 	}
-	var zero protocol.CID_Ty
-	node.cid = zero
-	node.hasCID = false
+	node.target = RouteTarget{}
+	node.hasTarget = false
 	return true
 }
 
-// vnetRoutingMap is the per-VNI cid<->prefix table with LPM lookup on
-// the prefix side.
+// --------------- vnetRoutingMap ---------------
+
+// vnetRoutingMap is the per-VNI prefix -> (client | operator) table
+// with LPM lookup on the prefix side and bidirectional reverse maps
+// keyed by client CID and peer operator UUID.
 type vnetRoutingMap struct {
-	mu       sync.RWMutex
-	v4       *routingTrieNode
-	v6       *routingTrieNode
-	cidToPfx map[protocol.CID_Ty]netip.Prefix
+	mu        sync.RWMutex
+	v4        *routingTrieNode
+	v6        *routingTrieNode
+	cidToPfx  map[protocol.CID_Ty]netip.Prefix
+	uuidToPfx map[[16]byte]netip.Prefix
 }
 
 func newVnetRoutingMap() *vnetRoutingMap {
 	return &vnetRoutingMap{
-		cidToPfx: make(map[protocol.CID_Ty]netip.Prefix),
+		cidToPfx:  make(map[protocol.CID_Ty]netip.Prefix),
+		uuidToPfx: make(map[[16]byte]netip.Prefix),
 	}
 }
 
-// Set installs cid <-> prefix. If cid had a different prefix, the old
-// trie entry is removed; if prefix already mapped to a different cid,
-// that cid's reverse entry is dropped so the structure stays bijective.
+// Set is a back-compat alias for SetClient.
 func (m *vnetRoutingMap) Set(cid protocol.CID_Ty, prefix netip.Prefix) {
+	m.SetClient(cid, prefix)
+}
+
+// SetClient binds cid <-> prefix as a local client route.
+func (m *vnetRoutingMap) SetClient(cid protocol.CID_Ty, prefix netip.Prefix) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.setLocked(RouteTarget{Kind: RouteTargetClient, CID: cid}, prefix)
+}
 
-	if oldPfx, ok := m.cidToPfx[cid]; ok && oldPfx != prefix {
-		m.removeExactLocked(oldPfx)
+// SetOperator binds peer-operator-uuid <-> prefix as a remote route.
+func (m *vnetRoutingMap) SetOperator(uuid [16]byte, prefix netip.Prefix) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.setLocked(RouteTarget{Kind: RouteTargetOperator, OpUUID: uuid}, prefix)
+}
+
+// setLocked is the shared write path. Callers hold m.mu.
+func (m *vnetRoutingMap) setLocked(target RouteTarget, prefix netip.Prefix) {
+	// Remove any stale binding for this target identity.
+	switch target.Kind {
+	case RouteTargetClient:
+		if oldPfx, ok := m.cidToPfx[target.CID]; ok && oldPfx != prefix {
+			m.removeExactLocked(oldPfx)
+		}
+	case RouteTargetOperator:
+		if oldPfx, ok := m.uuidToPfx[target.OpUUID]; ok && oldPfx != prefix {
+			m.removeExactLocked(oldPfx)
+		}
 	}
 
 	cidr := uint8(prefix.Bits())
@@ -269,23 +321,40 @@ func (m *vnetRoutingMap) Set(cid protocol.CID_Ty, prefix netip.Prefix) {
 	switch {
 	case addr.Is4():
 		ip := addr.As4()
-		prev, replaced := insertCID(&m.v4, ip[:], cidr, cid)
-		if replaced && prev != cid {
-			delete(m.cidToPfx, prev)
+		prev, replaced := insertTarget(&m.v4, ip[:], cidr, target)
+		if replaced {
+			m.dropReverseLocked(prev)
 		}
 	case addr.Is6():
 		ip := addr.As16()
-		prev, replaced := insertCID(&m.v6, ip[:], cidr, cid)
-		if replaced && prev != cid {
-			delete(m.cidToPfx, prev)
+		prev, replaced := insertTarget(&m.v6, ip[:], cidr, target)
+		if replaced {
+			m.dropReverseLocked(prev)
 		}
 	default:
 		return
 	}
-	m.cidToPfx[cid] = prefix
+
+	switch target.Kind {
+	case RouteTargetClient:
+		m.cidToPfx[target.CID] = prefix
+	case RouteTargetOperator:
+		m.uuidToPfx[target.OpUUID] = prefix
+	}
 }
 
-// LookupByCID returns the prefix bound to cid.
+// dropReverseLocked removes a stale identity → prefix entry whose
+// trie slot has just been overwritten.
+func (m *vnetRoutingMap) dropReverseLocked(t RouteTarget) {
+	switch t.Kind {
+	case RouteTargetClient:
+		delete(m.cidToPfx, t.CID)
+	case RouteTargetOperator:
+		delete(m.uuidToPfx, t.OpUUID)
+	}
+}
+
+// LookupByCID returns the prefix bound to a client cid.
 func (m *vnetRoutingMap) LookupByCID(cid protocol.CID_Ty) (netip.Prefix, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -293,12 +362,20 @@ func (m *vnetRoutingMap) LookupByCID(cid protocol.CID_Ty) (netip.Prefix, bool) {
 	return p, ok
 }
 
-// LookupByIP performs longest-prefix-match: returns the cid whose
-// configured prefix is the longest one containing ip.
-func (m *vnetRoutingMap) LookupByIP(ip netip.Addr) (protocol.CID_Ty, bool) {
-	// fast path, no lock
-	// m.mu.RLock()
-	// defer m.mu.RUnlock()
+// LookupByOpUUID returns the prefix bound to a peer operator UUID.
+func (m *vnetRoutingMap) LookupByOpUUID(uuid [16]byte) (netip.Prefix, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	p, ok := m.uuidToPfx[uuid]
+	return p, ok
+}
+
+// LookupByIP performs longest-prefix-match: returns the RouteTarget
+// (either a local client CID or a remote operator UUID) whose configured
+// prefix is the longest one containing ip.
+func (m *vnetRoutingMap) LookupByIP(ip netip.Addr) (RouteTarget, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	if ip.Is4() {
 		b := ip.As4()
 		return m.v4.lookupLPM(b[:])
@@ -307,12 +384,11 @@ func (m *vnetRoutingMap) LookupByIP(ip netip.Addr) (protocol.CID_Ty, bool) {
 		b := ip.As16()
 		return m.v6.lookupLPM(b[:])
 	}
-	var zero protocol.CID_Ty
-	return zero, false
+	return RouteTarget{}, false
 }
 
-// LookupByPrefix returns the cid bound to an exactly-matching prefix.
-func (m *vnetRoutingMap) LookupByPrefix(prefix netip.Prefix) (protocol.CID_Ty, bool) {
+// LookupByPrefix returns the target bound to an exactly-matching prefix.
+func (m *vnetRoutingMap) LookupByPrefix(prefix netip.Prefix) (RouteTarget, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	addr := prefix.Addr()
@@ -333,14 +409,13 @@ func (m *vnetRoutingMap) LookupByPrefix(prefix netip.Prefix) (protocol.CID_Ty, b
 		ip := addr.As16()
 		node, exact = m.v6.nodePlacement(ip[:], cidr)
 	}
-	if !exact || node == nil || !node.hasCID {
-		var zero protocol.CID_Ty
-		return zero, false
+	if !exact || node == nil || !node.hasTarget {
+		return RouteTarget{}, false
 	}
-	return node.cid, true
+	return node.target, true
 }
 
-// DeleteByCID removes the binding keyed by cid.
+// DeleteByCID removes the binding keyed by client cid.
 func (m *vnetRoutingMap) DeleteByCID(cid protocol.CID_Ty) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -352,23 +427,36 @@ func (m *vnetRoutingMap) DeleteByCID(cid protocol.CID_Ty) {
 	delete(m.cidToPfx, cid)
 }
 
-// DeleteByPrefix removes the binding keyed by prefix.
+// DeleteByOpUUID removes the binding keyed by peer operator UUID.
+func (m *vnetRoutingMap) DeleteByOpUUID(uuid [16]byte) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	pfx, ok := m.uuidToPfx[uuid]
+	if !ok {
+		return
+	}
+	m.removeExactLocked(pfx)
+	delete(m.uuidToPfx, uuid)
+}
+
+// DeleteByPrefix removes the binding keyed by prefix (whichever target
+// it owned).
 func (m *vnetRoutingMap) DeleteByPrefix(prefix netip.Prefix) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	cid, ok := m.lookupExactLocked(prefix)
+	target, ok := m.lookupExactLocked(prefix)
 	if !ok {
 		return
 	}
 	m.removeExactLocked(prefix)
-	delete(m.cidToPfx, cid)
+	m.dropReverseLocked(target)
 }
 
-// Len returns the number of cid<->prefix bindings.
+// Len returns the total number of bindings (clients + operators).
 func (m *vnetRoutingMap) Len() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return len(m.cidToPfx)
+	return len(m.cidToPfx) + len(m.uuidToPfx)
 }
 
 func (m *vnetRoutingMap) removeExactLocked(prefix netip.Prefix) {
@@ -384,7 +472,7 @@ func (m *vnetRoutingMap) removeExactLocked(prefix netip.Prefix) {
 	}
 }
 
-func (m *vnetRoutingMap) lookupExactLocked(prefix netip.Prefix) (protocol.CID_Ty, bool) {
+func (m *vnetRoutingMap) lookupExactLocked(prefix netip.Prefix) (RouteTarget, bool) {
 	addr := prefix.Addr()
 	cidr := uint8(prefix.Bits())
 	var node *routingTrieNode
@@ -397,9 +485,8 @@ func (m *vnetRoutingMap) lookupExactLocked(prefix netip.Prefix) (protocol.CID_Ty
 		ip := addr.As16()
 		node, exact = m.v6.nodePlacement(ip[:], cidr)
 	}
-	if !exact || node == nil || !node.hasCID {
-		var zero protocol.CID_Ty
-		return zero, false
+	if !exact || node == nil || !node.hasTarget {
+		return RouteTarget{}, false
 	}
-	return node.cid, true
+	return node.target, true
 }

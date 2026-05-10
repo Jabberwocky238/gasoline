@@ -386,28 +386,28 @@ func (c *Cordinator) handleWS(ws *websocket.Conn) {
 }
 
 // snapshotTo replays the current per-VNI route table to a freshly
-// connected operator as control.RouteUpsert events.
+// connected operator as control.RouteUpsert events (JSON-per-line).
 func (c *Cordinator) snapshotTo(ws *websocket.Conn) {
 	c.vnetsMu.RLock()
 	defer c.vnetsMu.RUnlock()
 	for vni, v := range c.vnets {
 		v.mu.RLock()
 		for cid, pfx := range v.routes {
-			_ = control.WriteFrame(ws, &control.RouteUpsert{VNI: vni, CID: cid, Prefix: pfx})
+			c.writeOp(ws, &control.RouteUpsert{VNI: vni, CID: cid, Prefix: pfx})
 		}
 		v.mu.RUnlock()
 	}
 }
 
-// broadcastOp encodes op once via control's framed binary wire and
-// writes the resulting frame to every connected operator. Failed
-// writes drop the offending connection.
+// broadcastOp encodes op once as JSON and writes the resulting line to
+// every connected operator. Failed writes drop the offending connection.
 func (c *Cordinator) broadcastOp(op control.Op) {
-	frame, err := control.EncodeFrame(op)
+	body, err := control.MarshalJSON(op)
 	if err != nil {
-		c.lctx.Log().Errorf("broadcast: encode %T: %v", op, err)
+		c.lctx.Log().Errorf("broadcast: marshal %T: %v", op, err)
 		return
 	}
+	body = append(body, '\n')
 
 	c.opsMu.Lock()
 	conns := make([]*websocket.Conn, 0, len(c.ops))
@@ -417,7 +417,7 @@ func (c *Cordinator) broadcastOp(op control.Op) {
 	c.opsMu.Unlock()
 
 	for _, conn := range conns {
-		if _, err := conn.Write(frame); err != nil {
+		if _, err := conn.Write(body); err != nil {
 			c.lctx.Log().Debugf("broadcast: drop %s: %v", conn.RemoteAddr(), err)
 			_ = conn.Close()
 			c.opsMu.Lock()
@@ -425,6 +425,17 @@ func (c *Cordinator) broadcastOp(op control.Op) {
 			c.opsMu.Unlock()
 		}
 	}
+}
+
+// writeOp encodes one op as JSON + '\n' and writes it to ws.
+func (c *Cordinator) writeOp(ws *websocket.Conn, op control.Op) {
+	body, err := control.MarshalJSON(op)
+	if err != nil {
+		c.lctx.Log().Errorf("writeOp: marshal %T: %v", op, err)
+		return
+	}
+	body = append(body, '\n')
+	_, _ = ws.Write(body)
 }
 
 // --------------- helpers ---------------

@@ -1,36 +1,27 @@
 // Package control defines the unified vocabulary used by both
-// gasoctl (operator IPC) and the operator <-> cordinator wire. Each
-// operation has its own struct file in this package.
+// gasoctl (operator IPC over Unix socket) and the operator <->
+// cordinator wire (websocket). One op per file.
 //
-// The list of operations is finite and intentionally small:
-//
-//	RouteUpsert / RouteRemove / RouteQuery
-//	PeerJoin / PeerLeave
-//	CordinatorConnect / CordinatorDisconnect
-//	Reply (OK / Err)
-//
-// Encoding/transport (line text, JSON, etc.) is the caller's choice;
-// this package only owns the parameter shapes.
+// This is a CONTROL plane — bandwidth is irrelevant. Encoding is
+// JSON via MarshalJSON / UnmarshalJSON in json.go. There is
+// intentionally no per-struct binary Encode/Decode.
 package control
 
+import (
+	"encoding/json"
+	"fmt"
+)
+
 // Op is the union over all operation kinds defined in this package.
-// Every concrete Op exposes:
-//
-//	Kind()          // 1-byte type tag
-//	Encode() []byte // self-contained big-endian binary form
-//	Decode([]byte)  // inverse of Encode
-//
-// The Kind tag is NOT included in Encode's output; transports that
-// need to dispatch polymorphically prepend it themselves (or wrap in
-// a frame).
+// Concrete types live in their own files; the only behavior the
+// dispatcher needs is the Kind discriminator.
 type Op interface {
 	opMarker()
 	Kind() Kind
-	Encode() []byte
-	Decode([]byte) error
 }
 
-// Kind is a 1-byte discriminator. Values are stable across versions.
+// Kind is a stable per-op tag. Used in the JSON envelope so receivers
+// can pick a concrete struct before unmarshalling the body.
 type Kind uint8
 
 const (
@@ -41,13 +32,13 @@ const (
 	KindPeerJoin               Kind = 0x10
 	KindPeerLeave              Kind = 0x11
 	KindCordinatorConnect      Kind = 0x20
-	KindCordinatorConnectReply Kind = 0x22
 	KindCordinatorDisconnect   Kind = 0x21
+	KindCordinatorConnectReply Kind = 0x22
 	KindReply                  Kind = 0xF0
 )
 
-// New returns a zero-valued Op for the given kind, ready to receive a
-// Decode call. Returns nil for unknown kinds.
+// New returns a zero-valued Op for the given kind, ready to be
+// populated by json.Unmarshal. Returns nil for unknown kinds.
 func New(k Kind) Op {
 	switch k {
 	case KindRouteUpsert:
@@ -70,4 +61,48 @@ func New(k Kind) Op {
 		return &Reply{}
 	}
 	return nil
+}
+
+// JSON envelope wraps any Op so the receiver can dispatch by Kind
+// before unmarshalling into the concrete struct:
+//
+//	{"kind": <byte>, "body": { ...struct fields... }}
+//
+// This is the wire shape for both gasoctl (unix socket) and the
+// cordinator websocket. The transport just frames lines (one JSON
+// object per line) or websocket text frames.
+type Envelope struct {
+	Kind Kind            `json:"kind"`
+	Body json.RawMessage `json:"body,omitempty"`
+}
+
+// MarshalJSON encodes op into the JSON envelope above.
+func MarshalJSON(op Op) ([]byte, error) {
+	if op == nil {
+		return nil, fmt.Errorf("control: nil op")
+	}
+	body, err := json.Marshal(op)
+	if err != nil {
+		return nil, fmt.Errorf("control: marshal %T: %w", op, err)
+	}
+	return json.Marshal(Envelope{Kind: op.Kind(), Body: body})
+}
+
+// UnmarshalJSON parses an envelope and returns a populated Op.
+// Unknown Kind values are reported as an error.
+func UnmarshalJSON(b []byte) (Op, error) {
+	var env Envelope
+	if err := json.Unmarshal(b, &env); err != nil {
+		return nil, fmt.Errorf("control: envelope: %w", err)
+	}
+	op := New(env.Kind)
+	if op == nil {
+		return nil, fmt.Errorf("control: unknown kind %#x", byte(env.Kind))
+	}
+	if len(env.Body) > 0 {
+		if err := json.Unmarshal(env.Body, op); err != nil {
+			return nil, fmt.Errorf("control: body kind %#x: %w", byte(env.Kind), err)
+		}
+	}
+	return op, nil
 }

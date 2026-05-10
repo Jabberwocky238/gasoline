@@ -39,7 +39,10 @@ func newOperatorState(parent *common.LogContext) *operatorState {
 func (s *operatorState) registerVNI(vni protocol.VNI_Ty, authn auth.ServerAuthenticator) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.vnets[vni] = newVniEntry(authn)
+	v := newVniEntry(authn)
+	v.vni = vni
+	v.peers = s.Peers
+	s.vnets[vni] = v
 }
 
 func (s *operatorState) vni(vni protocol.VNI_Ty) (*vniEntry, bool) {

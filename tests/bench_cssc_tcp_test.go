@@ -1,41 +1,32 @@
-//go:build ignore
-// +build ignore
-
 package tests
 
 import (
 	"testing"
 
-	"github.com/jabberwocky238/gasoline/common"
+	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/transport/tcp"
 )
 
 func TestCSSC_TCP(t *testing.T) {
-	opA, opB, vni := setupOperators(t, "tcp")
-	defer opA.Close()
-	defer opB.Close()
+	a, b := startBenchOperators(t, "tcp")
+	defer a.op.Close()
+	defer b.op.Close()
 
-	connA, resultA, err := tcp.NewDialer(common.VMAC{0x02, 0, 0, 0, 0, 0x01}, vni, &auth.NoAuthClient{}).Dial(opA.ClientAddr())
+	cfgA := protocol.NewPreassignedSessionConfig(a.cidA, a.vni)
+	connA, _, err := tcp.NewDialer(cfgA, &auth.NoAuthClient{}).Dial(a.op.ClientAddr())
 	if err != nil {
 		t.Fatalf("ClientA dial: %v", err)
 	}
 	defer connA.Close()
 
-	connB, resultB, err := tcp.NewDialer(common.VMAC{0x02, 0, 0, 0, 0, 0x02}, vni, &auth.NoAuthClient{}).Dial(opB.ClientAddr())
+	cfgB := protocol.NewPreassignedSessionConfig(b.cidB, b.vni)
+	connB, _, err := tcp.NewDialer(cfgB, &auth.NoAuthClient{}).Dial(b.op.ClientAddr())
 	if err != nil {
 		t.Fatalf("ClientB dial: %v", err)
 	}
 	defer connB.Close()
 
-	clientAIP := resultA.Config.IPPrefix.Addr()
-	clientBIP := resultB.Config.IPPrefix.Addr()
-	t.Logf("ClientA=%s  ClientB=%s", clientAIP, clientBIP)
-
-	waitFor(t, 2e9, func() bool {
-		_, _, found := opA.LookupRemoteByVMAC(vni, resultB.VMAC)
-		return found
-	})
-
-	runTransfer(t, "CSSC-TCP", connA, connB, clientAIP, clientBIP, resultA.VMAC, resultB.VMAC)
+	t.Logf("ClientA=%s  ClientB=%s", a.pfxA.Addr(), b.pfxB.Addr())
+	runTransfer(t, "CSSC-TCP", connA, connB, a.pfxA.Addr(), b.pfxB.Addr())
 }

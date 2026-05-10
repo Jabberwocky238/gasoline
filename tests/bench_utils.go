@@ -36,6 +36,70 @@ type benchSetup struct {
 	pfxB netip.Prefix
 }
 
+// startBenchOperators spins up two paired operators: opA owns cidA,
+// opB owns cidB, each knows the other's prefix is reachable through
+// the peer. Returns the pair plus the addressing fixtures.
+func startBenchOperators(t *testing.T, tp string) (a, b *benchSetup) {
+	t.Helper()
+
+	cidA := protocol.CID_Ty{0, 0, 0, 0, 0, 0, 0, 0xA1}
+	cidB := protocol.CID_Ty{0, 0, 0, 0, 0, 0, 0, 0xB1}
+	pfxA := netip.MustParsePrefix("10.0.200.10/32")
+	pfxB := netip.MustParsePrefix("10.0.200.11/32")
+
+	build := func(uuid [16]byte, ownCID protocol.CID_Ty, ownPfx netip.Prefix) *operator.Operator {
+		cfg := &operator.StaticOperatorConfig{
+			UUID: &uuid,
+			ClientListeners: []operator.ListenerSpec{
+				{Transport: tp, Addr: "127.0.0.1:0"},
+			},
+			OpListenAddr: "127.0.0.1:0",
+			Network: map[protocol.VNI_Ty]operator.StaticOperatorVNetConfig{
+				benchVNI: {
+					VNI:          benchVNI,
+					CIDR:         benchVNetCIDR,
+					Auth:         &auth.NoAuthServer{},
+					PresetCIDmap: map[protocol.CID_Ty]netip.Prefix{ownCID: ownPfx},
+				},
+			},
+			LogLevel: logrus.ErrorLevel,
+		}
+		op, err := operator.New(cfg)
+		if err != nil {
+			t.Fatalf("operator.New: %v", err)
+		}
+		if err := op.Start(); err != nil {
+			t.Fatalf("operator.Start: %v", err)
+		}
+		return op
+	}
+
+	uuidA := [16]byte{0xA0}
+	uuidB := [16]byte{0xB0}
+	opA := build(uuidA, cidA, pfxA)
+	opB := build(uuidB, cidB, pfxB)
+
+	apA, errA := netip.ParseAddrPort(opA.DataPlaneAddr())
+	apB, errB := netip.ParseAddrPort(opB.DataPlaneAddr())
+	if errA != nil || errB != nil {
+		t.Fatalf("parse data-plane addr: A=%v B=%v", errA, errB)
+	}
+	opA.AddPeer(uuidB, apB)
+	opB.AddPeer(uuidA, apA)
+
+	// Each operator learns the other's owned prefix as a peer route.
+	if err := opA.SetPeerRoute(benchVNI, uuidB, pfxB); err != nil {
+		t.Fatalf("opA SetPeerRoute: %v", err)
+	}
+	if err := opB.SetPeerRoute(benchVNI, uuidA, pfxA); err != nil {
+		t.Fatalf("opB SetPeerRoute: %v", err)
+	}
+
+	a = &benchSetup{op: opA, vni: benchVNI, cidA: cidA, cidB: cidB, pfxA: pfxA, pfxB: pfxB}
+	b = &benchSetup{op: opB, vni: benchVNI, cidA: cidA, cidB: cidB, pfxA: pfxA, pfxB: pfxB}
+	return a, b
+}
+
 // startBenchOperator spins up a single operator listening on tp at an
 // ephemeral port. Two CIDs are pre-bound to two prefixes inside the VNI
 // so client handshakes succeed without a coordinator.

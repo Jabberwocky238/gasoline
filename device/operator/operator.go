@@ -3,7 +3,9 @@ package operator
 import (
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"fmt"
+	"net"
 	"net/netip"
 	"time"
 
@@ -19,6 +21,14 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// MessageTransport header layout repeated here for the receive parser
+// (the message package owns the encode side).
+const (
+	msgHeaderSize = 12
+	msgVNIOff     = 0
+	msgPayOff     = 12
+)
+
 // Operator is the per-process control + data plane orchestrator.
 //
 // Without a VXLAN underlay or peer fanout, this implementation only
@@ -32,6 +42,7 @@ type Operator struct {
 	uuid [16]byte
 
 	dataListenAddr  string
+	dataConn        *net.UDPConn // underlay socket, shared by all peers
 	clientListeners map[string]transport.Listener
 	state           *operatorState
 }
@@ -132,13 +143,39 @@ func (o *Operator) ClientAddr() string {
 	return ""
 }
 
-// AddPeer registers a remote operator. Without an underlay we just
-// record the entry; nothing forwards traffic to it yet.
+// AddPeer registers a remote operator and stamps the local underlay
+// send socket onto it so forwardFrame can ship MessageTransport bytes
+// straight to the peer's UDPAddr.
 func (o *Operator) AddPeer(uuid [16]byte, udpAddr netip.AddrPort) {
 	if uuid == o.uuid {
 		return
 	}
-	o.state.Peers.Add(NewPeerOperator(uuid, udpAddr))
+	p := NewPeerOperator(uuid, udpAddr)
+	if o.dataConn != nil {
+		p.SetSendSocket(o.dataConn)
+	}
+	o.state.Peers.Add(p)
+}
+
+// DataPlaneAddr returns the bound underlay UDP address ("host:port")
+// or "" if the underlay isn't running.
+func (o *Operator) DataPlaneAddr() string {
+	if o.dataConn == nil {
+		return ""
+	}
+	return o.dataConn.LocalAddr().String()
+}
+
+// SetPeerRoute installs (vni, prefix) -> peer operator UUID into the
+// VNI's routing table. Called either at boot from a static config or
+// at runtime when the coordinator pushes a remote-owned route.
+func (o *Operator) SetPeerRoute(vni protocol.VNI_Ty, peerUUID [16]byte, prefix netip.Prefix) error {
+	vn, ok := o.state.vni(vni)
+	if !ok {
+		return fmt.Errorf("unknown vni %d", vni)
+	}
+	vn.routingMap.SetOperator(peerUUID, prefix)
+	return nil
 }
 
 func (o *Operator) RemovePeer(uuid [16]byte) {
@@ -148,6 +185,23 @@ func (o *Operator) RemovePeer(uuid [16]byte) {
 // --------------- Lifecycle ---------------
 
 func (o *Operator) Start() error {
+	if o.dataListenAddr != "" {
+		udpAddr, err := net.ResolveUDPAddr("udp", o.dataListenAddr)
+		if err != nil {
+			return fmt.Errorf("data plane resolve %s: %w", o.dataListenAddr, err)
+		}
+		conn, err := net.ListenUDP("udp", udpAddr)
+		if err != nil {
+			return fmt.Errorf("data plane listen on %s: %w", o.dataListenAddr, err)
+		}
+		o.dataConn = conn
+		o.lctx.Log().Infof("Underlay UDP listening on %s", conn.LocalAddr())
+		// Stamp every existing peer with the new socket.
+		for _, p := range o.state.Peers.All() {
+			p.SetSendSocket(conn)
+		}
+		go o.routineReadFromPeer()
+	}
 	for tp, ln := range o.clientListeners {
 		o.lctx.Log().Infof("Client endpoint (%s) listening on %s", tp, ln.Addr())
 		go o.routineAcceptClients(tp, ln)
@@ -159,6 +213,10 @@ func (o *Operator) Start() error {
 func (o *Operator) Close() error {
 	o.lctx.Cancel()
 	closeAll(o.clientListeners)
+	if o.dataConn != nil {
+		_ = o.dataConn.Close()
+		o.dataConn = nil
+	}
 	if o.state != nil {
 		o.state.closeAll()
 	}
@@ -265,6 +323,48 @@ func (o *Operator) routineReaper() {
 				logger.Warnf("Reaping idle client %d", cp.SessionIndex)
 				_ = cp.Conn.Close()
 			}
+		}
+	}
+}
+
+// routineReadFromPeer drains the underlay UDP socket. Each datagram is
+// a MessageTransport (vni|cid|payload). The vni picks the local
+// vniEntry; vniEntry.deliverFromPeer hands the payload to the local
+// client that owns the destination IP.
+func (o *Operator) routineReadFromPeer() {
+	logger := o.lctx.Log()
+	conn := o.dataConn
+	if conn == nil {
+		return
+	}
+	buf := make([]byte, common.MaxPacketSize)
+	for {
+		select {
+		case <-o.lctx.Done():
+			return
+		default:
+		}
+		n, _, err := conn.ReadFromUDP(buf)
+		if err != nil {
+			select {
+			case <-o.lctx.Done():
+				return
+			default:
+				logger.Debugf("peer read: %v", err)
+				continue
+			}
+		}
+		if n < msgHeaderSize {
+			continue
+		}
+		vni := protocol.VNI_Ty(binary.BigEndian.Uint32(buf[msgVNIOff : msgVNIOff+4]))
+		payload := buf[msgPayOff:n]
+		vn, ok := o.state.vni(vni)
+		if !ok {
+			continue
+		}
+		if err := vn.deliverFromPeer(payload); err != nil {
+			logger.Debugf("deliver vni %d from peer: %v", vni, err)
 		}
 	}
 }

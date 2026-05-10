@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/jabberwocky238/gasoline/device/gasoctl"
 	"github.com/jabberwocky238/gasoline/protocol/control"
 )
 
@@ -32,7 +31,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	client := gasoctl.NewClient(*socket)
+	client := NewClient(*socket)
 	reply, err := client.Send(op)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "gasoctl: %v\n", err)

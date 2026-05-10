@@ -8,7 +8,7 @@
 //
 // This is the same wire used between operator and cordinator (see
 // device/cordinator); only the transport differs.
-package gasoctl
+package main
 
 import (
 	"bufio"

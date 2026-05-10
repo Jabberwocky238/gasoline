@@ -21,10 +21,10 @@ import (
 	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/transport"
-	_ "github.com/jabberwocky238/gasoline/transport/quic" // self-registers
-	_ "github.com/jabberwocky238/gasoline/transport/tcp"  // self-registers
-	_ "github.com/jabberwocky238/gasoline/transport/tls"  // self-registers
-	_ "github.com/jabberwocky238/gasoline/transport/udp"  // self-registers
+	transportQuic "github.com/jabberwocky238/gasoline/transport/quic"
+	_ "github.com/jabberwocky238/gasoline/transport/tcp" // self-registers
+	_ "github.com/jabberwocky238/gasoline/transport/tls" // self-registers
+	_ "github.com/jabberwocky238/gasoline/transport/udp" // self-registers
 	log "github.com/sirupsen/logrus"
 )
 
@@ -55,7 +55,8 @@ func New(cfg *StaticClientConfig) (*Client, error) {
 	var tlsConf *tls.Config
 	switch cfg.Transport {
 	case "tls", "quic":
-		tlsConf = &tls.Config{InsecureSkipVerify: true}
+		// QUIC requires ALPN; the helper sets it to match the server.
+		tlsConf = transportQuic.InsecureClientTLS()
 	}
 	dialer, err := transport.NewDialer(cfg.Transport, preset, clientAuth, tlsConf)
 	if err != nil {

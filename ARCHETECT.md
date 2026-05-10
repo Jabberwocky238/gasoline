@@ -17,7 +17,21 @@ go run main.go operator --listen "quic://0.0.0.0:8443" --network "200:10.0.0.0/2
 
 sudo go run main.go client --endpoint 69.164.244.173:20000 --vni 200
 sudo go run main.go client --endpoint 69.164.253.11:20000 --vni 200
-sudo go run main.go client --endpoint localhost:8443 --vni 200
+
+● Linux —— client A：
+./bin/client -endpoint :8443 -transport quic -auth noauth -vni 0 -cid 100 -tun gasoctlA -log-level debug
+go run ./cmd/client -endpoint 163.245.211.144:8443 -transport quic -auth noauth -vni 0 -cid 101 -tun gasoctlA -log-level debug
+
+Linux client B：
+./bin/client -endpoint :8443 -transport quic -auth noauth -vni 0 -cid 101 -tun gasoctlB -log-level debug
+
+Windows（PowerShell 或 cmd 都行）—— client A：
+.\bin\client.exe -endpoint 163.245.211.144:8443 -transport quic -auth noauth -vni 0 -cid 100 -tun gasoctlA -log-level debug
+go run ./cmd/client -endpoint 163.245.211.144:8443 -transport quic -auth noauth -vni 0 -cid 100 -tun gasoctlA -log-level debug
+
+Windows client B：
+.\bin\client.exe -endpoint :8443 -transport quic -auth noauth -vni 0 -cid 101 -tun gasoctlB -log-level debug
+
 go run main.go client --endpoint 76.13.182.201:20000 --vni 300
 go run main.go client --endpoint 172.29.64.1:8443 --vni 200
 

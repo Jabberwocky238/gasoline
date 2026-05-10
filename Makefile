@@ -1,36 +1,61 @@
-BINARY_NAME = gasoline
-OUTPUT_DIR  = bin
+OUTPUT_DIR := bin
+LDFLAGS    := -s -w
+GOFLAGS    := -trimpath -ldflags="$(LDFLAGS)"
 
-.PHONY: all linux linux-arm64 windows clean
+# Native binary suffix — Windows needs .exe.
+ifeq ($(OS),Windows_NT)
+EXE := .exe
+else
+EXE :=
+endif
 
-prepare:
-	git submodule update --init --recursive
+# Binaries this repo ships. Each entry is "<name>:./cmd/<name>".
+CMDS := operator cordinator gasoctl client
 
-all: linux
+.PHONY: all build operator cordinator gasoctl client \
+        linux linux-arm64 windows clean \
+        bench-csc-tcp bench-csc-udp bench-csc-quic bench-csc-tls \
+        bench-cssc-tcp bench-cssc-udp bench-cssc-quic bench-cssc-tls
 
-linux-amd64:
-	GOOS=linux GOARCH=amd64 go build -o $(OUTPUT_DIR)/$(BINARY_NAME)-linux-amd64 .
+all: build
+
+# Native build of every binary into $(OUTPUT_DIR)/.
+build: $(addprefix $(OUTPUT_DIR)/, $(addsuffix $(EXE), $(CMDS)))
+
+$(OUTPUT_DIR)/%$(EXE): cmd/%
+	@mkdir -p $(OUTPUT_DIR)
+	go build $(GOFLAGS) -o $@ ./cmd/$*
+
+# Convenience aliases — `make operator`, `make cordinator`, etc.
+operator:   $(OUTPUT_DIR)/operator$(EXE)
+cordinator: $(OUTPUT_DIR)/cordinator$(EXE)
+gasoctl:    $(OUTPUT_DIR)/gasoctl$(EXE)
+client:     $(OUTPUT_DIR)/client$(EXE)
+
+# Cross-builds. Each target produces all four binaries with a suffix.
+linux:
+	@mkdir -p $(OUTPUT_DIR)
+	@for c in $(CMDS); do \
+	  echo "==> linux/amd64 $$c"; \
+	  CGO_ENABLED=0 GOOS=linux  GOARCH=amd64 go build $(GOFLAGS) -o $(OUTPUT_DIR)/$$c-linux-amd64    ./cmd/$$c || exit 1; \
+	done
 
 linux-arm64:
-	GOOS=linux GOARCH=arm64 go build -o $(OUTPUT_DIR)/$(BINARY_NAME)-linux-arm64 .
-
-linux: linux-amd64 linux-arm64
+	@mkdir -p $(OUTPUT_DIR)
+	@for c in $(CMDS); do \
+	  echo "==> linux/arm64 $$c"; \
+	  CGO_ENABLED=0 GOOS=linux  GOARCH=arm64 go build $(GOFLAGS) -o $(OUTPUT_DIR)/$$c-linux-arm64    ./cmd/$$c || exit 1; \
+	done
 
 windows:
-	GOOS=windows GOARCH=amd64 go build -o $(OUTPUT_DIR)/$(BINARY_NAME)-windows-amd64.exe .
+	@mkdir -p $(OUTPUT_DIR)
+	@for c in $(CMDS); do \
+	  echo "==> windows/amd64 $$c"; \
+	  CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build $(GOFLAGS) -o $(OUTPUT_DIR)/$$c-windows-amd64.exe ./cmd/$$c || exit 1; \
+	done
 
-genproto:
-	protoc --go_out=. --go_opt=paths=source_relative --go-grpc_out=. --go-grpc_opt=paths=source_relative \
-		operator/control.proto protocol/ctrl/ctrl.proto
-
-
-test-op:
-	go test ./operator/ -v -timeout 30s
-
-test-op-dataforwarding:
-	go test ./operator/ -v -run TestDataForwarding -timeout 10s
-
-test: test-op
+clean:
+	rm -rf $(OUTPUT_DIR)
 
 # bench-{topology}-{transport}
 # topology: csc (client-server-client), cssc (client-server-server-client)
@@ -58,6 +83,3 @@ bench-cssc-quic:
 
 bench-cssc-tls:
 	go test ./tests/ -v -run TestCSSC_TLS -timeout 120s
-
-clean:
-	rm -rf $(OUTPUT_DIR)/$(BINARY_NAME)-*

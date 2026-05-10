@@ -82,7 +82,7 @@ func RegisterOperatorCLIParam(params map[string][]string) (*operator.StaticOpera
 	if len(presets) == 0 {
 		presets = []string{"0:100:10.0.0.1/32", "0:101:10.0.0.2/32", "0:102:10.0.0.3/32"}
 	}
-	for _, raw := range params[ParamPreset] {
+	for _, raw := range presets {
 		vni, cid, pfx, err := parsePresetEntry(raw)
 		if err != nil {
 			return nil, err

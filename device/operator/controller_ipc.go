@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -33,6 +34,14 @@ func NewIPC(base *ControllerBase, path string) (*IPCController, error) {
 	if path == "" {
 		return nil, fmt.Errorf("ipc: empty socket path")
 	}
+	// Make sure the parent directory exists. /var/run/... and other
+	// common defaults often need an mkdir on first boot.
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("ipc: mkdir %s: %w", dir, err)
+		}
+	}
+	// Drop a stale socket file from a previous crash.
 	if _, err := os.Stat(path); err == nil {
 		_ = os.Remove(path)
 	}

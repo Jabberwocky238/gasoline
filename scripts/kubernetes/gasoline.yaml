@@ -1,0 +1,135 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gasoline
+---
+# Single cordinator instance. The DaemonSet operators dial it.
+apiVersion: apps/v1
+kind: ReplicaSet
+metadata:
+  name: gasoline-cordinator
+  namespace: gasoline
+  labels:
+    app: gasoline-cordinator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gasoline-cordinator
+  template:
+    metadata:
+      labels:
+        app: gasoline-cordinator
+    spec:
+      containers:
+        - name: cordinator
+          image: ghcr.io/jabberwocky238/gasoline:latest # TODO: pin a digest
+          imagePullPolicy: Always
+          command: ["/usr/local/bin/cordinator"]
+          args:
+            - "-addr=:8080"
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+---
+# ClusterIP so DaemonSet pods reach the cordinator by DNS:
+#   ws://gasoline-cordinator.gasoline.svc:8080/ws
+apiVersion: v1
+kind: Service
+metadata:
+  name: gasoline-cordinator
+  namespace: gasoline
+spec:
+  selector:
+    app: gasoline-cordinator
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP
+  type: ClusterIP
+---
+# Operators run on every node. Two-container pod:
+#   - initContainer "wait-cordinator" blocks startup until the cordinator
+#     Service answers /api/vnet, so we never start an operator that has
+#     nowhere to register.
+#   - main container "operator" runs the data plane.
+#   - postStart lifecycle hook fires gasoctl to connect this operator
+#     to the cordinator. If gasoctl exits non-zero (socket not yet
+#     bound, cordinator unreachable, …) kubelet treats the container
+#     as failed and restarts the whole pod — so any single failure in
+#     {operator, gasoctl} fails the unit.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: gasoline-operator
+  namespace: gasoline
+  labels:
+    app: gasoline-operator
+spec:
+  selector:
+    matchLabels:
+      app: gasoline-operator
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: gasoline-operator
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      restartPolicy: Always
+      tolerations:
+        - operator: Exists
+      initContainers:
+        - name: wait-cordinator
+          image: busybox:stable
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              echo "waiting for gasoline-cordinator..."
+              i=0
+              until wget -q -T 2 -O /dev/null http://gasoline-cordinator.gasoline.svc:8080/api/vnet; do
+                i=$((i+1))
+                if [ "$i" -gt 150 ]; then
+                  echo "cordinator did not come up within 5 minutes" >&2
+                  exit 1
+                fi
+                sleep 2
+              done
+              echo "cordinator reachable"
+      containers:
+        - name: operator
+          image: ghcr.io/jabberwocky238/gasoline:latest # TODO: pin a digest
+          imagePullPolicy: Always
+          command: ["/usr/local/bin/operator"]
+          args:
+            - "--ipc=/run/gasoline/operator.sock"
+            - "--listen=quic://:20000"
+            - "--op-listen=:5555"
+            - "--log-level=info"
+          volumeMounts:
+            - name: ipc
+              mountPath: /run/gasoline
+          lifecycle:
+            # postStart blocks the container's Ready transition until
+            # gasoctl returns 0. Any non-zero exit kills the container,
+            # which under restartPolicy: Always restarts the whole pod.
+            postStart:
+              exec:
+                command:
+                  - /usr/local/bin/gasoctl
+                  - -sock=/run/gasoline/operator.sock
+                  - cordinator
+                  - connect
+                  - ws://gasoline-cordinator.gasoline.svc:8080/ws
+      volumes:
+        - name: ipc
+          emptyDir:
+            medium: Memory

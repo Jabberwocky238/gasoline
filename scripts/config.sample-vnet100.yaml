@@ -1,3 +1,0 @@
-vnet: 100
-cidr: "10.0.200.0/24"
-auth: "noauth"

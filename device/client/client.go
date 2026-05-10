@@ -70,7 +70,7 @@ func New(cfg *StaticClientConfig) (*Client, error) {
 	lctx := common.NewLogContext(nil, logger).
 		WithField("component", "client").
 		WithField("vni", cfg.VNI).
-		WithField("cid", fmt.Sprintf("%x", cfg.CID))
+		WithField("cid", cfg.CID)
 
 	return &Client{
 		cfg:    cfg,

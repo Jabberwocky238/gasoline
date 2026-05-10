@@ -43,6 +43,6 @@ func ParseCID(s string) (CID_Ty, error) {
 
 // FormatCID renders a CID as its big-endian uint64 decimal string.
 // This is the inverse of ParseCID for the default (decimal) form.
-func FormatCID(cid CID_Ty) string {
+func (cid CID_Ty) FormatCID() string {
 	return strconv.FormatUint(binary.BigEndian.Uint64(cid[:]), 10)
 }

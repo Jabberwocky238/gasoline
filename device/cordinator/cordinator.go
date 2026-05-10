@@ -214,7 +214,7 @@ func (c *Cordinator) handleRoutesList(w http.ResponseWriter, r *http.Request) {
 	v.mu.RLock()
 	out := make([]routeEntry, 0, len(v.routes))
 	for cid, pfx := range v.routes {
-		out = append(out, routeEntry{CID: protocol.FormatCID(cid), Prefix: pfx.String()})
+		out = append(out, routeEntry{CID: cid.FormatCID(), Prefix: pfx.String()})
 	}
 	v.mu.RUnlock()
 	writeJSON(w, out)

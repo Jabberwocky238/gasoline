@@ -46,7 +46,7 @@ func (b *ControllerBase) Consume(op control.Op) control.Op {
 	case *control.RouteUpsert:
 		vn, ok := b.state.vni(v.VNI)
 		if !ok {
-			return errReplyOp("unknown vni %d", v.VNI)
+			return errReplyOp("unknown vni %s", v.VNI)
 		}
 		var zero [16]byte
 		if v.OwnerUUID == zero || v.OwnerUUID == b.state.uuid {
@@ -67,7 +67,7 @@ func (b *ControllerBase) Consume(op control.Op) control.Op {
 	case *control.RouteQuery:
 		vn, ok := b.state.vni(v.VNI)
 		if !ok {
-			return errReplyOp("unknown vni %d", v.VNI)
+			return errReplyOp("unknown vni %s", v.VNI)
 		}
 		pfx, ok := vn.routingMap.LookupByCID(v.CID)
 		if !ok {

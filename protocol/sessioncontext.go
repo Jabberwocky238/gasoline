@@ -1,12 +1,27 @@
 package protocol
 
 import (
+	"encoding/binary"
+	"fmt"
 	"net/netip"
 	"sync"
 )
 
 type VNI_Ty uint32
+
+// String renders a VNI as both decimal and hex, e.g. "1234 (0x04d2)".
+func (vni VNI_Ty) String() string {
+	return fmt.Sprintf("%d (0x%06x)", uint32(vni), uint32(vni))
+}
+
 type CID_Ty [8]byte
+
+// the canonical log-format for a CID: "<decimal> (0x<hex>)".
+func (cid CID_Ty) String() string {
+	n := binary.BigEndian.Uint64(cid[:])
+	return fmt.Sprintf("%d (0x%016x)", n, n)
+}
+
 type SessionID_Ty [16]byte
 
 type SessionContext struct {

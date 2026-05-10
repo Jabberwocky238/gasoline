@@ -85,7 +85,7 @@ func (c *CordinatorController) Start() error {
 				continue
 			}
 			_ = c.send(fmt.Sprintf("attach %d %s %s",
-				vni, protocol.FormatCID(cp.sc.CID), pfx.String()))
+				vni, cp.sc.CID.FormatCID(), pfx.String()))
 		}
 	}
 	c.base.state.mu.RUnlock()
@@ -122,9 +122,9 @@ func (c *CordinatorController) Close() error {
 // routingMaps.
 func (c *CordinatorController) onClientEvent(vni protocol.VNI_Ty, cid protocol.CID_Ty, prefix netip.Prefix, attached bool) {
 	if attached {
-		_ = c.send(fmt.Sprintf("attach %d %s %s", vni, protocol.FormatCID(cid), prefix.String()))
+		_ = c.send(fmt.Sprintf("attach %d %s %s", vni, cid.FormatCID(), prefix.String()))
 	} else {
-		_ = c.send(fmt.Sprintf("detach %d %s", vni, protocol.FormatCID(cid)))
+		_ = c.send(fmt.Sprintf("detach %d %s", vni, cid.FormatCID()))
 	}
 }
 
@@ -238,7 +238,7 @@ func (c *CordinatorController) handleInbound(line string) error {
 			}
 			vn, ok := c.base.state.vni(protocol.VNI_Ty(vni))
 			if !ok {
-				return fmt.Errorf("route set: unknown vni %d", vni)
+				return fmt.Errorf("route set: unknown vni %d (0x%06x)", vni, vni)
 			}
 			if uuid == c.base.state.uuid {
 				// Our own client; routingMap already has it (added at handshake).

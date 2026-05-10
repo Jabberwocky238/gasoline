@@ -53,7 +53,7 @@ func (r *vniResolver) Authenticator() auth.ServerAuthenticator { return r.vn.aut
 func (r *vniResolver) IP(cid protocol.CID_Ty) (netip.Addr, error) {
 	pfx, ok := r.vn.routingMap.LookupByCID(cid)
 	if !ok {
-		return netip.Addr{}, fmt.Errorf("no route assigned for cid %x", cid)
+		return netip.Addr{}, fmt.Errorf("no route assigned for cid %s", cid)
 	}
 	return pfx.Addr(), nil
 }
@@ -71,7 +71,7 @@ func New(cfg *StaticOperatorConfig) (*Operator, error) {
 		prefix, err := netip.ParsePrefix(entry.CIDR)
 		if err != nil {
 			root.Cancel()
-			return nil, fmt.Errorf("vni %d cidr %q: %w", vni, entry.CIDR, err)
+			return nil, fmt.Errorf("vni %s cidr %q: %w", vni, entry.CIDR, err)
 		}
 		cidrs[vni] = prefix
 		state.registerVNI(vni, entry.Auth)
@@ -81,7 +81,7 @@ func New(cfg *StaticOperatorConfig) (*Operator, error) {
 				vn.routingMap.Set(cid, pfx)
 			}
 		}
-		root.Log().Infof("VNet %d: %s (%d preset routes)", vni, prefix, len(entry.PresetCIDmap))
+		root.Log().Infof("VNet %s: %s (%d preset routes)", vni, prefix, len(entry.PresetCIDmap))
 	}
 
 	// One mapper closure shared by every listener.
@@ -91,7 +91,7 @@ func New(cfg *StaticOperatorConfig) (*Operator, error) {
 		cidr := cidrs[vni]
 		state.mu.RUnlock()
 		if !ok {
-			return nil, fmt.Errorf("no config for vni %d", vni)
+			return nil, fmt.Errorf("no config for vni %s", vni)
 		}
 		return &vniResolver{vn: vn, cidr: cidr}, nil
 	}
@@ -171,7 +171,7 @@ func (o *Operator) DataPlaneAddr() string { return o.state.Peers.Addr() }
 func (o *Operator) SetPeerRoute(vni protocol.VNI_Ty, peerUUID [16]byte, prefix netip.Prefix) error {
 	vn, ok := o.state.vni(vni)
 	if !ok {
-		return fmt.Errorf("unknown vni %d", vni)
+		return fmt.Errorf("unknown vni %s", vni)
 	}
 	vn.routingMap.SetOperator(peerUUID, prefix)
 	return nil
@@ -244,12 +244,12 @@ func (o *Operator) routineAcceptClients(tp string, ln transport.Listener) {
 		cp := newPeerClient(conn, sc)
 		vn, err := o.state.addClient(cp)
 		if err != nil {
-			logger.Errorf("attach client %d to VNI %d: %v", cp.sc.SessionIndex, cp.sc.VNI, err)
+			logger.Errorf("attach client %d to VNI %s: %v", cp.sc.SessionIndex, cp.sc.VNI, err)
 			_ = conn.Close()
 			continue
 		}
 
-		logger.Infof("Client %d connected on VNI %d from %s",
+		logger.Infof("Client %d connected on VNI %s from %s",
 			cp.sc.SessionIndex, cp.sc.VNI, conn.RemoteAddr())
 		go o.routineReadFromClient(cp, vn)
 	}
@@ -348,7 +348,7 @@ func (o *Operator) routineReadFromPeer() {
 			continue
 		}
 		if err := vn.deliverFromPeer(payload); err != nil {
-			logger.Debugf("deliver vni %d from peer: %v", vni, err)
+			logger.Debugf("deliver vni %s from peer: %v", vni, err)
 		}
 	}
 }

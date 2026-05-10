@@ -72,7 +72,7 @@ func RegisterOperatorCLIParam(params map[string][]string) (*operator.StaticOpera
 			return nil, err
 		}
 		if _, dup := cfg.Network[entry.VNI]; dup {
-			return nil, fmt.Errorf("network: duplicate vni %d", entry.VNI)
+			return nil, fmt.Errorf("network: duplicate vni %s", entry.VNI)
 		}
 		cfg.Network[entry.VNI] = entry
 	}
@@ -95,7 +95,7 @@ func RegisterOperatorCLIParam(params map[string][]string) (*operator.StaticOpera
 			entry.PresetCIDmap = make(map[protocol.CID_Ty]netip.Prefix)
 		}
 		if existing, dup := entry.PresetCIDmap[cid]; dup && existing != pfx {
-			return nil, fmt.Errorf("preset %q: cid %s already bound to %s", raw, protocol.FormatCID(cid), existing)
+			return nil, fmt.Errorf("preset %q: cid %s already bound to %s", raw, cid.FormatCID(), existing)
 		}
 		entry.PresetCIDmap[cid] = pfx
 		cfg.Network[vni] = entry

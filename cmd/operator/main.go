@@ -80,9 +80,9 @@ func printConfig(cfg *operator.StaticOperatorConfig, ipcSocket string) {
 	}
 	fmt.Println("network:")
 	for vni, n := range cfg.Network {
-		fmt.Printf("  - vni=%d cidr=%s auth=%T preset=%d\n", vni, n.CIDR, n.Auth, len(n.PresetCIDmap))
+		fmt.Printf("  - vni=%s cidr=%s auth=%T preset=%d\n", vni, n.CIDR, n.Auth, len(n.PresetCIDmap))
 		for cid, pfx := range n.PresetCIDmap {
-			fmt.Printf("      %x -> %s\n", cid, pfx)
+			fmt.Printf("      %s -> %s\n", cid, pfx)
 		}
 	}
 }

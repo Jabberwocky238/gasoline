@@ -83,4 +83,4 @@ func (c *Client) Send(op control.Op) (control.Op, error) {
 }
 
 // FormatCID renders a CID as the decimal uint64 string the CLI accepts.
-func FormatCID(cid protocol.CID_Ty) string { return protocol.FormatCID(cid) }
+func FormatCID(cid protocol.CID_Ty) string { return cid.FormatCID() }

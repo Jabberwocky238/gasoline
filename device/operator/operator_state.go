@@ -95,7 +95,7 @@ func (s *operatorState) vni(vni protocol.VNI_Ty) (*vniEntry, bool) {
 func (s *operatorState) addClient(cp *PeerClient) (*vniEntry, error) {
 	v, ok := s.vni(cp.sc.VNI)
 	if !ok {
-		return nil, fmt.Errorf("unknown vni %d", cp.sc.VNI)
+		return nil, fmt.Errorf("unknown vni %s", cp.sc.VNI)
 	}
 	v.addClient(cp)
 	pfx, _ := v.routingMap.LookupByCID(cp.sc.CID)

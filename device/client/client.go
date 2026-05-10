@@ -94,38 +94,67 @@ func (c *Client) SetTun(t *tun.Tun) {
 	c.tun = t
 }
 
-// Start dials, runs the handshake, and brings up the data plane.
+// Dial performs the network connect + handshake and stores the
+// resulting transport.Conn + *SessionContext on the Client. Returns
+// a snapshot copy of the SessionContext so callers can inspect the
+// assigned IP / prefix / etc. before calling Start.
+//
+// Idempotent: a second call after a successful first one is a no-op
+// and returns the existing session.
+func (c *Client) Dial() (protocol.SessionContext, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.dialLocked()
+}
+
+// dialLocked is the shared implementation. Caller holds c.mu.
+func (c *Client) dialLocked() (protocol.SessionContext, error) {
+	if c.conn != nil && c.sessionCtx != nil {
+		return c.sessionCtx.Copy(), nil
+	}
+	conn, sc, err := c.dialer.Dial(c.cfg.Endpoint)
+	if err != nil {
+		return protocol.SessionContext{}, fmt.Errorf("dial: %w", err)
+	}
+	c.conn = conn
+	c.sessionCtx = sc
+	c.lctx.Log().Infof("connected to %s; assigned %s in %s",
+		c.cfg.Endpoint, sc.IP, sc.IPRanges)
+	return sc.Copy(), nil
+}
+
+// Start brings up the data plane on top of an already-dialed (or
+// not-yet-dialed) connection: TUN (if configured), keepalive, rx /
+// tx pumps, and the optional SOCKS5 proxy. If Dial wasn't called
+// first, Start dials itself.
 func (c *Client) Start() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	conn, sc, err := c.dialer.Dial(c.cfg.Endpoint)
-	if err != nil {
-		return fmt.Errorf("dial: %w", err)
+	if _, err := c.dialLocked(); err != nil {
+		return err
 	}
-	c.conn = conn
-	c.sessionCtx = sc
+	sc := c.sessionCtx
+	conn := c.conn
 
 	hostPfx := netip.PrefixFrom(sc.IP, sc.IPRanges.Bits())
-	c.lctx.Log().Infof("connected to %s; assigned %s in %s",
-		c.cfg.Endpoint, sc.IP, sc.IPRanges)
 
 	// Optional TUN integration: open the kernel TUN at the
 	// handshake-assigned address, write inbound IP packets to it, and
 	// read outbound IP packets back into the transport.
-	if c.cfg.TUNName != "" {
+	if c.cfg.TUNName != "" && c.tun == nil {
 		if !sc.IP.IsValid() {
-			_ = conn.Close()
+			c.shutdownLocked()
 			return fmt.Errorf("tun: server returned no IP; cannot configure %q", c.cfg.TUNName)
 		}
 		t, err := tun.New(c.cfg.TUNName, hostPfx.String())
 		if err != nil {
-			_ = conn.Close()
+			c.shutdownLocked()
 			return fmt.Errorf("tun open %q: %w", c.cfg.TUNName, err)
 		}
 		if err := t.Start(); err != nil {
 			_ = t.Close()
-			_ = conn.Close()
+			c.shutdownLocked()
 			return fmt.Errorf("tun start: %w", err)
 		}
 		c.tun = t

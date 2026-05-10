@@ -55,7 +55,7 @@ func main() {
 		log.Fatalf("operator start: %v", err)
 	}
 
-	ipc, err := operator.NewIPC(op.State(), *ipcSocket)
+	ipc, err := operator.NewIPC(op.NewControllerBase(), *ipcSocket)
 	if err != nil {
 		log.Fatalf("ipc init: %v", err)
 	}

@@ -16,11 +16,17 @@
 //	  GET    /ws                                  one connection per operator
 //
 // REST mutations are applied to the in-memory tables and broadcast to
-// every connected operator as one line:
+// every connected operator as one binary websocket frame per event,
+// using protocol/control's wire format: Kind(1B) + Op.Encode().
 //
-//	route set <vni> <cid-hex> <prefix>
-//	route del <vni> <cid-hex>
-//	auth set <vni> <spec>
+// Today's broadcasts:
+//
+//	control.RouteUpsert  (vni, cid, prefix, ownerUUID=zero)
+//	control.RouteRemove  (vni, cid)
+//
+// Auth mutations are NOT broadcast yet — there is no Auth control.Op
+// and no operator-side handler. PUT/PATCH on /api/vnet/{vni}/auth
+// updates cordinator state only.
 package cordinator
 
 import (
@@ -38,6 +44,7 @@ import (
 
 	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol"
+	"github.com/jabberwocky238/gasoline/protocol/control"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/websocket"
 )
@@ -240,7 +247,7 @@ func (c *Cordinator) handleRoutesPut(w http.ResponseWriter, r *http.Request) {
 	v.routes[cid] = pfx
 	v.mu.Unlock()
 
-	c.broadcast(fmt.Sprintf("route set %d %s %s", vni, body.CID, pfx.String()))
+	c.broadcastOp(&control.RouteUpsert{VNI: vni, CID: cid, Prefix: pfx})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -269,7 +276,7 @@ func (c *Cordinator) handleRoutesDel(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	c.broadcast(fmt.Sprintf("route del %d %s", vni, cidHex))
+	c.broadcastOp(&control.RouteRemove{VNI: vni, CID: cid})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -303,7 +310,8 @@ func (c *Cordinator) handleAuthPut(w http.ResponseWriter, r *http.Request) {
 	spec := serializeAuth(v.authType, v.authEntries)
 	v.mu.Unlock()
 
-	c.broadcast(fmt.Sprintf("auth set %d %s", vni, spec))
+	// auth changes are not broadcast yet (no control.Op for auth).
+	_ = spec
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -347,8 +355,8 @@ func (c *Cordinator) handleAuthPatch(w http.ResponseWriter, r *http.Request) {
 		delete(v.authEntries, k)
 	}
 
-	spec := serializeAuth(v.authType, v.authEntries)
-	c.broadcast(fmt.Sprintf("auth set %d %s", vni, spec))
+	// auth changes are not broadcast yet (no control.Op for auth).
+	_ = serializeAuth(v.authType, v.authEntries)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -377,25 +385,29 @@ func (c *Cordinator) handleWS(ws *websocket.Conn) {
 	logger.Info("operator disconnected")
 }
 
+// snapshotTo replays the current per-VNI route table to a freshly
+// connected operator as control.RouteUpsert events.
 func (c *Cordinator) snapshotTo(ws *websocket.Conn) {
 	c.vnetsMu.RLock()
 	defer c.vnetsMu.RUnlock()
 	for vni, v := range c.vnets {
 		v.mu.RLock()
-		if v.authType != "" {
-			_, _ = ws.Write([]byte(fmt.Sprintf("auth set %d %s\n", vni, serializeAuth(v.authType, v.authEntries))))
-		}
 		for cid, pfx := range v.routes {
-			_, _ = ws.Write([]byte(fmt.Sprintf("route set %d %s %s\n", vni, protocol.FormatCID(cid), pfx.String())))
+			_ = control.WriteFrame(ws, &control.RouteUpsert{VNI: vni, CID: cid, Prefix: pfx})
 		}
 		v.mu.RUnlock()
 	}
 }
 
-// broadcast writes one newline-terminated line to every connected
-// operator. Failed writes drop the offending connection.
-func (c *Cordinator) broadcast(line string) {
-	payload := []byte(line + "\n")
+// broadcastOp encodes op once via control's framed binary wire and
+// writes the resulting frame to every connected operator. Failed
+// writes drop the offending connection.
+func (c *Cordinator) broadcastOp(op control.Op) {
+	frame, err := control.EncodeFrame(op)
+	if err != nil {
+		c.lctx.Log().Errorf("broadcast: encode %T: %v", op, err)
+		return
+	}
 
 	c.opsMu.Lock()
 	conns := make([]*websocket.Conn, 0, len(c.ops))
@@ -405,7 +417,7 @@ func (c *Cordinator) broadcast(line string) {
 	c.opsMu.Unlock()
 
 	for _, conn := range conns {
-		if _, err := conn.Write(payload); err != nil {
+		if _, err := conn.Write(frame); err != nil {
 			c.lctx.Log().Debugf("broadcast: drop %s: %v", conn.RemoteAddr(), err)
 			_ = conn.Close()
 			c.opsMu.Lock()

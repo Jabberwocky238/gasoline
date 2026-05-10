@@ -13,11 +13,11 @@ import (
 
 // IPCController is a Unix-domain-socket controller: gasoctl (or any
 // other local process) connects to it and writes one command per line.
-// Each command is dispatched against the operator's state.
+// All operations land on the shared ControllerBase.
 type IPCController struct {
 	path     string
 	listener net.Listener
-	state    *operatorState
+	base     *ControllerBase
 
 	lctx *common.LogContext
 	wg   sync.WaitGroup
@@ -26,9 +26,9 @@ type IPCController struct {
 // NewIPC binds a Unix socket at path. The socket file is created with
 // 0600 permissions and removed on Close. If a stale socket exists at
 // path it is removed first.
-func NewIPC(state *operatorState, path string) (*IPCController, error) {
-	if state == nil {
-		return nil, fmt.Errorf("ipc: nil state")
+func NewIPC(base *ControllerBase, path string) (*IPCController, error) {
+	if base == nil || base.state == nil {
+		return nil, fmt.Errorf("ipc: nil base")
 	}
 	if path == "" {
 		return nil, fmt.Errorf("ipc: empty socket path")
@@ -50,8 +50,8 @@ func NewIPC(state *operatorState, path string) (*IPCController, error) {
 	return &IPCController{
 		path:     path,
 		listener: ln,
-		state:    state,
-		lctx:     state.lctx.WithField("component", "ipc"),
+		base:     base,
+		lctx:     base.state.lctx.WithField("component", "ipc"),
 	}, nil
 }
 
@@ -75,9 +75,11 @@ func (i *IPCController) Close() error {
 	return err
 }
 
-// dispatchLine routes one gasoctl command line to the matching
-// subsystem on operatorState. Each subsystem owns its own subcommand
-// parsing (see dispatchRoute / dispatchCordinator).
+// dispatchLine routes one gasoctl command line through the shared
+// ControllerBase. Each subsystem owns its own subcommand parsing
+// (see dispatchRoute / dispatchCordinator) which today still consume
+// the legacy line vocabulary directly on operatorState; replacing
+// those with control.Op encode/decode is a follow-up.
 func (i *IPCController) dispatchLine(line string) string {
 	fields := strings.Fields(line)
 	if len(fields) == 0 {
@@ -85,9 +87,9 @@ func (i *IPCController) dispatchLine(line string) string {
 	}
 	switch fields[0] {
 	case "route":
-		return i.state.dispatchRoute(fields[1:])
+		return i.base.state.dispatchRoute(fields[1:])
 	case "cordinator":
-		return i.state.dispatchCordinator(fields[1:])
+		return i.base.state.dispatchCordinator(fields[1:])
 	default:
 		return errReply(fmt.Sprintf("unknown command %q", fields[0]))
 	}

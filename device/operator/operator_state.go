@@ -172,20 +172,18 @@ func (s *operatorState) routeDel(cid protocol.CID_Ty) {
 	}
 }
 
-// cordinatorKey is the ctrls map key for a Cordinator targeting endpoint.
-func cordinatorKey(endpoint string) string { return "cordinator:" + endpoint }
+const cordinatorKey = "cordinator"
 
 func (s *operatorState) cordinatorConnect(endpoint string) error {
-	key := cordinatorKey(endpoint)
-
 	s.mu.Lock()
-	if _, dup := s.ctrls[key]; dup {
+	if _, dup := s.ctrls[cordinatorKey]; dup {
 		s.mu.Unlock()
 		return fmt.Errorf("cordinator: already connected to %s", endpoint)
 	}
 	s.mu.Unlock()
 
-	cc, err := NewCordinator(s, endpoint)
+	base := newControllerBase(s)
+	cc, err := NewCordinator(&base, endpoint)
 	if err != nil {
 		return err
 	}
@@ -194,23 +192,20 @@ func (s *operatorState) cordinatorConnect(endpoint string) error {
 	}
 
 	s.mu.Lock()
-	s.ctrls[key] = cc
+	s.ctrls[cordinatorKey] = cc
 	s.mu.Unlock()
 	return nil
 }
 
-func (s *operatorState) cordinatorDisconnect(endpoint string) error {
-	key := cordinatorKey(endpoint)
-
+func (s *operatorState) cordinatorDisconnect() error {
 	s.mu.Lock()
-	cc, ok := s.ctrls[key]
+	cc, ok := s.ctrls[cordinatorKey]
 	if ok {
-		delete(s.ctrls, key)
+		delete(s.ctrls, cordinatorKey)
 	}
 	s.mu.Unlock()
-
 	if !ok {
-		return fmt.Errorf("cordinator: not connected to %s", endpoint)
+		return fmt.Errorf("cordinator: not connected")
 	}
 	return cc.Close()
 }

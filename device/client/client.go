@@ -12,6 +12,7 @@ package client
 import (
 	"crypto/tls"
 	"fmt"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 
@@ -20,10 +21,10 @@ import (
 	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/transport"
-	transportQuic "github.com/jabberwocky238/gasoline/transport/quic"
-	transportTcp "github.com/jabberwocky238/gasoline/transport/tcp"
-	transportTls "github.com/jabberwocky238/gasoline/transport/tls"
-	transportUdp "github.com/jabberwocky238/gasoline/transport/udp"
+	_ "github.com/jabberwocky238/gasoline/transport/quic" // self-registers
+	_ "github.com/jabberwocky238/gasoline/transport/tcp"  // self-registers
+	_ "github.com/jabberwocky238/gasoline/transport/tls"  // self-registers
+	_ "github.com/jabberwocky238/gasoline/transport/udp"  // self-registers
 	log "github.com/sirupsen/logrus"
 )
 
@@ -49,8 +50,14 @@ func New(cfg *StaticClientConfig) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("auth: %w", err)
 	}
-	preassigned := protocol.NewPresetSessionConfig(cfg.CID, cfg.VNI)
-	dialer, err := createDialer(cfg.Transport, preassigned, clientAuth)
+	preset := protocol.NewPresetSessionConfig(cfg.CID, cfg.VNI)
+
+	var tlsConf *tls.Config
+	switch cfg.Transport {
+	case "tls", "quic":
+		tlsConf = &tls.Config{InsecureSkipVerify: true}
+	}
+	dialer, err := transport.NewDialer(cfg.Transport, preset, clientAuth, tlsConf)
 	if err != nil {
 		return nil, fmt.Errorf("dialer: %w", err)
 	}
@@ -76,22 +83,25 @@ func (c *Client) Start() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	conn, result, err := c.dialer.Dial(c.cfg.Endpoint)
+	conn, sc, err := c.dialer.Dial(c.cfg.Endpoint)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
 	c.conn = conn
-	c.lctx.Log().Infof("connected to %s; assigned prefix %s", c.cfg.Endpoint, result.Prefix)
 
-	// Optional TUN integration: when TUNName is set we open the kernel
-	// TUN at the handshake-assigned prefix, write inbound IP packets to
-	// it, and read outbound IP packets back into the transport.
+	hostPfx := netip.PrefixFrom(sc.IP, sc.IPRanges.Bits())
+	c.lctx.Log().Infof("connected to %s; assigned %s in %s",
+		c.cfg.Endpoint, sc.IP, sc.IPRanges)
+
+	// Optional TUN integration: open the kernel TUN at the
+	// handshake-assigned address, write inbound IP packets to it, and
+	// read outbound IP packets back into the transport.
 	if c.cfg.TUNName != "" {
-		if !result.Prefix.IsValid() {
+		if !sc.IP.IsValid() {
 			_ = conn.Close()
-			return fmt.Errorf("tun: server returned no prefix; cannot configure %q", c.cfg.TUNName)
+			return fmt.Errorf("tun: server returned no IP; cannot configure %q", c.cfg.TUNName)
 		}
-		t, err := tun.New(c.cfg.TUNName, result.Prefix.String())
+		t, err := tun.New(c.cfg.TUNName, hostPfx.String())
 		if err != nil {
 			_ = conn.Close()
 			return fmt.Errorf("tun open %q: %w", c.cfg.TUNName, err)
@@ -102,7 +112,7 @@ func (c *Client) Start() error {
 			return fmt.Errorf("tun start: %w", err)
 		}
 		c.tun = t
-		c.lctx.Log().Infof("tun %s up at %s", c.cfg.TUNName, result.Prefix)
+		c.lctx.Log().Infof("tun %s up at %s", c.cfg.TUNName, hostPfx)
 	}
 
 	c.keepalive = NewKeepalive(c.lctx, conn)
@@ -200,22 +210,5 @@ func (c *Client) tunReadLoop() {
 		if err := c.conn.WritePacket(buf[:n]); err != nil {
 			logger.Debugf("conn write: %v", err)
 		}
-	}
-}
-
-// --------------- transport factory ---------------
-
-func createDialer(transportType string, cfg protocol.PresetSessionConfig, clientAuth auth.ClientAuthenticator) (transport.Dialer, error) {
-	switch transportType {
-	case "tcp":
-		return transportTcp.NewDialer(cfg, clientAuth), nil
-	case "udp":
-		return transportUdp.NewDialer(cfg, clientAuth), nil
-	case "quic":
-		return transportQuic.NewDialer(cfg, clientAuth, &tls.Config{InsecureSkipVerify: true}), nil
-	case "tls":
-		return transportTls.NewDialer(cfg, clientAuth, &tls.Config{InsecureSkipVerify: true}), nil
-	default:
-		return nil, fmt.Errorf("unknown transport: %s", transportType)
 	}
 }

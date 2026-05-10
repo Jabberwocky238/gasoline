@@ -29,7 +29,7 @@ import (
 //	  route del    <vni> <cid>
 type CordinatorController struct {
 	endpoint string
-	state    *operatorState
+	base     *ControllerBase
 
 	mu   sync.Mutex
 	conn *websocket.Conn
@@ -40,17 +40,17 @@ type CordinatorController struct {
 }
 
 // NewCordinator returns an unstarted CordinatorController targeting endpoint.
-func NewCordinator(state *operatorState, endpoint string) (*CordinatorController, error) {
-	if state == nil {
-		return nil, fmt.Errorf("cordinator: nil state")
+func NewCordinator(base *ControllerBase, endpoint string) (*CordinatorController, error) {
+	if base == nil || base.state == nil {
+		return nil, fmt.Errorf("cordinator: nil base")
 	}
 	if endpoint == "" {
 		return nil, fmt.Errorf("cordinator: empty endpoint")
 	}
 	return &CordinatorController{
 		endpoint: endpoint,
-		state:    state,
-		lctx:     state.lctx.WithField("component", "cordinator").WithField("endpoint", endpoint),
+		base:     base,
+		lctx:     base.state.lctx.WithField("component", "cordinator").WithField("endpoint", endpoint),
 	}, nil
 }
 
@@ -72,13 +72,13 @@ func (c *CordinatorController) Start() error {
 	// Announce ourselves so the coordinator can broadcast peer-online
 	// to everyone else and stamp our UDP underlay endpoint.
 	_ = c.send(fmt.Sprintf("hello %s %s",
-		hex.EncodeToString(c.state.uuid[:]),
-		c.state.Peers.Addr(),
+		hex.EncodeToString(c.base.state.uuid[:]),
+		c.base.state.Peers.Addr(),
 	))
 
 	// Replay any clients that already attached before we connected.
-	c.state.mu.RLock()
-	for vni, vn := range c.state.vnets {
+	c.base.state.mu.RLock()
+	for vni, vn := range c.base.state.vnets {
 		for _, cp := range vn.Clients() {
 			pfx, ok := vn.routingMap.LookupByCID(cp.sc.CID)
 			if !ok {
@@ -88,10 +88,10 @@ func (c *CordinatorController) Start() error {
 				vni, protocol.FormatCID(cp.sc.CID), pfx.String()))
 		}
 	}
-	c.state.mu.RUnlock()
+	c.base.state.mu.RUnlock()
 
 	// Hook future events.
-	c.unsubscribe = c.state.SubscribeClientEvents(c.onClientEvent)
+	c.unsubscribe = c.base.state.SubscribeClientEvents(c.onClientEvent)
 
 	c.wg.Add(1)
 	go c.readLoop()
@@ -198,13 +198,13 @@ func (c *CordinatorController) handleInbound(line string) error {
 			if err != nil {
 				return fmt.Errorf("peer online: bad endpoint %q: %v", fields[3], err)
 			}
-			if uuid == c.state.uuid {
+			if uuid == c.base.state.uuid {
 				return nil // ignore self
 			}
-			c.state.Peers.Add(NewPeerOperator(uuid, ap))
+			c.base.state.Peers.Add(NewPeerOperator(uuid, ap))
 			return nil
 		case "offline":
-			c.state.Peers.Remove(uuid)
+			c.base.state.Peers.Remove(uuid)
 			return nil
 		default:
 			return fmt.Errorf("peer: unknown op %q", fields[1])
@@ -236,11 +236,11 @@ func (c *CordinatorController) handleInbound(line string) error {
 			if err != nil {
 				return err
 			}
-			vn, ok := c.state.vni(protocol.VNI_Ty(vni))
+			vn, ok := c.base.state.vni(protocol.VNI_Ty(vni))
 			if !ok {
 				return fmt.Errorf("route set: unknown vni %d", vni)
 			}
-			if uuid == c.state.uuid {
+			if uuid == c.base.state.uuid {
 				// Our own client; routingMap already has it (added at handshake).
 				_ = cid
 				return nil
@@ -258,7 +258,7 @@ func (c *CordinatorController) handleInbound(line string) error {
 			if err != nil {
 				return err
 			}
-			vn, ok := c.state.vni(protocol.VNI_Ty(vni))
+			vn, ok := c.base.state.vni(protocol.VNI_Ty(vni))
 			if !ok {
 				return nil
 			}
@@ -306,7 +306,7 @@ func (s *operatorState) dispatchCordinator(args []string) string {
 		if len(args) != 2 {
 			return errReply("cordinator disconnect: usage 'cordinator disconnect <endpoint>'")
 		}
-		if err := s.cordinatorDisconnect(args[1]); err != nil {
+		if err := s.cordinatorDisconnect(); err != nil {
 			return errReply(err.Error())
 		}
 		return "OK"

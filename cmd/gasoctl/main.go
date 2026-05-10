@@ -4,9 +4,9 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/jabberwocky238/gasoline/device/gasoctl"
+	"github.com/jabberwocky238/gasoline/protocol/control"
 )
 
 const defaultSocket = "/var/run/gasoline/operator.sock"
@@ -15,20 +15,8 @@ func main() {
 	fs := flag.NewFlagSet("gasoctl", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	socket := fs.String("sock", envOr("GASOCTL_SOCK", defaultSocket), "operator IPC socket path")
-	fs.Usage = func() {
-		fmt.Fprintf(os.Stderr, `Usage: gasoctl [-sock <path>] <command> [args...]
+	fs.Usage = usage(fs)
 
-Commands:
-  route set <cid-hex> <prefix>
-  route get <cid-hex>
-  route del <cid-hex>
-  cordinator connect    <endpoint>
-  cordinator disconnect <endpoint>
-
-Flags:
-`)
-		fs.PrintDefaults()
-	}
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		os.Exit(2)
 	}
@@ -38,17 +26,34 @@ Flags:
 		os.Exit(2)
 	}
 
+	op, err := buildOp(args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gasoctl: %v\n", err)
+		os.Exit(2)
+	}
+
 	client := gasoctl.NewClient(*socket)
-	reply, err := client.Send(args)
+	reply, err := client.Send(op)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "gasoctl: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Println(reply)
-	if strings.HasPrefix(reply, "ERR ") {
+	r, ok := reply.(*control.Reply)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "gasoctl: unexpected reply type %T\n", reply)
 		os.Exit(1)
 	}
+	if r.OK {
+		if r.Payload != "" {
+			fmt.Println("OK", r.Payload)
+		} else {
+			fmt.Println("OK")
+		}
+		return
+	}
+	fmt.Fprintln(os.Stderr, "ERR", r.Payload)
+	os.Exit(1)
 }
 
 func envOr(key, fallback string) string {

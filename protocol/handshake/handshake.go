@@ -10,9 +10,13 @@ import (
 	"github.com/jabberwocky238/gasoline/protocol/auth"
 )
 
-// RouteResolverFn returns the routable prefix configured for (vni, cid).
-// Returning a non-nil error fails the handshake with HandshakeNoRoute.
-type RouteResolverFn func(vni protocol.VNI_Ty, cid protocol.CID_Ty) (netip.Prefix, error)
+type VNIMapperFn func(protocol.VNI_Ty) (VNIResolver, error)
+
+type VNIResolver interface {
+	CIDR() netip.Prefix
+	IP(cid protocol.CID_Ty) (netip.Addr, error)
+	Authenticator() auth.ServerAuthenticator
+}
 
 var sessionIndexCounter atomic.Uint32
 
@@ -20,32 +24,14 @@ func nextSessionIndex() uint32 {
 	return sessionIndexCounter.Add(1)
 }
 
-type ServerHandshakeState struct {
-	VNI protocol.VNI_Ty
-}
-
-type ClientHandshakeState struct {
-	VNI protocol.VNI_Ty
-	CID protocol.CID_Ty
-}
-
-// HandshakeResult is returned after a successful handshake.
-type HandshakeResult struct {
-	SessionIndex   uint32
-	CID            protocol.CID_Ty
-	VNI            protocol.VNI_Ty
-	Prefix         netip.Prefix // assigned by the server's route resolver
-	SessionContext *protocol.SessionContext
-}
-
 // --------------- Handshake Protocol ---------------
 
-func ClientHandshake(rw io.ReadWriter, preassignedConfig *protocol.PreassignedSessionConfig, authenticator auth.ClientAuthenticator) (*HandshakeResult, error) {
+func ClientHandshake(rw io.ReadWriter, vni protocol.VNI_Ty, cid protocol.CID_Ty, authenticator auth.ClientAuthenticator) (*protocol.SessionContext, error) {
 	hello := &ClientHello{
 		Version:     HandshakeVersion,
 		CryptoSuite: CryptoSuite_NONE,
-		VNI:         preassignedConfig.VNI(),
-		CID:         preassignedConfig.CID(),
+		VNI:         vni,
+		CID:         cid,
 	}
 	if err := hello.Encode(rw); err != nil {
 		return nil, fmt.Errorf("send ClientHello: %w", err)
@@ -83,21 +69,13 @@ func ClientHandshake(rw io.ReadWriter, preassignedConfig *protocol.PreassignedSe
 		return nil, fmt.Errorf("handshake rejected: code=%d", assign.Code)
 	}
 
-	return &HandshakeResult{
-		SessionIndex: assign.SessionIndex,
-		CID:          preassignedConfig.CID(),
-		VNI:          preassignedConfig.VNI(),
-	}, nil
+	return assign.SessionContext, nil
 }
 
 // ServerHandshake performs the handshake on the server side. The
 // routeResolver is consulted after auth succeeds; if it returns an
 // error the handshake is rejected with HandshakeNoRoute.
-func ServerHandshake(
-	rw io.ReadWriter,
-	resolver auth.AuthResolverFn,
-	routeResolver RouteResolverFn,
-) (*HandshakeResult, error) {
+func ServerHandshake(rw io.ReadWriter, resolver VNIMapperFn) (*protocol.SessionContext, error) {
 	var hello ClientHello
 	if err := hello.Decode(rw); err != nil {
 		return nil, fmt.Errorf("recv ClientHello: %w", err)
@@ -106,13 +84,13 @@ func ServerHandshake(
 		return nil, fmt.Errorf("version mismatch: got %d, want %d", hello.Version, HandshakeVersion)
 	}
 
-	authenticator, err := resolver(hello.VNI)
+	vniResolved, err := resolver(hello.VNI)
 	if err != nil {
 		sendFail(rw, HandshakeAuthFail)
 		return nil, fmt.Errorf("resolve auth for vni %d: %w", hello.VNI, err)
 	}
 
-	challenge, err := authenticator.GenerateChallenge()
+	challenge, err := vniResolved.Authenticator().GenerateChallenge()
 	if err != nil {
 		return nil, fmt.Errorf("generate challenge: %w", err)
 	}
@@ -133,36 +111,32 @@ func ServerHandshake(
 		return nil, fmt.Errorf("recv ClientAnswer: %w", err)
 	}
 
-	if err := authenticator.VerifyResponse(hello.CID, challenge, answer.challengeAnswer); err != nil {
+	if err := vniResolved.Authenticator().VerifyResponse(hello.CID, challenge, answer.challengeAnswer); err != nil {
 		sendFail(rw, HandshakeAuthFail)
 		return nil, fmt.Errorf("auth verify: %w", err)
 	}
-
-	if routeResolver == nil {
-		sendFail(rw, HandshakeNoRoute)
-		return nil, fmt.Errorf("no route resolver configured for vni %d", hello.VNI)
-	}
-	prefix, err := routeResolver(hello.VNI, hello.CID)
+	cip, err := vniResolved.IP(hello.CID)
 	if err != nil {
 		sendFail(rw, HandshakeNoRoute)
 		return nil, fmt.Errorf("resolve route for vni %d cid %x: %w", hello.VNI, hello.CID, err)
 	}
 
 	idx := nextSessionIndex()
-	assign := &ServerAssign{
-		Code:         HandshakeOK,
+	sc := &protocol.SessionContext{
+		CID:          hello.CID,
+		VNI:          hello.VNI,
 		SessionIndex: idx,
+		IP:           cip,
+		IPRanges:     vniResolved.CIDR(),
+	}
+	assign := &ServerAssign{
+		Code:           HandshakeOK,
+		SessionContext: sc,
 	}
 	if err := assign.Encode(rw); err != nil {
 		return nil, fmt.Errorf("send ServerAssign: %w", err)
 	}
-
-	return &HandshakeResult{
-		SessionIndex: idx,
-		CID:          hello.CID,
-		VNI:          hello.VNI,
-		Prefix:       prefix,
-	}, nil
+	return sc, nil
 }
 
 func sendFail(w io.Writer, code HandshakeCode) {

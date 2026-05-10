@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
-	"net"
 	"net/netip"
 	"time"
 
@@ -42,7 +41,6 @@ type Operator struct {
 	uuid [16]byte
 
 	dataListenAddr  string
-	dataConn        *net.UDPConn // underlay socket, shared by all peers
 	clientListeners map[string]transport.Listener
 	state           *operatorState
 }
@@ -117,6 +115,7 @@ func New(cfg *StaticOperatorConfig) (*Operator, error) {
 	} else {
 		_, _ = rand.Read(uuid[:])
 	}
+	state.uuid = uuid
 
 	return &Operator{
 		lctx:            root,
@@ -143,28 +142,18 @@ func (o *Operator) ClientAddr() string {
 	return ""
 }
 
-// AddPeer registers a remote operator and stamps the local underlay
-// send socket onto it so forwardFrame can ship MessageTransport bytes
-// straight to the peer's UDPAddr.
+// AddPeer registers a remote operator. PeerTable.Add stamps the
+// shared underlay send socket onto it automatically.
 func (o *Operator) AddPeer(uuid [16]byte, udpAddr netip.AddrPort) {
 	if uuid == o.uuid {
 		return
 	}
-	p := NewPeerOperator(uuid, udpAddr)
-	if o.dataConn != nil {
-		p.SetSendSocket(o.dataConn)
-	}
-	o.state.Peers.Add(p)
+	o.state.Peers.Add(NewPeerOperator(uuid, udpAddr))
 }
 
 // DataPlaneAddr returns the bound underlay UDP address ("host:port")
 // or "" if the underlay isn't running.
-func (o *Operator) DataPlaneAddr() string {
-	if o.dataConn == nil {
-		return ""
-	}
-	return o.dataConn.LocalAddr().String()
-}
+func (o *Operator) DataPlaneAddr() string { return o.state.Peers.Addr() }
 
 // SetPeerRoute installs (vni, prefix) -> peer operator UUID into the
 // VNI's routing table. Called either at boot from a static config or
@@ -186,20 +175,11 @@ func (o *Operator) RemovePeer(uuid [16]byte) {
 
 func (o *Operator) Start() error {
 	if o.dataListenAddr != "" {
-		udpAddr, err := net.ResolveUDPAddr("udp", o.dataListenAddr)
+		conn, err := o.state.Peers.Bind(o.dataListenAddr)
 		if err != nil {
-			return fmt.Errorf("data plane resolve %s: %w", o.dataListenAddr, err)
+			return err
 		}
-		conn, err := net.ListenUDP("udp", udpAddr)
-		if err != nil {
-			return fmt.Errorf("data plane listen on %s: %w", o.dataListenAddr, err)
-		}
-		o.dataConn = conn
 		o.lctx.Log().Infof("Underlay UDP listening on %s", conn.LocalAddr())
-		// Stamp every existing peer with the new socket.
-		for _, p := range o.state.Peers.All() {
-			p.SetSendSocket(conn)
-		}
 		go o.routineReadFromPeer()
 	}
 	for tp, ln := range o.clientListeners {
@@ -213,11 +193,8 @@ func (o *Operator) Start() error {
 func (o *Operator) Close() error {
 	o.lctx.Cancel()
 	closeAll(o.clientListeners)
-	if o.dataConn != nil {
-		_ = o.dataConn.Close()
-		o.dataConn = nil
-	}
 	if o.state != nil {
+		_ = o.state.Peers.Close()
 		o.state.closeAll()
 	}
 	return nil
@@ -257,13 +234,13 @@ func (o *Operator) routineAcceptClients(tp string, ln transport.Listener) {
 		cp := newPeerClient(conn, result)
 		vn, err := o.state.addClient(cp)
 		if err != nil {
-			logger.Errorf("attach client %d to VNI %d: %v", cp.SessionIndex, cp.VNI, err)
+			logger.Errorf("attach client %d to VNI %d: %v", cp.sc.SessionIndex, cp.sc.VNI, err)
 			_ = conn.Close()
 			continue
 		}
 
 		logger.Infof("Client %d connected on VNI %d from %s",
-			cp.SessionIndex, cp.VNI, conn.RemoteAddr())
+			cp.sc.SessionIndex, cp.sc.VNI, conn.RemoteAddr())
 		go o.routineReadFromClient(cp, vn)
 	}
 }
@@ -274,7 +251,7 @@ func (o *Operator) routineReadFromClient(cp *PeerClient, vn *vniEntry) {
 		o.state.removeClient(cp)
 		_ = cp.Conn.Close()
 		cp.closed.Store(true)
-		logger.Infof("Client %d disconnected", cp.SessionIndex)
+		logger.Infof("Client %d disconnected", cp.sc.SessionIndex)
 	}()
 
 	bufPtr := common.GetBuffer()
@@ -290,7 +267,7 @@ func (o *Operator) routineReadFromClient(cp *PeerClient, vn *vniEntry) {
 
 		n, err := cp.Conn.ReadPacket(readBuf)
 		if err != nil {
-			logger.Debugf("Read from client %d: %v", cp.SessionIndex, err)
+			logger.Debugf("Read from client %d: %v", cp.sc.SessionIndex, err)
 			return
 		}
 		if n == 0 {
@@ -299,7 +276,7 @@ func (o *Operator) routineReadFromClient(cp *PeerClient, vn *vniEntry) {
 
 		// ip routing
 		if err := vn.forwardFrame(readBuf[:n], cp); err != nil {
-			logger.Debugf("Forward from client %d: %v", cp.SessionIndex, err)
+			logger.Debugf("Forward from client %d: %v", cp.sc.SessionIndex, err)
 		}
 	}
 }
@@ -320,7 +297,7 @@ func (o *Operator) routineReaper() {
 		now := time.Now()
 		for _, cp := range o.state.snapshot() {
 			if now.Sub(cp.Conn.LastActive()) > idleTimeout {
-				logger.Warnf("Reaping idle client %d", cp.SessionIndex)
+				logger.Warnf("Reaping idle client %d", cp.sc.SessionIndex)
 				_ = cp.Conn.Close()
 			}
 		}
@@ -333,7 +310,7 @@ func (o *Operator) routineReaper() {
 // client that owns the destination IP.
 func (o *Operator) routineReadFromPeer() {
 	logger := o.lctx.Log()
-	conn := o.dataConn
+	conn := o.state.Peers.Conn()
 	if conn == nil {
 		return
 	}

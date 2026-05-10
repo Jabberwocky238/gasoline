@@ -15,14 +15,14 @@ func TestCSSC_QUIC(t *testing.T) {
 
 	tlsConf := quic.InsecureClientTLS()
 
-	cfgA := protocol.NewPreassignedSessionConfig(a.cidA, a.vni)
+	cfgA := protocol.NewPresetSessionConfig(a.cidA, a.vni)
 	connA, _, err := quic.NewDialer(cfgA, &auth.NoAuthClient{}, tlsConf).Dial(a.op.ClientAddr())
 	if err != nil {
 		t.Fatalf("ClientA dial: %v", err)
 	}
 	defer connA.Close()
 
-	cfgB := protocol.NewPreassignedSessionConfig(b.cidB, b.vni)
+	cfgB := protocol.NewPresetSessionConfig(b.cidB, b.vni)
 	connB, _, err := quic.NewDialer(cfgB, &auth.NoAuthClient{}, tlsConf).Dial(b.op.ClientAddr())
 	if err != nil {
 		t.Fatalf("ClientB dial: %v", err)

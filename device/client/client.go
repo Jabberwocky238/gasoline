@@ -49,7 +49,7 @@ func New(cfg *StaticClientConfig) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("auth: %w", err)
 	}
-	preassigned := protocol.NewPreassignedSessionConfig(cfg.CID, cfg.VNI)
+	preassigned := protocol.NewPresetSessionConfig(cfg.CID, cfg.VNI)
 	dialer, err := createDialer(cfg.Transport, preassigned, clientAuth)
 	if err != nil {
 		return nil, fmt.Errorf("dialer: %w", err)
@@ -205,7 +205,7 @@ func (c *Client) tunReadLoop() {
 
 // --------------- transport factory ---------------
 
-func createDialer(transportType string, cfg protocol.PreassignedSessionConfig, clientAuth auth.ClientAuthenticator) (transport.Dialer, error) {
+func createDialer(transportType string, cfg protocol.PresetSessionConfig, clientAuth auth.ClientAuthenticator) (transport.Dialer, error) {
 	switch transportType {
 	case "tcp":
 		return transportTcp.NewDialer(cfg, clientAuth), nil

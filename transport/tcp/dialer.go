@@ -10,11 +10,11 @@ import (
 )
 
 type Dialer struct {
-	cfg  protocol.PreassignedSessionConfig
+	cfg  protocol.PresetSessionConfig
 	auth auth.ClientAuthenticator
 }
 
-func NewDialer(cfg protocol.PreassignedSessionConfig, auth auth.ClientAuthenticator) *Dialer {
+func NewDialer(cfg protocol.PresetSessionConfig, auth auth.ClientAuthenticator) *Dialer {
 	return &Dialer{cfg: cfg, auth: auth}
 }
 

@@ -13,12 +13,12 @@ import (
 )
 
 type Dialer struct {
-	cfg     protocol.PreassignedSessionConfig
+	cfg     protocol.PresetSessionConfig
 	auth    auth.ClientAuthenticator
 	tlsConf *tls.Config
 }
 
-func NewDialer(cfg protocol.PreassignedSessionConfig, auth auth.ClientAuthenticator, tlsConf *tls.Config) *Dialer {
+func NewDialer(cfg protocol.PresetSessionConfig, auth auth.ClientAuthenticator, tlsConf *tls.Config) *Dialer {
 	return &Dialer{cfg: cfg, auth: auth, tlsConf: tlsConf}
 }
 

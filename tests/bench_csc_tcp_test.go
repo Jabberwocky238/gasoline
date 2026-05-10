@@ -12,14 +12,14 @@ func TestCSC_TCP(t *testing.T) {
 	bs := startBenchOperator(t, "tcp")
 	defer bs.op.Close()
 
-	cfgA := protocol.NewPreassignedSessionConfig(bs.cidA, bs.vni)
+	cfgA := protocol.NewPresetSessionConfig(bs.cidA, bs.vni)
 	connA, _, err := tcp.NewDialer(cfgA, &auth.NoAuthClient{}).Dial(bs.op.ClientAddr())
 	if err != nil {
 		t.Fatalf("ClientA dial: %v", err)
 	}
 	defer connA.Close()
 
-	cfgB := protocol.NewPreassignedSessionConfig(bs.cidB, bs.vni)
+	cfgB := protocol.NewPresetSessionConfig(bs.cidB, bs.vni)
 	connB, _, err := tcp.NewDialer(cfgB, &auth.NoAuthClient{}).Dial(bs.op.ClientAddr())
 	if err != nil {
 		t.Fatalf("ClientB dial: %v", err)

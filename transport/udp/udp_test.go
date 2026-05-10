@@ -1,8 +1,8 @@
 package udp
 
 import (
-	"net/netip"
 	"bytes"
+	"net/netip"
 	"sync"
 	"testing"
 
@@ -17,15 +17,14 @@ func testResolver(a auth.ServerAuthenticator) auth.AuthResolverFn {
 	}
 }
 
-
 func testRoutes() handshake.RouteResolverFn {
 	return func(vni protocol.VNI_Ty, cid protocol.CID_Ty) (netip.Prefix, error) {
 		return netip.MustParsePrefix("10.0.0.1/32"), nil
 	}
 }
 
-func newTestCfg(cid protocol.CID_Ty) protocol.PreassignedSessionConfig {
-	return protocol.NewPreassignedSessionConfig(cid, 0)
+func newTestCfg(cid protocol.CID_Ty) protocol.PresetSessionConfig {
+	return protocol.NewPresetSessionConfig(cid, 0)
 }
 
 func TestUDPHandshakeAndPacket(t *testing.T) {

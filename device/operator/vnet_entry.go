@@ -40,8 +40,8 @@ func newVniEntry(authn auth.ServerAuthenticator) *vniEntry {
 func (v *vniEntry) addClient(cp *PeerClient) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	v.clients[cp.SessionIndex] = cp
-	v.clientsByCID[cp.CID] = cp
+	v.clients[cp.sc.SessionIndex] = cp
+	v.clientsByCID[cp.sc.CID] = cp
 }
 
 func (v *vniEntry) removeClient(sessionIndex uint32) {
@@ -55,8 +55,8 @@ func (v *vniEntry) removeClient(sessionIndex uint32) {
 	// Only drop the CID index entry if it still points at *this* client;
 	// a CID re-bound to a fresh session must not be cleared by an old
 	// session's teardown.
-	if cur, ok := v.clientsByCID[cp.CID]; ok && cur == cp {
-		delete(v.clientsByCID, cp.CID)
+	if cur, ok := v.clientsByCID[cp.sc.CID]; ok && cur == cp {
+		delete(v.clientsByCID, cp.sc.CID)
 	}
 }
 

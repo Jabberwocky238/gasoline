@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 
 	"github.com/jabberwocky238/gasoline/common"
+	"github.com/jabberwocky238/gasoline/device/client/quicksocks5"
 	"github.com/jabberwocky238/gasoline/device/tun"
 	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
@@ -37,9 +38,11 @@ type Client struct {
 	dialer transport.Dialer
 
 	// non-nil between Start and Close
-	conn      transport.Conn
-	keepalive *Keepalive
-	tun       *tun.Tun
+	sessionCtx *protocol.SessionContext
+	conn       transport.Conn
+	keepalive  *Keepalive
+	tun        *tun.Tun
+	socks5     *quicksocks5.Server
 
 	closed atomic.Bool
 }
@@ -79,6 +82,18 @@ func New(cfg *StaticClientConfig) (*Client, error) {
 	}, nil
 }
 
+func (c *Client) SessionContext() protocol.SessionContext {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.sessionCtx.Copy()
+}
+
+func (c *Client) SetTun(t *tun.Tun) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.tun = t
+}
+
 // Start dials, runs the handshake, and brings up the data plane.
 func (c *Client) Start() error {
 	c.mu.Lock()
@@ -89,6 +104,7 @@ func (c *Client) Start() error {
 		return fmt.Errorf("dial: %w", err)
 	}
 	c.conn = conn
+	c.sessionCtx = sc
 
 	hostPfx := netip.PrefixFrom(sc.IP, sc.IPRanges.Bits())
 	c.lctx.Log().Infof("connected to %s; assigned %s in %s",
@@ -123,6 +139,19 @@ func (c *Client) Start() error {
 	if c.tun != nil {
 		go c.tunReadLoop()
 	}
+
+	// Optional local SOCKS5 proxy for app-level traffic redirection
+	// without OS-level routing changes.
+	if c.cfg.Socks5Port > 0 {
+		srv, err := quicksocks5.Start(c.lctx.Context(), c.cfg.Socks5Port, c.lctx.Log())
+		if err != nil {
+			c.lctx.Log().Errorf("socks5 start: %v", err)
+			c.shutdownLocked()
+			return fmt.Errorf("socks5 start: %w", err)
+		}
+		c.socks5 = srv
+		c.lctx.Log().Infof("socks5 proxy listening on :%d", c.cfg.Socks5Port)
+	}
 	return nil
 }
 
@@ -133,6 +162,17 @@ func (c *Client) Close() error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.shutdownLocked()
+	c.lctx.Cancel()
+	return nil
+}
+
+// shutdownLocked tears every resource down. Caller holds c.mu.
+func (c *Client) shutdownLocked() {
+	if c.socks5 != nil {
+		_ = c.socks5.Close()
+		c.socks5 = nil
+	}
 	if c.keepalive != nil {
 		c.keepalive.Stop()
 		c.keepalive = nil
@@ -145,8 +185,6 @@ func (c *Client) Close() error {
 		_ = c.conn.Close()
 		c.conn = nil
 	}
-	c.lctx.Cancel()
-	return nil
 }
 
 // rxLoop reads frames from the transport. Inbound IP packets go to the

@@ -35,6 +35,19 @@ type SessionContext struct {
 	IPRanges     netip.Prefix // Internal network ranges routable via VPN (e.g. 10.0.0.0/24)
 }
 
+func (sc *SessionContext) Copy() SessionContext {
+	sc.mu.RLock()
+	defer sc.mu.RUnlock()
+	return SessionContext{
+		CID:          sc.CID,
+		VNI:          sc.VNI,
+		SessionID:    sc.SessionID,
+		SessionIndex: sc.SessionIndex,
+		IP:           sc.IP,
+		IPRanges:     sc.IPRanges,
+	}
+}
+
 // PresetSessionConfig is the (vni, cid) pair the client knows up-front
 // (from its CLI / config) and ships in ClientHello. Everything else on
 // SessionContext is filled in by the server during the handshake.

@@ -26,6 +26,7 @@ func main() {
 	collect(ParamVNI, "VNI (decimal, e.g. 200) (required)")
 	collect(ParamCID, "preassigned client ID (16 hex chars; auto-generated if empty)")
 	collect(ParamTUN, "TUN device name (empty = raw mode, no TUN)")
+	collect(ParamSocks5Port, "local SOCKS5 listen port (1..65535; empty/0 = disabled)")
 	collect(ParamLogLevel, "log level: trace, debug, info, warn, error (default info)")
 
 	flag.Parse()

@@ -21,6 +21,11 @@ type StaticClientConfig struct {
 	// cannot know it before Dial.
 	TUNName string
 
+	// Socks5Port (>0) enables a local SOCKS5 proxy bound to that port.
+	// Zero disables it. Useful for routing app traffic through this
+	// client without configuring routes / TUN at the OS level.
+	Socks5Port int
+
 	LogLevel logrus.Level
 	Logger   *logrus.Logger
 }

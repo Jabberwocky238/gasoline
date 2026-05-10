@@ -18,15 +18,15 @@ func NewDialer(cfg protocol.PresetSessionConfig, auth auth.ClientAuthenticator) 
 	return &Dialer{cfg: cfg, auth: auth}
 }
 
-func (d *Dialer) Dial(endpoint string) (transport.Conn, *handshake.HandshakeResult, error) {
+func (d *Dialer) Dial(endpoint string) (transport.Conn, *protocol.SessionContext, error) {
 	raw, err := net.Dial("tcp", endpoint)
 	if err != nil {
 		return nil, nil, err
 	}
-	result, err := handshake.ClientHandshake(raw, &d.cfg, d.auth)
+	sc, err := handshake.ClientHandshake(raw, d.cfg.VNI, d.cfg.CID, d.auth)
 	if err != nil {
 		raw.Close()
 		return nil, nil, err
 	}
-	return newConn(raw), result, nil
+	return newConn(raw), sc, nil
 }

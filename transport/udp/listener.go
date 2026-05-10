@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 
 	"github.com/jabberwocky238/gasoline/common"
-	"github.com/jabberwocky238/gasoline/protocol/auth"
+	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/handshake"
 	"github.com/jabberwocky238/gasoline/transport"
 )
@@ -18,9 +18,8 @@ import (
 const peerIncomingCap = 8192
 
 type Listener struct {
-	rawConn  *net.UDPConn
-	resolver auth.AuthResolverFn
-	routes   handshake.RouteResolverFn
+	rawConn *net.UDPConn
+	mapper  handshake.VNIMapperFn
 
 	// peers is guarded by MutexGuard: map[netip.AddrPort]*virtualPeer
 	// Using netip.AddrPort as key avoids per-packet string allocation from remoteAddr.String().
@@ -37,11 +36,11 @@ type virtualPeer struct {
 }
 
 type acceptResult struct {
-	conn   transport.Conn
-	result *handshake.HandshakeResult
+	conn    transport.Conn
+	session *protocol.SessionContext
 }
 
-func NewListener(addr string, resolver auth.AuthResolverFn, routes handshake.RouteResolverFn) (*Listener, error) {
+func NewListener(addr string, mapper handshake.VNIMapperFn) (*Listener, error) {
 	udpAddr, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
 		return nil, err
@@ -55,8 +54,7 @@ func NewListener(addr string, resolver auth.AuthResolverFn, routes handshake.Rou
 	_ = rawConn.SetWriteBuffer(8 * 1024 * 1024)
 	l := &Listener{
 		rawConn:  rawConn,
-		resolver: resolver,
-		routes:   routes,
+		mapper:   mapper,
 		peers:    common.WithGuard(make(map[netip.AddrPort]*virtualPeer)),
 		acceptCh: make(chan acceptResult, 16),
 	}
@@ -122,7 +120,7 @@ func (l *Listener) readLoop() {
 // On failure, cleans up the peer entry.
 func (l *Listener) handshakePeer(vp *virtualPeer, key netip.AddrPort) {
 	adapter := newVirtualStreamAdapter(l.rawConn, vp.remoteAddr, vp.incoming)
-	result, err := handshake.ServerHandshake(adapter, l.resolver, l.routes)
+	sc, err := handshake.ServerHandshake(adapter, l.mapper)
 	if err != nil {
 		l.peers.Write(func(m *map[netip.AddrPort]*virtualPeer) {
 			delete(*m, key)
@@ -135,15 +133,15 @@ func (l *Listener) handshakePeer(vp *virtualPeer, key netip.AddrPort) {
 	conn.incoming = vp.incoming
 	vp.conn = conn
 
-	l.acceptCh <- acceptResult{conn: conn, result: result}
+	l.acceptCh <- acceptResult{conn: conn, session: sc}
 }
 
-func (l *Listener) Accept() (transport.Conn, *handshake.HandshakeResult, error) {
+func (l *Listener) Accept() (transport.Conn, *protocol.SessionContext, error) {
 	res, ok := <-l.acceptCh
 	if !ok {
 		return nil, nil, fmt.Errorf("listener closed")
 	}
-	return res.conn, res.result, nil
+	return res.conn, res.session, nil
 }
 
 func (l *Listener) Close() error {

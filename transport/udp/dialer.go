@@ -18,7 +18,7 @@ func NewDialer(cfg protocol.PresetSessionConfig, auth auth.ClientAuthenticator) 
 	return &Dialer{cfg: cfg, auth: auth}
 }
 
-func (d *Dialer) Dial(endpoint string) (transport.Conn, *handshake.HandshakeResult, error) {
+func (d *Dialer) Dial(endpoint string) (transport.Conn, *protocol.SessionContext, error) {
 	udpAddr, err := net.ResolveUDPAddr("udp", endpoint)
 	if err != nil {
 		return nil, nil, err
@@ -31,11 +31,11 @@ func (d *Dialer) Dial(endpoint string) (transport.Conn, *handshake.HandshakeResu
 	_ = rawConn.SetWriteBuffer(8 * 1024 * 1024)
 
 	adapter := newClientStreamAdapter(rawConn)
-	result, err := handshake.ClientHandshake(adapter, &d.cfg, d.auth)
+	sc, err := handshake.ClientHandshake(adapter, d.cfg.VNI, d.cfg.CID, d.auth)
 	if err != nil {
 		rawConn.Close()
 		return nil, nil, err
 	}
 
-	return newClientConn(rawConn), result, nil
+	return newClientConn(rawConn), sc, nil
 }

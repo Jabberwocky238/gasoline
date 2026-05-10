@@ -13,15 +13,16 @@ import (
 	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/protocol/handshake"
 	"github.com/jabberwocky238/gasoline/transport"
+	_ "github.com/jabberwocky238/gasoline/transport/quic" // self-registers
 	transportQuic "github.com/jabberwocky238/gasoline/transport/quic"
-	transportTcp "github.com/jabberwocky238/gasoline/transport/tcp"
-	transportTls "github.com/jabberwocky238/gasoline/transport/tls"
-	transportUdp "github.com/jabberwocky238/gasoline/transport/udp"
+	_ "github.com/jabberwocky238/gasoline/transport/tcp" // self-registers
+	_ "github.com/jabberwocky238/gasoline/transport/tls" // self-registers
+	_ "github.com/jabberwocky238/gasoline/transport/udp" // self-registers
 	log "github.com/sirupsen/logrus"
 )
 
-// MessageTransport header layout repeated here for the receive parser
-// (the message package owns the encode side).
+// MessageTransport header layout for the receive parser (the message
+// package owns the encode side).
 const (
 	msgHeaderSize = 12
 	msgVNIOff     = 0
@@ -29,11 +30,6 @@ const (
 )
 
 // Operator is the per-process control + data plane orchestrator.
-//
-// Without a VXLAN underlay or peer fanout, this implementation only
-// forwards frames between clients attached to the same VNI on this
-// operator (an L2 broadcast switch per VNI). Inter-operator traffic
-// is out of scope until the underlay is brought back.
 type Operator struct {
 	lctx *common.LogContext
 	cfg  *StaticOperatorConfig
@@ -45,23 +41,40 @@ type Operator struct {
 	state           *operatorState
 }
 
+// vniResolver is the per-VNI handshake.VNIResolver implementation
+// backed by an operator's vniEntry.
+type vniResolver struct {
+	vn   *vniEntry
+	cidr netip.Prefix
+}
+
+func (r *vniResolver) CIDR() netip.Prefix                      { return r.cidr }
+func (r *vniResolver) Authenticator() auth.ServerAuthenticator { return r.vn.authenticator }
+func (r *vniResolver) IP(cid protocol.CID_Ty) (netip.Addr, error) {
+	pfx, ok := r.vn.routingMap.LookupByCID(cid)
+	if !ok {
+		return netip.Addr{}, fmt.Errorf("no route assigned for cid %x", cid)
+	}
+	return pfx.Addr(), nil
+}
+
 func New(cfg *StaticOperatorConfig) (*Operator, error) {
 	logger := log.New()
 	logger.SetLevel(cfg.LogLevel)
 	root := common.NewLogContext(context.Background(), logger)
 
 	state := newOperatorState(root)
-	// init vni config and auth resolver
+
+	// VNI registration + preset routes.
+	cidrs := make(map[protocol.VNI_Ty]netip.Prefix)
 	for vni, entry := range cfg.Network {
 		prefix, err := netip.ParsePrefix(entry.CIDR)
 		if err != nil {
 			root.Cancel()
 			return nil, fmt.Errorf("vni %d cidr %q: %w", vni, entry.CIDR, err)
 		}
+		cidrs[vni] = prefix
 		state.registerVNI(vni, entry.Auth)
-		// Seed preassigned cid->prefix bindings into this VNI's
-		// routingMap so handshakes succeed before any coordinator
-		// pushes routes.
 		if len(entry.PresetCIDmap) > 0 {
 			vn, _ := state.vni(vni)
 			for cid, pfx := range entry.PresetCIDmap {
@@ -71,7 +84,18 @@ func New(cfg *StaticOperatorConfig) (*Operator, error) {
 		root.Log().Infof("VNet %d: %s (%d preset routes)", vni, prefix, len(entry.PresetCIDmap))
 	}
 
-	// init client listeners
+	// One mapper closure shared by every listener.
+	mapper := func(vni protocol.VNI_Ty) (handshake.VNIResolver, error) {
+		state.mu.RLock()
+		vn, ok := state.vnets[vni]
+		cidr := cidrs[vni]
+		state.mu.RUnlock()
+		if !ok {
+			return nil, fmt.Errorf("no config for vni %d", vni)
+		}
+		return &vniResolver{vn: vn, cidr: cidr}, nil
+	}
+
 	if len(cfg.ClientListeners) == 0 {
 		root.Cancel()
 		return nil, fmt.Errorf("no client listeners configured")
@@ -83,24 +107,11 @@ func New(cfg *StaticOperatorConfig) (*Operator, error) {
 			closeAll(clientListeners)
 			return nil, fmt.Errorf("duplicate listener transport %q", spec.Transport)
 		}
-		authResolver := func(vni protocol.VNI_Ty) (auth.ServerAuthenticator, error) {
-			if entry, ok := state.vnets[vni]; ok {
-				return entry.authenticator, nil
-			}
-			return nil, fmt.Errorf("no config for vni %d", vni)
+		tlsConf, err := transportQuic.GenerateServerTLS()
+		if err != nil {
+			return nil, err
 		}
-		routeResolver := func(vni protocol.VNI_Ty, cid protocol.CID_Ty) (netip.Prefix, error) {
-			entry, ok := state.vnets[vni]
-			if !ok {
-				return netip.Prefix{}, fmt.Errorf("no config for vni %d", vni)
-			}
-			pfx, ok := entry.routingMap.LookupByCID(cid)
-			if !ok {
-				return netip.Prefix{}, fmt.Errorf("no route assigned for cid %x", cid)
-			}
-			return pfx, nil
-		}
-		ln, err := createClientListener(spec.Transport, spec.Addr, authResolver, routeResolver)
+		ln, err := transport.NewListener(spec.Transport, spec.Addr, mapper, tlsConf)
 		if err != nil {
 			root.Cancel()
 			closeAll(clientListeners)
@@ -156,8 +167,7 @@ func (o *Operator) AddPeer(uuid [16]byte, udpAddr netip.AddrPort) {
 func (o *Operator) DataPlaneAddr() string { return o.state.Peers.Addr() }
 
 // SetPeerRoute installs (vni, prefix) -> peer operator UUID into the
-// VNI's routing table. Called either at boot from a static config or
-// at runtime when the coordinator pushes a remote-owned route.
+// VNI's routing table.
 func (o *Operator) SetPeerRoute(vni protocol.VNI_Ty, peerUUID [16]byte, prefix netip.Prefix) error {
 	vn, ok := o.state.vni(vni)
 	if !ok {
@@ -217,7 +227,7 @@ func (o *Operator) routineAcceptClients(tp string, ln transport.Listener) {
 		default:
 		}
 
-		conn, result, err := ln.Accept()
+		conn, sc, err := ln.Accept()
 		if err != nil {
 			select {
 			case <-o.lctx.Done():
@@ -227,11 +237,11 @@ func (o *Operator) routineAcceptClients(tp string, ln transport.Listener) {
 				continue
 			}
 		}
-		if conn == nil || result == nil {
+		if conn == nil || sc == nil {
 			return
 		}
 
-		cp := newPeerClient(conn, result)
+		cp := newPeerClient(conn, sc)
 		vn, err := o.state.addClient(cp)
 		if err != nil {
 			logger.Errorf("attach client %d to VNI %d: %v", cp.sc.SessionIndex, cp.sc.VNI, err)
@@ -274,7 +284,6 @@ func (o *Operator) routineReadFromClient(cp *PeerClient, vn *vniEntry) {
 			continue
 		}
 
-		// ip routing
 		if err := vn.forwardFrame(readBuf[:n], cp); err != nil {
 			logger.Debugf("Forward from client %d: %v", cp.sc.SessionIndex, err)
 		}
@@ -305,9 +314,7 @@ func (o *Operator) routineReaper() {
 }
 
 // routineReadFromPeer drains the underlay UDP socket. Each datagram is
-// a MessageTransport (vni|cid|payload). The vni picks the local
-// vniEntry; vniEntry.deliverFromPeer hands the payload to the local
-// client that owns the destination IP.
+// a MessageTransport (vni|cid|payload).
 func (o *Operator) routineReadFromPeer() {
 	logger := o.lctx.Log()
 	conn := o.state.Peers.Conn()
@@ -343,30 +350,5 @@ func (o *Operator) routineReadFromPeer() {
 		if err := vn.deliverFromPeer(payload); err != nil {
 			logger.Debugf("deliver vni %d from peer: %v", vni, err)
 		}
-	}
-}
-
-// --------------- Client listener helpers ---------------
-
-func createClientListener(transportType, addr string, resolver auth.AuthResolverFn, routes handshake.RouteResolverFn) (transport.Listener, error) {
-	switch transportType {
-	case "tcp":
-		return transportTcp.NewListener(addr, resolver, routes)
-	case "udp":
-		return transportUdp.NewListener(addr, resolver, routes)
-	case "quic":
-		tlsConf, err := transportQuic.GenerateServerTLS()
-		if err != nil {
-			return nil, err
-		}
-		return transportQuic.NewListener(addr, resolver, routes, tlsConf)
-	case "tls":
-		tlsConf, err := transportQuic.GenerateServerTLS()
-		if err != nil {
-			return nil, err
-		}
-		return transportTls.NewListener(addr, resolver, routes, tlsConf)
-	default:
-		return nil, fmt.Errorf("unknown transport: %s", transportType)
 	}
 }

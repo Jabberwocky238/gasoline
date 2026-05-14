@@ -31,6 +31,7 @@ package cordinator
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -79,6 +80,11 @@ type Cordinator struct {
 	lctx   *common.LogContext
 }
 
+// Addr returns the bound HTTP listen address. Useful for tests that
+// pass ":0" / "127.0.0.1:0" and need to discover the actual port the
+// OS picked after Start.
+func (c *Cordinator) Addr() string { return c.addr }
+
 // New returns an unstarted Cordinator that will listen on addr (e.g.
 // ":8080" or "127.0.0.1:8080") when Start is called.
 func New(addr string) *Cordinator {
@@ -113,6 +119,7 @@ func (c *Cordinator) Start() error {
 	if err != nil {
 		return fmt.Errorf("cordinator: listen %s: %w", c.addr, err)
 	}
+	c.addr = ln.Addr().String()
 	c.lctx.Log().Infof("cordinator: serving on %s", ln.Addr())
 	go func() {
 		if err := c.server.Serve(ln); err != nil && err != http.ErrServerClosed {
@@ -157,6 +164,12 @@ type routeEntry struct {
 type routePutBody struct {
 	CID    string `json:"cid"`
 	Prefix string `json:"prefix"`
+	// OwnerUUID names the operator that terminates the client side of
+	// this route, as a 32-char hex string. Omit / empty means "the
+	// operator receiving this owns it locally" — only useful for
+	// single-operator setups; multi-operator topologies must set this
+	// so peer operators install the route as a remote (peer) hop.
+	OwnerUUID string `json:"ownerUUID,omitempty"`
 }
 
 type authPutBody struct {
@@ -253,13 +266,22 @@ func (c *Cordinator) handleRoutesPut(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid prefix: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	var ownerUUID [16]byte
+	if body.OwnerUUID != "" {
+		uu, err := parseUUIDHex(body.OwnerUUID)
+		if err != nil {
+			http.Error(w, "invalid ownerUUID: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		ownerUUID = uu
+	}
 
 	v := c.ensureVNI(vni)
 	v.mu.Lock()
 	v.routes[cid] = pfx
 	v.mu.Unlock()
 
-	c.broadcastOp(&control.RouteUpsert{VNI: vni, CID: cid, Prefix: pfx})
+	c.broadcastOp(&control.RouteUpsert{VNI: vni, CID: cid, Prefix: pfx, OwnerUUID: ownerUUID})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -482,6 +504,20 @@ func parseVNI(s string) (protocol.VNI_Ty, error) {
 
 // parseCID decodes a CID. Decimal by default; "0x..." for hex.
 func parseCID(s string) (protocol.CID_Ty, error) { return protocol.ParseCID(s) }
+
+// parseUUIDHex decodes a 32-char hex string into a [16]byte UUID.
+func parseUUIDHex(s string) ([16]byte, error) {
+	var u [16]byte
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		return u, fmt.Errorf("bad uuid %q: %v", s, err)
+	}
+	if len(b) != 16 {
+		return u, fmt.Errorf("uuid %q: want 16 bytes, got %d", s, len(b))
+	}
+	copy(u[:], b)
+	return u, nil
+}
 
 // parseAuth splits an auth spec string into (type, entries).
 //

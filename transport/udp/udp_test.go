@@ -11,15 +11,17 @@ import (
 	"github.com/jabberwocky238/gasoline/protocol/handshake"
 )
 
-func testResolver(a auth.ServerAuthenticator) auth.AuthResolverFn {
-	return func(vni protocol.VNI_Ty) (auth.ServerAuthenticator, error) {
-		return a, nil
-	}
+type testVNIResolver struct {
+	auth auth.ServerAuthenticator
 }
 
-func testRoutes() handshake.RouteResolverFn {
-	return func(vni protocol.VNI_Ty, cid protocol.CID_Ty) (netip.Prefix, error) {
-		return netip.MustParsePrefix("10.0.0.1/32"), nil
+func (r testVNIResolver) CIDR() netip.Prefix                          { return netip.MustParsePrefix("10.0.0.0/24") }
+func (r testVNIResolver) IP(_ protocol.CID_Ty) (netip.Addr, error)    { return netip.MustParseAddr("10.0.0.1"), nil }
+func (r testVNIResolver) Authenticator() auth.ServerAuthenticator     { return r.auth }
+
+func testMapper(a auth.ServerAuthenticator) handshake.VNIMapperFn {
+	return func(_ protocol.VNI_Ty) (handshake.VNIResolver, error) {
+		return testVNIResolver{auth: a}, nil
 	}
 }
 
@@ -29,7 +31,7 @@ func newTestCfg(cid protocol.CID_Ty) protocol.PresetSessionConfig {
 
 func TestUDPHandshakeAndPacket(t *testing.T) {
 	serverAuth := &auth.NoAuthServer{}
-	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth), testRoutes())
+	ln, err := NewListener("127.0.0.1:0", testMapper(serverAuth))
 	if err != nil {
 		t.Fatalf("NewListener: %v", err)
 	}
@@ -41,22 +43,22 @@ func TestUDPHandshakeAndPacket(t *testing.T) {
 
 	var wg sync.WaitGroup
 	var serverConn *Conn
-	var serverResult *handshake.HandshakeResult
+	var serverSession *protocol.SessionContext
 	var serverErr error
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		c, r, e := ln.Accept()
+		c, sc, e := ln.Accept()
 		if e != nil {
 			serverErr = e
 			return
 		}
 		serverConn = c.(*Conn)
-		serverResult = r
+		serverSession = sc
 	}()
 
-	clientConn, clientResult, err := dialer.Dial(addr)
+	clientConn, clientSession, err := dialer.Dial(addr)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -67,10 +69,10 @@ func TestUDPHandshakeAndPacket(t *testing.T) {
 		t.Fatalf("Accept: %v", serverErr)
 	}
 
-	if clientResult.CID != cid {
+	if clientSession.CID != cid {
 		t.Errorf("client CID mismatch")
 	}
-	if serverResult.CID != cid {
+	if serverSession.CID != cid {
 		t.Errorf("server got wrong client CID")
 	}
 
@@ -134,7 +136,7 @@ func TestUDPHandshakeAndPacket(t *testing.T) {
 
 func TestUDPMultiplePackets(t *testing.T) {
 	serverAuth := &auth.NoAuthServer{}
-	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth), testRoutes())
+	ln, err := NewListener("127.0.0.1:0", testMapper(serverAuth))
 	if err != nil {
 		t.Fatalf("NewListener: %v", err)
 	}
@@ -194,7 +196,7 @@ func TestUDPMultiplePackets(t *testing.T) {
 func TestUDPMultipleClients(t *testing.T) {
 	serverAuth := &auth.NoAuthServer{}
 
-	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth), testRoutes())
+	ln, err := NewListener("127.0.0.1:0", testMapper(serverAuth))
 	if err != nil {
 		t.Fatalf("NewListener: %v", err)
 	}

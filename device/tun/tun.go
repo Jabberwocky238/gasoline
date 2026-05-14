@@ -40,6 +40,15 @@ func NewFromFD(fd int) (*Tun, error) {
 	return &Tun{tunIf: tunIf}, nil
 }
 
+// NewFromSingTun wraps an externally-built singTun.Tun (anything
+// satisfying that interface — including in-memory test fakes) into
+// the *Tun shape the rest of the codebase expects. No initialization
+// is performed: the caller is responsible for Start / Close / any
+// platform-specific setup the wrapped Tun needs.
+func NewFromSingTun(tunIf singTun.Tun) *Tun {
+	return &Tun{tunIf: tunIf}
+}
+
 func defaultTUNName() string {
 	n := rand.Intn(10000)
 	if runtime.GOOS == "darwin" {

@@ -13,15 +13,17 @@ import (
 	qtls "github.com/jabberwocky238/gasoline/transport/quic"
 )
 
-func testResolver(a auth.ServerAuthenticator) auth.AuthResolverFn {
-	return func(vni protocol.VNI_Ty) (auth.ServerAuthenticator, error) {
-		return a, nil
-	}
+type testVNIResolver struct {
+	auth auth.ServerAuthenticator
 }
 
-func testRoutes() handshake.RouteResolverFn {
-	return func(vni protocol.VNI_Ty, cid protocol.CID_Ty) (netip.Prefix, error) {
-		return netip.MustParsePrefix("10.0.0.1/32"), nil
+func (r testVNIResolver) CIDR() netip.Prefix                          { return netip.MustParsePrefix("10.0.0.0/24") }
+func (r testVNIResolver) IP(_ protocol.CID_Ty) (netip.Addr, error)    { return netip.MustParseAddr("10.0.0.1"), nil }
+func (r testVNIResolver) Authenticator() auth.ServerAuthenticator     { return r.auth }
+
+func testMapper(a auth.ServerAuthenticator) handshake.VNIMapperFn {
+	return func(_ protocol.VNI_Ty) (handshake.VNIResolver, error) {
+		return testVNIResolver{auth: a}, nil
 	}
 }
 
@@ -36,7 +38,7 @@ func TestTLSHandshakeAndPacket(t *testing.T) {
 		t.Fatalf("GenerateServerTLS: %v", err)
 	}
 
-	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth), testRoutes(), serverTLS)
+	ln, err := NewListener("127.0.0.1:0", testMapper(serverAuth), serverTLS)
 	if err != nil {
 		t.Fatalf("NewListener: %v", err)
 	}
@@ -49,22 +51,22 @@ func TestTLSHandshakeAndPacket(t *testing.T) {
 
 	var wg sync.WaitGroup
 	var serverConn *Conn
-	var serverResult *handshake.HandshakeResult
+	var serverSession *protocol.SessionContext
 	var serverErr error
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		c, r, e := ln.Accept()
+		c, sc, e := ln.Accept()
 		if e != nil {
 			serverErr = e
 			return
 		}
 		serverConn = c.(*Conn)
-		serverResult = r
+		serverSession = sc
 	}()
 
-	clientConn, clientResult, err := dialer.Dial(addr)
+	clientConn, clientSession, err := dialer.Dial(addr)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -75,10 +77,10 @@ func TestTLSHandshakeAndPacket(t *testing.T) {
 		t.Fatalf("Accept: %v", serverErr)
 	}
 
-	if clientResult.CID != cid {
+	if clientSession.CID != cid {
 		t.Errorf("client CID mismatch")
 	}
-	if serverResult.CID != cid {
+	if serverSession.CID != cid {
 		t.Errorf("server got wrong client CID")
 	}
 
@@ -147,7 +149,7 @@ func TestTLSMultiplePackets(t *testing.T) {
 		t.Fatalf("GenerateServerTLS: %v", err)
 	}
 
-	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth), testRoutes(), serverTLS)
+	ln, err := NewListener("127.0.0.1:0", testMapper(serverAuth), serverTLS)
 	if err != nil {
 		t.Fatalf("NewListener: %v", err)
 	}
@@ -219,7 +221,7 @@ func TestTLSHMACAuth(t *testing.T) {
 		t.Fatalf("GenerateServerTLS: %v", err)
 	}
 
-	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth), testRoutes(), serverTLS)
+	ln, err := NewListener("127.0.0.1:0", testMapper(serverAuth), serverTLS)
 	if err != nil {
 		t.Fatalf("NewListener: %v", err)
 	}
@@ -238,14 +240,14 @@ func TestTLSHMACAuth(t *testing.T) {
 		}
 	}()
 
-	conn, result, err := dialer.Dial(ln.Addr())
+	conn, sc, err := dialer.Dial(ln.Addr())
 	if err != nil {
 		t.Fatalf("Dial with HMAC: %v", err)
 	}
 	defer conn.Close()
 	wg.Wait()
 
-	if result.CID != cid {
+	if sc.CID != cid {
 		t.Errorf("cid mismatch")
 	}
 }
@@ -266,7 +268,7 @@ func TestTLSUserPassAuth(t *testing.T) {
 		t.Fatalf("GenerateServerTLS: %v", err)
 	}
 
-	ln, err := NewListener("127.0.0.1:0", testResolver(serverAuth), testRoutes(), serverTLS)
+	ln, err := NewListener("127.0.0.1:0", testMapper(serverAuth), serverTLS)
 	if err != nil {
 		t.Fatalf("NewListener: %v", err)
 	}

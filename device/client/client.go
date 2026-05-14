@@ -88,6 +88,11 @@ func (c *Client) SessionContext() protocol.SessionContext {
 	return c.sessionCtx.Copy()
 }
 
+// SetTun installs a TUN before Start. If the cfg.TUNName branch in
+// Start sees c.tun already set, it skips the real-TUN allocation, so
+// SetTun is the swap point for in-process fakes — pass a *tun.Tun
+// built from tun.NewFromSingTun(yourMock) to plug an in-memory shim
+// into the production data-plane lifecycle.
 func (c *Client) SetTun(t *tun.Tun) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

@@ -2,31 +2,31 @@ package operator
 
 import (
 	"bufio"
-	"encoding/hex"
 	"fmt"
 	"net/netip"
-	"strconv"
-	"strings"
 	"sync"
 
 	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol"
+	"github.com/jabberwocky238/gasoline/protocol/control"
 	"golang.org/x/net/websocket"
 )
 
 // CordinatorController is the operator's outbound websocket client to
-// a remote coordinator. Wire is line-delimited text:
+// a remote coordinator. Wire is JSON envelopes (one per line) — see
+// protocol/control: every frame is `{"kind":<u8>,"body":{...}}`.
 //
-//	operator -> cordinator
-//	  hello  <uuid-hex> <udp-endpoint>
-//	  attach <vni> <cid> <prefix>
-//	  detach <vni> <cid>
+// Outbound (operator -> cordinator):
 //
-//	cordinator -> operator
-//	  peer online  <uuid-hex> <udp-endpoint>
-//	  peer offline <uuid-hex>
-//	  route set    <vni> <cid> <prefix> <uuid-hex>
-//	  route del    <vni> <cid>
+//	PeerJoin{UUID:self, Endpoint:underlay-UDP}    — on Start
+//	RouteUpsert{VNI, CID, Prefix, OwnerUUID:self} — on client attach
+//	RouteRemove{VNI, CID}                          — on client detach
+//
+// Inbound (cordinator -> operator), dispatched to ControllerBase.Consume:
+//
+//	PeerJoin / PeerLeave    — update PeerTable
+//	RouteUpsert / RouteRemove — update vniEntry.routingMap
+//	CordinatorConnectReply  — replay snapshot of peers
 type CordinatorController struct {
 	endpoint string
 	base     *ControllerBase
@@ -57,8 +57,9 @@ func NewCordinator(base *ControllerBase, endpoint string) (*CordinatorController
 func (c *CordinatorController) Name() string     { return "cordinator" }
 func (c *CordinatorController) Endpoint() string { return c.endpoint }
 
-// Start dials the coordinator, says hello, replays existing local
-// clients, subscribes to future client events, and spins a read loop.
+// Start dials the coordinator, announces self via PeerJoin, replays
+// existing local clients as RouteUpsert events, subscribes to future
+// client events, and spins a read loop.
 func (c *CordinatorController) Start() error {
 	conn, err := websocket.Dial(c.endpoint, "", "http://localhost/")
 	if err != nil {
@@ -69,12 +70,12 @@ func (c *CordinatorController) Start() error {
 	c.mu.Unlock()
 	c.lctx.Log().Infof("connected")
 
-	// Announce ourselves so the coordinator can broadcast peer-online
-	// to everyone else and stamp our UDP underlay endpoint.
-	_ = c.send(fmt.Sprintf("hello %s %s",
-		hex.EncodeToString(c.base.state.uuid[:]),
-		c.base.state.Peers.Addr(),
-	))
+	// Announce ourselves so the coordinator can broadcast PeerJoin to
+	// every other operator and stamp our UDP underlay endpoint.
+	endpoint, err := parseUnderlayAddr(c.base.state.Peers.Addr())
+	if err == nil {
+		_ = c.sendOp(&control.PeerJoin{UUID: c.base.state.uuid, Endpoint: endpoint})
+	}
 
 	// Replay any clients that already attached before we connected.
 	c.base.state.mu.RLock()
@@ -84,8 +85,12 @@ func (c *CordinatorController) Start() error {
 			if !ok {
 				continue
 			}
-			_ = c.send(fmt.Sprintf("attach %d %s %s",
-				vni, cp.sc.CID.FormatCID(), pfx.String()))
+			_ = c.sendOp(&control.RouteUpsert{
+				VNI:       vni,
+				CID:       cp.sc.CID,
+				Prefix:    pfx,
+				OwnerUUID: c.base.state.uuid,
+			})
 		}
 	}
 	c.base.state.mu.RUnlock()
@@ -119,23 +124,34 @@ func (c *CordinatorController) Close() error {
 
 // onClientEvent is invoked on every local handshake / disconnect. It
 // forwards the event to the coordinator so peers can update their
-// routingMaps.
+// routingMaps. OwnerUUID is always self — this operator owns the
+// client side of any route announced from here.
 func (c *CordinatorController) onClientEvent(vni protocol.VNI_Ty, cid protocol.CID_Ty, prefix netip.Prefix, attached bool) {
 	if attached {
-		_ = c.send(fmt.Sprintf("attach %d %s %s", vni, cid.FormatCID(), prefix.String()))
+		_ = c.sendOp(&control.RouteUpsert{
+			VNI:       vni,
+			CID:       cid,
+			Prefix:    prefix,
+			OwnerUUID: c.base.state.uuid,
+		})
 	} else {
-		_ = c.send(fmt.Sprintf("detach %d %s", vni, cid.FormatCID()))
+		_ = c.sendOp(&control.RouteRemove{VNI: vni, CID: cid})
 	}
 }
 
-func (c *CordinatorController) send(msg string) error {
+func (c *CordinatorController) sendOp(op control.Op) error {
 	c.mu.Lock()
 	conn := c.conn
 	c.mu.Unlock()
 	if conn == nil {
 		return fmt.Errorf("cordinator: not connected")
 	}
-	if _, err := conn.Write([]byte(msg + "\n")); err != nil {
+	body, err := control.MarshalJSON(op)
+	if err != nil {
+		return fmt.Errorf("cordinator: marshal %T: %w", op, err)
+	}
+	body = append(body, '\n')
+	if _, err := conn.Write(body); err != nil {
 		return fmt.Errorf("cordinator: write: %w", err)
 	}
 	return nil
@@ -160,9 +176,18 @@ func (c *CordinatorController) readLoop() {
 			return
 		default:
 		}
-		line := scanner.Text()
-		if err := c.handleInbound(line); err != nil {
-			logger.Debugf("inbound %q: %v", line, err)
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		op, err := control.UnmarshalJSON(line)
+		if err != nil {
+			logger.Debugf("inbound: %v (line=%q)", err, string(line))
+			continue
+		}
+		// Reply ops, if any, are sent back through the same socket.
+		if reply := c.base.Consume(op); reply != nil {
+			_ = c.sendOp(reply)
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -174,116 +199,13 @@ func (c *CordinatorController) readLoop() {
 	}
 }
 
-// handleInbound parses one wire line from the coordinator and applies it.
-func (c *CordinatorController) handleInbound(line string) error {
-	fields := strings.Fields(line)
-	if len(fields) == 0 {
-		return nil
+// parseUnderlayAddr converts a "host:port" string from PeerTable.Addr()
+// into the AddrPort form PeerJoin carries.
+func parseUnderlayAddr(s string) (netip.AddrPort, error) {
+	if s == "" {
+		return netip.AddrPort{}, fmt.Errorf("cordinator: underlay not bound")
 	}
-	switch fields[0] {
-	case "peer":
-		if len(fields) < 3 {
-			return fmt.Errorf("peer: need subcommand + uuid")
-		}
-		uuid, err := decodeUUID(fields[2])
-		if err != nil {
-			return fmt.Errorf("peer: %w", err)
-		}
-		switch fields[1] {
-		case "online":
-			if len(fields) != 4 {
-				return fmt.Errorf("peer online: usage 'peer online <uuid> <udp-endpoint>'")
-			}
-			ap, err := netip.ParseAddrPort(fields[3])
-			if err != nil {
-				return fmt.Errorf("peer online: bad endpoint %q: %v", fields[3], err)
-			}
-			if uuid == c.base.state.uuid {
-				return nil // ignore self
-			}
-			c.base.state.Peers.Add(NewPeerOperator(uuid, ap))
-			return nil
-		case "offline":
-			c.base.state.Peers.Remove(uuid)
-			return nil
-		default:
-			return fmt.Errorf("peer: unknown op %q", fields[1])
-		}
-
-	case "route":
-		if len(fields) < 4 {
-			return fmt.Errorf("route: too few fields")
-		}
-		vni, err := strconv.ParseUint(fields[2], 10, 32)
-		if err != nil {
-			return fmt.Errorf("route: bad vni %q: %v", fields[2], err)
-		}
-		switch fields[1] {
-		case "set":
-			// route set <vni> <cid> <prefix> <uuid>
-			if len(fields) != 6 {
-				return fmt.Errorf("route set: usage 'route set <vni> <cid> <prefix> <uuid>'")
-			}
-			cid, err := protocol.ParseCID(fields[3])
-			if err != nil {
-				return err
-			}
-			pfx, err := netip.ParsePrefix(fields[4])
-			if err != nil {
-				return fmt.Errorf("route set: bad prefix: %w", err)
-			}
-			uuid, err := decodeUUID(fields[5])
-			if err != nil {
-				return err
-			}
-			vn, ok := c.base.state.vni(protocol.VNI_Ty(vni))
-			if !ok {
-				return fmt.Errorf("route set: unknown vni %d (0x%06x)", vni, vni)
-			}
-			if uuid == c.base.state.uuid {
-				// Our own client; routingMap already has it (added at handshake).
-				_ = cid
-				return nil
-			}
-			vn.routingMap.SetOperator(uuid, pfx)
-			_ = cid // cid identity is informational on operator routes; LPM uses prefix
-			return nil
-
-		case "del":
-			// route del <vni> <cid>
-			if len(fields) != 4 {
-				return fmt.Errorf("route del: usage 'route del <vni> <cid>'")
-			}
-			cid, err := protocol.ParseCID(fields[3])
-			if err != nil {
-				return err
-			}
-			vn, ok := c.base.state.vni(protocol.VNI_Ty(vni))
-			if !ok {
-				return nil
-			}
-			vn.routingMap.DeleteByCID(cid)
-			return nil
-		default:
-			return fmt.Errorf("route: unknown op %q", fields[1])
-		}
-
-	default:
-		return fmt.Errorf("unknown command %q", fields[0])
-	}
-}
-
-func decodeUUID(s string) ([16]byte, error) {
-	var u [16]byte
-	b, err := hex.DecodeString(s)
-	if err != nil {
-		return u, fmt.Errorf("bad uuid %q: %v", s, err)
-	}
-	if len(b) != 16 {
-		return u, fmt.Errorf("uuid %q: want 16 bytes, got %d", s, len(b))
-	}
-	copy(u[:], b)
-	return u, nil
+	return netip.ParseAddrPort(s)
 }
 
 // dispatchCordinator parses the args of a `cordinator ...` gasoctl

@@ -150,6 +150,192 @@ func TestG4_HopToAnotherOperator(t *testing.T) {
 	t.Log("SessionMigrate committed: A's access point is now opB")
 }
 
+// TestG4_ForgedFrameDropped proves an attacker who knows a live SessionTag (it
+// travels in the clear) but not the session keys cannot inject traffic: the
+// demux's AEAD open fails and the frame is dropped, never forwarded (PRD §6.4).
+func TestG4_ForgedFrameDropped(t *testing.T) {
+	h := setupHopMesh(t)
+	defer h.close()
+
+	// Wait until opB's FSM has A's session.
+	waitFor(t, 3*time.Second, func() bool {
+		_, ok := h.node.SessionByTag(datacom.TagOf(h.scA.SessionID))
+		return ok
+	})
+
+	// B watches for ANY delivered packet.
+	recv := make(chan struct{}, 1)
+	go func() {
+		buf := make([]byte, 65535)
+		if n, err := h.connB.ReadPacket(buf); err == nil && n > 0 {
+			recv <- struct{}{}
+		}
+	}()
+
+	// Forge a frame: correct SessionTag for A, but garbage ciphertext (attacker
+	// lacks the keys). Fire it at opB from a fresh socket.
+	sock, err := net.DialUDP("udp", nil, mustUDPAddr(t, h.opB.ClientAddr()))
+	if err != nil {
+		t.Fatalf("socket: %v", err)
+	}
+	defer sock.Close()
+
+	tag := datacom.TagOf(h.scA.SessionID)
+	forged := make([]byte, datacom.HeaderSize+32)
+	copy(forged, tag[:])
+	// counter=0, then 32 bytes of zero "ciphertext" that cannot authenticate.
+	if _, err := sock.Write(forged); err != nil {
+		t.Fatalf("write forged: %v", err)
+	}
+
+	select {
+	case <-recv:
+		t.Fatal("forged frame was delivered — AEAD did not reject it")
+	case <-time.After(1 * time.Second):
+		t.Log("forged frame dropped (AEAD open failed), nothing delivered")
+	}
+}
+
+// TestG4_SurvivesOperatorKill proves session continuity across operator loss
+// (PRD §9.4): A handshakes with opA, then opA is killed; A's frames sent to opB
+// are still served (keys live in Raft), delivered to B, no re-handshake.
+func TestG4_SurvivesOperatorKill(t *testing.T) {
+	h := setupHopMesh(t)
+	defer h.close()
+
+	waitFor(t, 3*time.Second, func() bool {
+		_, ok := h.node.SessionByTag(datacom.TagOf(h.scA.SessionID))
+		return ok
+	})
+
+	// Kill the operator A handshook with.
+	_ = h.opA.Close()
+	t.Log("opA (A's handshake operator) killed")
+
+	recv := make(chan []byte, 1)
+	go func() {
+		buf := make([]byte, 65535)
+		if n, err := h.connB.ReadPacket(buf); err == nil && n > 0 {
+			recv <- append([]byte(nil), buf[:n]...)
+		}
+	}()
+
+	sock, err := net.DialUDP("udp", nil, mustUDPAddr(t, h.opB.ClientAddr()))
+	if err != nil {
+		t.Fatalf("socket: %v", err)
+	}
+	defer sock.Close()
+
+	ipPkt := makeIPv4Packet(h.scA.IP, h.scB.IP, []byte("post-kill"))
+	frame, err := datacom.Seal(h.dialedA.Session, datacom.TagOf(h.scA.SessionID), ipPkt)
+	if err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	if _, err := sock.Write(frame); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	select {
+	case <-recv:
+		t.Log("A's frame delivered to B via opB after opA was killed — session survived")
+	case <-time.After(3 * time.Second):
+		t.Fatal("frame not delivered after opA kill")
+	}
+}
+
+// --------------- shared hop-mesh harness ---------------
+
+type hopMesh struct {
+	node    *consensus.Node
+	opA     *operator.Operator
+	opB     *operator.Operator
+	connB   transport.Conn
+	dialedA transport.Dialed
+	scA     *protocol.SessionContext
+	scB     *protocol.SessionContext
+}
+
+func (h *hopMesh) close() {
+	if h.connB != nil {
+		_ = h.connB.Close()
+	}
+	if h.dialedA.Conn != nil {
+		_ = h.dialedA.Conn.Close()
+	}
+	if h.opB != nil {
+		_ = h.opB.Close()
+	}
+	if h.opA != nil {
+		_ = h.opA.Close()
+	}
+	if h.node != nil {
+		_ = h.node.Shutdown()
+	}
+}
+
+// setupHopMesh stands up the shared two-operator / one-node fixture: A dialed on
+// opA, B dialed on opB, underlay wired, both sessions live in the FSM.
+func setupHopMesh(t *testing.T) *hopMesh {
+	t.Helper()
+	const vni protocol.VNI_Ty = 200
+
+	privA, pubA, _ := noise.GenerateKey()
+	privB, pubB, _ := noise.GenerateKey()
+	serverPriv, serverPub, _ := noise.GenerateKey()
+
+	raftAddr := freeUDPAddr(t)
+	node, err := consensus.NewNode(consensus.Config{
+		LocalID: "op-0", BindAddr: raftAddr, Peers: []consensus.Peer{{ID: "op-0", Addr: raftAddr}}, Bootstrap: true,
+		HeartbeatTimeout: 100 * time.Millisecond, ElectionTimeout: 100 * time.Millisecond,
+		LeaderLeaseTimeout: 80 * time.Millisecond, CommitTimeout: 20 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("node: %v", err)
+	}
+	waitLeader(t, node)
+
+	mustPropose(t, node, &consensus.Command{Kind: consensus.CmdVNetUpsert, VNetUpsert: &consensus.VNetUpsert{
+		VNI: vni,
+		Segments: []consensus.Segment{{
+			CIDR: netip.MustParsePrefix("10.0.200.0/24"),
+			Pool: netip.MustParsePrefix("10.0.200.16/28"),
+		}},
+	}})
+	for _, pub := range []noise.PublicKey{pubA, pubB} {
+		var p [32]byte = pub
+		mustPropose(t, node, &consensus.Command{Kind: consensus.CmdKeyGrant, KeyGrant: &consensus.KeyGrant{VNI: vni, PubKey: p}})
+	}
+
+	uuidA := [16]byte{0xA0}
+	uuidB := [16]byte{0xB0}
+	opA := mkHopOperator(t, uuidA, serverPriv, vni, pubA, pubB)
+	opA.AttachConsensus(node)
+	mustStart(t, opA)
+	opB := mkHopOperator(t, uuidB, serverPriv, vni, pubA, pubB)
+	opB.AttachConsensus(node)
+	mustStart(t, opB)
+
+	apA, _ := netip.ParseAddrPort(opA.DataPlaneAddr())
+	apB, _ := netip.ParseAddrPort(opB.DataPlaneAddr())
+	opA.AddPeer(uuidB, apB)
+	opB.AddPeer(uuidA, apA)
+
+	idA := transport.ClientIdentity{Priv: privA, Pub: pubA, ServerPub: serverPub}
+	idB := transport.ClientIdentity{Priv: privB, Pub: pubB, ServerPub: serverPub}
+
+	dialedA, err := udp.NewDialer(protocol.NewPresetSessionConfig(vni), idA).Dial(opA.ClientAddr())
+	if err != nil {
+		t.Fatalf("A dial: %v", err)
+	}
+	scA, err := datacom.ClientAssign(dialedA.Conn, dialedA.Session, vni)
+	if err != nil {
+		t.Fatalf("A assign: %v", err)
+	}
+	connB, scB := dialAndAssign(t, udp.NewDialer(protocol.NewPresetSessionConfig(vni), idB), opB.ClientAddr(), idB, vni)
+
+	return &hopMesh{node: node, opA: opA, opB: opB, connB: connB, dialedA: dialedA, scA: scA, scB: scB}
+}
+
 // --------------- helpers ---------------
 
 func waitLeader(t *testing.T, nodes ...*consensus.Node) {

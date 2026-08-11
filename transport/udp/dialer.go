@@ -17,24 +17,24 @@ func NewDialer(cfg protocol.PresetSessionConfig, id transport.ClientIdentity) *D
 	return &Dialer{cfg: cfg, id: id}
 }
 
-func (d *Dialer) Dial(endpoint string) (transport.Conn, *protocol.SessionContext, error) {
+func (d *Dialer) Dial(endpoint string) (transport.Dialed, error) {
 	udpAddr, err := net.ResolveUDPAddr("udp", endpoint)
 	if err != nil {
-		return nil, nil, err
+		return transport.Dialed{}, err
 	}
 	rawConn, err := net.DialUDP("udp", nil, udpAddr)
 	if err != nil {
-		return nil, nil, err
+		return transport.Dialed{}, err
 	}
 	_ = rawConn.SetReadBuffer(8 * 1024 * 1024)
 	_ = rawConn.SetWriteBuffer(8 * 1024 * 1024)
 
 	adapter := newClientStreamAdapter(rawConn)
-	sc, _, err := handshake.ClientHandshake(adapter, d.cfg.VNI, d.id.Priv, d.id.Pub, d.id.ServerPub)
+	sess, err := handshake.ClientHandshake(adapter, d.cfg.VNI, d.id.Priv, d.id.Pub, d.id.ServerPub)
 	if err != nil {
 		rawConn.Close()
-		return nil, nil, err
+		return transport.Dialed{}, err
 	}
 
-	return newClientConn(rawConn), sc, nil
+	return transport.Dialed{Conn: newClientConn(rawConn), Session: sess}, nil
 }

@@ -25,7 +25,7 @@ func TestUnauthorizedKeyRejected(t *testing.T) {
 	// Accept loop must never yield a session for an unauthorized client.
 	accepted := make(chan struct{}, 1)
 	go func() {
-		if c, _, e := ln.Accept(); e == nil && c != nil {
+		if acc, e := ln.Accept(); e == nil && acc.Conn != nil {
 			accepted <- struct{}{}
 		}
 	}()
@@ -35,7 +35,7 @@ func TestUnauthorizedKeyRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	id := transport.ClientIdentity{Priv: cPriv, Pub: cPub, ServerPub: sPub}
-	_, _, err = NewDialer(newTestCfg(), id).Dial(ln.Addr())
+	_, err = NewDialer(newTestCfg(), id).Dial(ln.Addr())
 	if err == nil {
 		t.Fatal("dial succeeded for unauthorized key; want handshake failure")
 	}
@@ -63,7 +63,7 @@ func TestWrongServerKeyRejected(t *testing.T) {
 
 	// Client aims at the wrong server key.
 	id := transport.ClientIdentity{Priv: cPriv, Pub: cPub, ServerPub: wrongServerPub}
-	if _, _, err := NewDialer(newTestCfg(), id).Dial(ln.Addr()); err == nil {
+	if _, err := NewDialer(newTestCfg(), id).Dial(ln.Addr()); err == nil {
 		t.Fatal("dial succeeded against wrong server key; want failure")
 	}
 }

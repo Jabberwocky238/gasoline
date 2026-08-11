@@ -10,6 +10,7 @@ import (
 
 	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol"
+	"github.com/jabberwocky238/gasoline/protocol/assign"
 	"github.com/jabberwocky238/gasoline/protocol/handshake"
 	"github.com/jabberwocky238/gasoline/protocol/noise"
 	"github.com/jabberwocky238/gasoline/transport"
@@ -39,27 +40,19 @@ type Operator struct {
 	state           *operatorState
 }
 
-// vniResolver is the per-VNI handshake.VNIResolver implementation
-// backed by an operator's vniEntry.
+// vniResolver is the per-VNI handshake.VNIResolver implementation backed by an
+// operator's vniEntry. It is AUTH-ONLY: operator key pair + authorization
+// check. IP assignment is not here — see localAllocator / package assign.
 type vniResolver struct {
 	vn         *vniEntry
-	cidr       netip.Prefix
 	staticPriv noise.PrivateKey
 	staticPub  noise.PublicKey
 }
 
-func (r *vniResolver) CIDR() netip.Prefix { return r.cidr }
 func (r *vniResolver) ServerStatic() (noise.PrivateKey, noise.PublicKey) {
 	return r.staticPriv, r.staticPub
 }
 func (r *vniResolver) Authorized(pubkey noise.PublicKey) bool { return r.vn.authorized(pubkey) }
-func (r *vniResolver) IP(cid protocol.CID_Ty) (netip.Addr, error) {
-	pfx, ok := r.vn.routingMap.LookupByCID(cid)
-	if !ok {
-		return netip.Addr{}, fmt.Errorf("no route assigned for cid %s", cid)
-	}
-	return pfx.Addr(), nil
-}
 
 func New(cfg *StaticOperatorConfig) (*Operator, error) {
 	logger := log.New()
@@ -84,14 +77,14 @@ func New(cfg *StaticOperatorConfig) (*Operator, error) {
 	}
 
 	// VNI registration + preset routes.
-	cidrs := make(map[protocol.VNI_Ty]netip.Prefix)
+	state.cidrs = make(map[protocol.VNI_Ty]netip.Prefix)
 	for vni, entry := range cfg.Network {
 		prefix, err := netip.ParsePrefix(entry.CIDR)
 		if err != nil {
 			root.Cancel()
 			return nil, fmt.Errorf("vni %s cidr %q: %w", vni, entry.CIDR, err)
 		}
-		cidrs[vni] = prefix
+		state.cidrs[vni] = prefix
 		state.registerVNI(vni, entry.AuthorizedKeys)
 		if len(entry.PresetCIDmap) > 0 {
 			vn, _ := state.vni(vni)
@@ -102,16 +95,17 @@ func New(cfg *StaticOperatorConfig) (*Operator, error) {
 		root.Log().Infof("VNet %s: %s (%d preset routes)", vni, prefix, len(entry.PresetCIDmap))
 	}
 
-	// One mapper closure shared by every listener.
+	// One mapper closure shared by every listener. The resolver is auth-only:
+	// operator key pair + authorization check. IP assignment is the allocator's
+	// job, run after the handshake.
 	mapper := func(vni protocol.VNI_Ty) (handshake.VNIResolver, error) {
 		state.mu.RLock()
 		vn, ok := state.vnets[vni]
-		cidr := cidrs[vni]
 		state.mu.RUnlock()
 		if !ok {
 			return nil, fmt.Errorf("no config for vni %s", vni)
 		}
-		return &vniResolver{vn: vn, cidr: cidr, staticPriv: state.staticPriv, staticPub: state.staticPub}, nil
+		return &vniResolver{vn: vn, staticPriv: state.staticPriv, staticPub: state.staticPub}, nil
 	}
 
 	if len(cfg.ClientListeners) == 0 {
@@ -249,7 +243,7 @@ func (o *Operator) routineAcceptClients(tp string, ln transport.Listener) {
 		default:
 		}
 
-		conn, sc, err := ln.Accept()
+		acc, err := ln.Accept()
 		if err != nil {
 			select {
 			case <-o.lctx.Done():
@@ -259,20 +253,30 @@ func (o *Operator) routineAcceptClients(tp string, ln transport.Listener) {
 				continue
 			}
 		}
-		if conn == nil || sc == nil {
+		if acc.Conn == nil {
 			return
 		}
 
-		cp := newPeerClient(conn, sc)
+		// Authentication is done (acc carries the identity + Session). Run the
+		// control-plane assignment (preclaim/claim/ack/confirm) to get an IP.
+		alloc := &localAllocator{state: o.state, cidrs: o.state.cidrs}
+		sc, err := assign.ServerAssign(acc.Conn, acc.Session, acc.VNI, acc.CID, acc.ClientPub, o.state.nextSessionIndex(), alloc)
+		if err != nil {
+			logger.Errorf("assign for cid %s on VNI %s: %v", acc.CID, acc.VNI, err)
+			_ = acc.Conn.Close()
+			continue
+		}
+
+		cp := newPeerClient(acc.Conn, sc)
 		vn, err := o.state.addClient(cp)
 		if err != nil {
 			logger.Errorf("attach cid %s sessionindex %d to VNI %s: %v", cp.sc.CID, cp.sc.SessionIndex, cp.sc.VNI, err)
-			_ = conn.Close()
+			_ = acc.Conn.Close()
 			continue
 		}
 
 		logger.Infof("cid %s sessionindex %d connected on VNI %s from %s",
-			cp.sc.CID, cp.sc.SessionIndex, cp.sc.VNI, conn.RemoteAddr())
+			cp.sc.CID, cp.sc.SessionIndex, cp.sc.VNI, acc.Conn.RemoteAddr())
 		go o.routineReadFromClient(cp, vn)
 	}
 }

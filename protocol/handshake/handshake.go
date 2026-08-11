@@ -1,202 +1,189 @@
-// Package handshake implements the gasoline v2 handshake: a Noise_IK exchange
-// that binds client identity (its static public key) to the assigned session.
-// There is no v1 fallback — the old HMAC/challenge model was removed.
+// Package handshake implements the gasoline AUTHENTICATION layer: a Noise_IK
+// exchange that binds client identity (its static public key) to a pair of
+// transport keys. Its sole product is a *noise.Session (the keypair).
 //
-// Wire flow (four framed messages, unchanged shape):
+// It does NOT allocate IPs, sessions, or any control-plane state. Address
+// assignment (preclaim/claim/ack/confirm) lives in package control and runs
+// AFTER the handshake, using the keypair this package returns.
 //
-//	ClientHello  { vni, cid, Label[NoiseInitiation]=msg1 }
-//	ServerHello  { Label[NoiseResponse]=msg2 }              or a fail code path
-//	ClientAnswer { empty }                                  Noise auth already done
-//	ServerAssign { code, sessionContext }
+// Three auth messages (all in this package):
 //
-// The server, on receiving msg1, recovers the client's static public key,
-// checks CID == DeriveCID(pubkey), and checks the key is authorized on the
-// VNI. All three failures return the same code with no distinguishing detail.
+//  1. ClientHello  { vni, cid, Label[NoiseInitiation]=msg1 }
+//  2. ServerHello  { Label[NoiseResponse]=msg2 }
+//  3. ClientAnswer { AEAD(send_key, ∅) }   key confirmation — proves the client
+//     holds its private key
+//
+// After message 3 both sides hold the keypair and the client is authenticated.
+// Identity binding: the server checks CID == DeriveCID(recovered pubkey) and
+// that the key is authorized; all auth failures return the same generic reject.
 package handshake
 
 import (
 	"fmt"
 	"io"
-	"net/netip"
-	"sync/atomic"
 
 	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/noise"
 )
 
+// VNIMapperFn resolves the per-VNI auth policy for a handshake.
 type VNIMapperFn func(protocol.VNI_Ty) (VNIResolver, error)
 
-// VNIResolver is the per-VNI policy the server consults during a handshake.
+// VNIResolver is the per-VNI policy the server consults DURING AUTHENTICATION.
+// It carries only what auth needs — the operator key pair and the key table.
+// IP assignment is not here; that is package control's concern.
 type VNIResolver interface {
-	// CIDR is the VNI's address range, echoed to the client as IPRanges.
-	CIDR() netip.Prefix
 	// ServerStatic returns the operator's static key pair for Noise.
 	ServerStatic() (noise.PrivateKey, noise.PublicKey)
 	// Authorized reports whether pubkey may join this VNI (key table lookup).
 	Authorized(pubkey noise.PublicKey) bool
-	// IP resolves the address assigned to a client identified by cid.
-	IP(cid protocol.CID_Ty) (netip.Addr, error)
 }
 
-var sessionIndexCounter atomic.Uint32
+// confirmCounter is the fixed nonce for the ClientAnswer key-confirmation frame.
+// The control plane starts its own nonce sequence from 0 on the same keys.
+const confirmCounter = 0
 
-func nextSessionIndex() uint32 { return sessionIndexCounter.Add(1) }
+// confirmAAD domain-separates the auth confirmation AEAD.
+var confirmAAD = []byte("gasoline-auth-confirm-v1")
 
-// ClientHandshake runs the client (initiator) side. It authenticates to a
-// server whose static public key is serverPub, using the client's own key
-// pair. On success it returns the assigned SessionContext and the derived
-// transport keys for the data plane.
+// ClientHandshake runs the client (initiator) authentication. It returns the
+// derived Session (keypair) on success; the caller then runs control-plane IP
+// assignment over the same rw.
 func ClientHandshake(
 	rw io.ReadWriter,
 	vni protocol.VNI_Ty,
 	clientPriv noise.PrivateKey,
 	clientPub noise.PublicKey,
 	serverPub noise.PublicKey,
-) (*protocol.SessionContext, noise.TransportKeys, error) {
-	cid := protocol.DeriveCID(clientPub)
-
+) (*noise.Session, error) {
 	initr := noise.NewInitiator(clientPriv, clientPub, serverPub)
 	msg1, err := initr.WriteInitiation(tai64n())
 	if err != nil {
-		return nil, noise.TransportKeys{}, fmt.Errorf("noise initiation: %w", err)
+		return nil, fmt.Errorf("noise initiation: %w", err)
 	}
-
-	hello := &ClientHello{
-		Version:     HandshakeVersion,
-		CryptoSuite: CryptoSuite_NoiseIK,
-		VNI:         vni,
-		CID:         cid,
-	}
+	hello := &ClientHello{Version: HandshakeVersion, CryptoSuite: CryptoSuite_NoiseIK, VNI: vni}
 	hello.Labels.Set(LabelKey_NoiseInitiation, msg1)
 	if err := hello.Encode(rw); err != nil {
-		return nil, noise.TransportKeys{}, fmt.Errorf("send ClientHello: %w", err)
+		return nil, fmt.Errorf("send ClientHello: %w", err)
 	}
 
 	var serverHello ServerHello
 	if err := serverHello.Decode(rw); err != nil {
-		return nil, noise.TransportKeys{}, fmt.Errorf("recv ServerHello: %w", err)
+		return nil, fmt.Errorf("recv ServerHello: %w", err)
 	}
 	if serverHello.Version != HandshakeVersion {
-		return nil, noise.TransportKeys{}, fmt.Errorf("version mismatch: got %d, want %d", serverHello.Version, HandshakeVersion)
+		return nil, fmt.Errorf("version mismatch: got %d, want %d", serverHello.Version, HandshakeVersion)
 	}
 	msg2, ok := serverHello.Labels.GetBytes(LabelKey_NoiseResponse)
 	if !ok {
-		return nil, noise.TransportKeys{}, fmt.Errorf("ServerHello missing noise response")
+		return nil, fmt.Errorf("ServerHello missing noise response (rejected)")
 	}
 	keys, err := initr.ReadResponse(msg2)
 	if err != nil {
-		return nil, noise.TransportKeys{}, fmt.Errorf("noise response: %w", err)
+		return nil, fmt.Errorf("noise response: %w", err)
 	}
 
-	// ClientAnswer carries no payload; Noise already authenticated both sides.
-	if err := (&ClientAnswer{}).Encode(rw); err != nil {
-		return nil, noise.TransportKeys{}, fmt.Errorf("send ClientAnswer: %w", err)
+	sess, err := noise.NewSession(keys, true /* initiator */)
+	if err != nil {
+		return nil, fmt.Errorf("session: %w", err)
 	}
 
-	var assign ServerAssign
-	if err := assign.Decode(rw); err != nil {
-		return nil, noise.TransportKeys{}, fmt.Errorf("recv ServerAssign: %w", err)
+	// Key confirmation: AEAD-seal an empty payload; the operator's decrypt
+	// proves we derived the correct key (we hold our private key).
+	ct, err := sess.SealAt(confirmCounter, nil, confirmAAD)
+	if err != nil {
+		return nil, fmt.Errorf("seal confirmation: %w", err)
 	}
-	if assign.Code != HandshakeOK {
-		return nil, noise.TransportKeys{}, fmt.Errorf("handshake rejected: code=%d", assign.Code)
+	if err := (&ClientAnswer{Ciphertext: ct}).Encode(rw); err != nil {
+		return nil, fmt.Errorf("send ClientAnswer: %w", err)
 	}
-	return assign.SessionContext, keys, nil
+	return sess, nil
 }
 
-// ServerHandshake runs the server (responder) side. resolver supplies the
-// operator's key pair, the authorization check, and IP assignment. On success
-// it returns the SessionContext, the client's static public key (its
-// identity), and the transport keys.
-func ServerHandshake(rw io.ReadWriter, resolver VNIMapperFn) (*protocol.SessionContext, noise.PublicKey, noise.TransportKeys, error) {
+// AuthResult is what a completed server-side authentication yields: the
+// client's declared VNI and CID (from ClientHello, now bound to its verified
+// identity), the recovered static public key, and the transport Session.
+type AuthResult struct {
+	VNI       protocol.VNI_Ty
+	CID       protocol.CID_Ty
+	ClientPub noise.PublicKey
+	Session   *noise.Session
+}
+
+// ServerHandshake runs the server (responder) authentication. On success it
+// returns the AuthResult. It performs NO address assignment — the caller runs
+// package assign next, over the same connection, using Session.
+func ServerHandshake(rw io.ReadWriter, resolver VNIMapperFn) (AuthResult, error) {
+	fail := func(format string, args ...any) (AuthResult, error) {
+		return AuthResult{}, fmt.Errorf(format, args...)
+	}
+
 	var hello ClientHello
 	if err := hello.Decode(rw); err != nil {
-		return nil, noise.PublicKey{}, noise.TransportKeys{}, fmt.Errorf("recv ClientHello: %w", err)
+		return fail("recv ClientHello: %w", err)
 	}
 	if hello.Version != HandshakeVersion {
-		return nil, noise.PublicKey{}, noise.TransportKeys{}, fmt.Errorf("version mismatch: got %d, want %d", hello.Version, HandshakeVersion)
+		return fail("version mismatch: got %d, want %d", hello.Version, HandshakeVersion)
 	}
 
 	vniResolved, err := resolver(hello.VNI)
 	if err != nil {
 		rejectAtHello(rw)
-		return nil, noise.PublicKey{}, noise.TransportKeys{}, fmt.Errorf("resolve vni %s: %w", hello.VNI, err)
+		return fail("resolve vni %s: %w", hello.VNI, err)
 	}
-
 	msg1, ok := hello.Labels.GetBytes(LabelKey_NoiseInitiation)
 	if !ok {
 		rejectAtHello(rw)
-		return nil, noise.PublicKey{}, noise.TransportKeys{}, fmt.Errorf("ClientHello missing noise initiation")
+		return fail("ClientHello missing noise initiation")
 	}
 
 	sPriv, sPub := vniResolved.ServerStatic()
 	respr := noise.NewResponder(sPriv, sPub)
 	clientPub, _, err := respr.ReadInitiation(msg1)
 	if err != nil {
-		// Decrypt failure: reject with the generic path (no distinguishing detail).
-		rejectAtHello(rw)
-		return nil, noise.PublicKey{}, noise.TransportKeys{}, fmt.Errorf("noise read initiation: %w", err)
+		rejectAtHello(rw) // decrypt failure — generic reject, no distinguishing detail
+		return fail("noise read initiation: %w", err)
 	}
-
-	// Identity binding: CID must be derived from the recovered public key.
-	if protocol.DeriveCID(clientPub) != hello.CID {
-		rejectAtHello(rw)
-		return nil, noise.PublicKey{}, noise.TransportKeys{}, fmt.Errorf("cid does not match pubkey")
-	}
-	// Authorization: the key must be granted on this VNI.
+	// Identity is the recovered public key; the CID is derived from it, never
+	// taken from the client. Authorization is a pure pubkey lookup.
 	if !vniResolved.Authorized(clientPub) {
 		rejectAtHello(rw)
-		return nil, noise.PublicKey{}, noise.TransportKeys{}, fmt.Errorf("pubkey not authorized on vni %s", hello.VNI)
+		return fail("pubkey not authorized on vni %s", hello.VNI)
 	}
 
 	msg2, keys, err := respr.WriteResponse()
 	if err != nil {
-		return nil, noise.PublicKey{}, noise.TransportKeys{}, fmt.Errorf("noise write response: %w", err)
+		return fail("noise write response: %w", err)
 	}
 	serverHello := &ServerHello{Version: HandshakeVersion, CryptoSuite: CryptoSuite_NoiseIK}
 	serverHello.Labels.Set(LabelKey_NoiseResponse, msg2)
 	if err := serverHello.Encode(rw); err != nil {
-		return nil, noise.PublicKey{}, noise.TransportKeys{}, fmt.Errorf("send ServerHello: %w", err)
+		return fail("send ServerHello: %w", err)
 	}
 
-	// Consume the empty ClientAnswer.
-	var answer ClientAnswer
-	if err := answer.Decode(rw); err != nil {
-		return nil, noise.PublicKey{}, noise.TransportKeys{}, fmt.Errorf("recv ClientAnswer: %w", err)
-	}
-
-	cip, err := vniResolved.IP(hello.CID)
+	sess, err := noise.NewSession(keys, false /* responder */)
 	if err != nil {
-		sendFail(rw, HandshakeNoRoute)
-		return nil, noise.PublicKey{}, noise.TransportKeys{}, fmt.Errorf("resolve route for cid %x: %w", hello.CID, err)
+		return fail("session: %w", err)
 	}
 
-	sc := &protocol.SessionContext{
-		CID:          hello.CID,
-		VNI:          hello.VNI,
-		SessionIndex: nextSessionIndex(),
-		IP:           cip,
-		IPRanges:     vniResolved.CIDR(),
+	// Key confirmation: the client's ClientAnswer must decrypt. Success proves
+	// it derived the correct key (holds its private key). Auth ends here.
+	var ca ClientAnswer
+	if err := ca.Decode(rw); err != nil {
+		return fail("recv ClientAnswer: %w", err)
 	}
-	assign := &ServerAssign{Code: HandshakeOK, SessionContext: sc}
-	if err := assign.Encode(rw); err != nil {
-		return nil, noise.PublicKey{}, noise.TransportKeys{}, fmt.Errorf("send ServerAssign: %w", err)
+	if _, err := sess.OpenAt(confirmCounter, ca.Ciphertext, confirmAAD, false); err != nil {
+		return fail("client answer did not authenticate: %w", err)
 	}
-	return sc, clientPub, keys, nil
+	return AuthResult{VNI: hello.VNI, CID: protocol.DeriveCID(clientPub), ClientPub: clientPub, Session: sess}, nil
 }
 
-// rejectAtHello rejects before the ServerHello step. The client is blocked
-// reading a ServerHello, so we send a ServerHello with no NoiseResponse label;
-// the client decodes it, finds the label missing, and errors out cleanly
-// rather than hanging. All pre-auth failures use this single path so no timing
-// or content distinguishes "bad key" from "unauthorized key".
-func rejectAtHello(rw io.ReadWriter) {
+// rejectAtHello rejects before ServerHello. The client is blocked reading a
+// ServerHello, so we send one with no NoiseResponse label; the client decodes
+// it, finds the label missing, and errors out cleanly rather than hanging. All
+// pre-auth failures use this single path — no timing or content distinguishes
+// "bad key" from "unauthorized key".
+func rejectAtHello(rw io.Writer) {
 	sh := &ServerHello{Version: HandshakeVersion, CryptoSuite: CryptoSuite_NoiseIK}
 	_ = sh.Encode(rw)
-}
-
-// sendFail rejects after ServerHello, where the client is waiting for a
-// ServerAssign (e.g. no route). Body is a zero SessionContext + fail code.
-func sendFail(w io.Writer, code HandshakeCode) {
-	fail := &ServerAssign{Code: code, SessionContext: &protocol.SessionContext{}}
-	_ = fail.Encode(w)
 }

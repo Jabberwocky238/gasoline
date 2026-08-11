@@ -77,25 +77,26 @@ func TestUDPHandshakeAndPacket(t *testing.T) {
 
 	var wg sync.WaitGroup
 	var serverConn *Conn
-	var serverSession *protocol.SessionContext
 	var serverErr error
 
+	var serverCID protocol.CID_Ty
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		c, sc, e := ln.Accept()
+		acc, e := ln.Accept()
 		if e != nil {
 			serverErr = e
 			return
 		}
-		serverConn = c.(*Conn)
-		serverSession = sc
+		serverConn = acc.Conn.(*Conn)
+		serverCID = acc.CID
 	}()
 
-	clientConn, clientSession, err := dialer.Dial(addr)
+	dialed, err := dialer.Dial(addr)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
+	clientConn := dialed.Conn
 	defer clientConn.Close()
 
 	wg.Wait()
@@ -103,11 +104,10 @@ func TestUDPHandshakeAndPacket(t *testing.T) {
 		t.Fatalf("Accept: %v", serverErr)
 	}
 
-	if clientSession.CID != cid {
-		t.Errorf("client CID mismatch")
-	}
-	if serverSession.CID != cid {
-		t.Errorf("server got wrong client CID")
+	// The server derives the CID from the authenticated public key; it must
+	// equal what the client derives from the same key.
+	if serverCID != cid {
+		t.Errorf("server-derived CID %v != expected %v", serverCID, cid)
 	}
 
 	testPacket := []byte{
@@ -184,18 +184,19 @@ func TestUDPMultiplePackets(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		c, _, e := ln.Accept()
+		acc, e := ln.Accept()
 		if e != nil {
 			t.Errorf("Accept: %v", e)
 			return
 		}
-		sConn = c.(*Conn)
+		sConn = acc.Conn.(*Conn)
 	}()
 
-	cConn, _, err := dialer.Dial(ln.Addr())
+	dialed, err := dialer.Dial(ln.Addr())
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
+	cConn := dialed.Conn
 	defer cConn.Close()
 	wg.Wait()
 
@@ -259,13 +260,13 @@ func TestUDPMultipleClients(t *testing.T) {
 	wg.Add(numClients)
 	go func() {
 		for i := 0; i < numClients; i++ {
-			c, _, e := ln.Accept()
+			acc, e := ln.Accept()
 			if e != nil {
 				t.Errorf("Accept %d: %v", i, e)
 				wg.Done()
 				continue
 			}
-			serverConns[i] = c
+			serverConns[i] = acc.Conn
 			wg.Done()
 		}
 	}()
@@ -273,11 +274,11 @@ func TestUDPMultipleClients(t *testing.T) {
 	clientConns := make([]interface{}, numClients)
 	for i := 0; i < numClients; i++ {
 		d := NewDialer(newTestCfg(), ids[i])
-		c, _, err := d.Dial(addr)
+		dialed, err := d.Dial(addr)
 		if err != nil {
 			t.Fatalf("Dial %d: %v", i, err)
 		}
-		clientConns[i] = c
+		clientConns[i] = dialed.Conn
 	}
 
 	wg.Wait()

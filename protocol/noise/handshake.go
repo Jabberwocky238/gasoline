@@ -33,6 +33,19 @@ type TransportKeys struct {
 	Recv [hashSize]byte
 }
 
+// Seal encrypts plaintext for sending under Send with the given counter.
+// The caller owns counter uniqueness — a counter must never repeat under one
+// key. Used by the control plane (post-handshake config frames) and, later,
+// the data plane.
+func (k TransportKeys) Seal(counter uint64, plaintext, aad []byte) ([]byte, error) {
+	return seal(k.Send, counter, plaintext, aad)
+}
+
+// Open decrypts ciphertext received under Recv with the given counter.
+func (k TransportKeys) Open(counter uint64, ciphertext, aad []byte) ([]byte, error) {
+	return open(k.Recv, counter, ciphertext, aad)
+}
+
 // Initiator drives the client side of Noise_IK. Construct with NewInitiator,
 // call WriteInitiation to produce msg1, then ReadResponse(msg2) to finish.
 type Initiator struct {

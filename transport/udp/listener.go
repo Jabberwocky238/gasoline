@@ -7,7 +7,6 @@ import (
 	"sync/atomic"
 
 	"github.com/jabberwocky238/gasoline/common"
-	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/handshake"
 	"github.com/jabberwocky238/gasoline/transport"
 )
@@ -36,8 +35,7 @@ type virtualPeer struct {
 }
 
 type acceptResult struct {
-	conn    transport.Conn
-	session *protocol.SessionContext
+	accepted transport.Accepted
 }
 
 func NewListener(addr string, mapper handshake.VNIMapperFn) (*Listener, error) {
@@ -120,7 +118,7 @@ func (l *Listener) readLoop() {
 // On failure, cleans up the peer entry.
 func (l *Listener) handshakePeer(vp *virtualPeer, key netip.AddrPort) {
 	adapter := newVirtualStreamAdapter(l.rawConn, vp.remoteAddr, vp.incoming)
-	sc, _, _, err := handshake.ServerHandshake(adapter, l.mapper)
+	auth, err := handshake.ServerHandshake(adapter, l.mapper)
 	if err != nil {
 		l.peers.Write(func(m *map[netip.AddrPort]*virtualPeer) {
 			delete(*m, key)
@@ -133,15 +131,17 @@ func (l *Listener) handshakePeer(vp *virtualPeer, key netip.AddrPort) {
 	conn.incoming = vp.incoming
 	vp.conn = conn
 
-	l.acceptCh <- acceptResult{conn: conn, session: sc}
+	l.acceptCh <- acceptResult{accepted: transport.Accepted{
+		Conn: conn, VNI: auth.VNI, CID: auth.CID, ClientPub: auth.ClientPub, Session: auth.Session,
+	}}
 }
 
-func (l *Listener) Accept() (transport.Conn, *protocol.SessionContext, error) {
+func (l *Listener) Accept() (transport.Accepted, error) {
 	res, ok := <-l.acceptCh
 	if !ok {
-		return nil, nil, fmt.Errorf("listener closed")
+		return transport.Accepted{}, fmt.Errorf("listener closed")
 	}
-	return res.conn, res.session, nil
+	return res.accepted, nil
 }
 
 func (l *Listener) Close() error {

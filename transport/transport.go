@@ -38,14 +38,34 @@ type Conn interface {
 	LastActive() time.Time
 }
 
-// Dialer creates outbound connections with handshake.
-type Dialer interface {
-	Dial(endpoint string) (Conn, *protocol.SessionContext, error)
+// Accepted is what a Listener yields per inbound connection: the packet conn
+// plus the AUTHENTICATION product (the client's identity key and the derived
+// Noise session). IP/session assignment is NOT here — the caller runs the
+// control plane (package control) over Conn using Session to produce a
+// protocol.SessionContext.
+type Accepted struct {
+	Conn      Conn
+	VNI       protocol.VNI_Ty
+	CID       protocol.CID_Ty
+	ClientPub noise.PublicKey
+	Session   *noise.Session
 }
 
-// Listener accepts inbound connections with handshake.
+// Dialed is the client-side counterpart: the conn plus the authenticated
+// session. The caller then runs the control-plane exchange to learn its IP.
+type Dialed struct {
+	Conn    Conn
+	Session *noise.Session
+}
+
+// Dialer creates outbound connections and authenticates (handshake only).
+type Dialer interface {
+	Dial(endpoint string) (Dialed, error)
+}
+
+// Listener accepts inbound connections and authenticates (handshake only).
 type Listener interface {
-	Accept() (Conn, *protocol.SessionContext, error)
+	Accept() (Accepted, error)
 	Close() error
 	Addr() string
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/jabberwocky238/gasoline/cmd/operator/device"
 	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol"
+	"github.com/jabberwocky238/gasoline/protocol/assign"
 	"github.com/jabberwocky238/gasoline/protocol/noise"
 	"github.com/jabberwocky238/gasoline/transport"
 	"github.com/sirupsen/logrus"
@@ -50,6 +51,23 @@ func (s *benchSetup) idA() transport.ClientIdentity {
 }
 func (s *benchSetup) idB() transport.ClientIdentity {
 	return transport.ClientIdentity{Priv: s.privB, Pub: s.pubB, ServerPub: s.serverPub}
+}
+
+// dialAndAssign dials the given dialer, then runs the client-side control-plane
+// assignment against the operator (whose accept loop runs the server side).
+// Returns the data-plane conn and the assigned SessionContext.
+func dialAndAssign(t *testing.T, d transport.Dialer, endpoint string, id transport.ClientIdentity, vni protocol.VNI_Ty) (transport.Conn, *protocol.SessionContext) {
+	t.Helper()
+	dialed, err := d.Dial(endpoint)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	cid := protocol.DeriveCID(id.Pub)
+	sc, err := assign.ClientAssign(dialed.Conn, dialed.Session, vni, cid)
+	if err != nil {
+		t.Fatalf("assign: %v", err)
+	}
+	return dialed.Conn, sc
 }
 
 // startBenchOperators spins up two paired operators: opA owns cidA,

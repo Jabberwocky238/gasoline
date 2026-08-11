@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"os"
@@ -24,6 +25,7 @@ func main() {
 	}
 	collect(ParamOpListen, "VXLAN UDP data-plane bind address (default 0.0.0.0:6677)")
 	collect(ParamLogLevel, "log level: trace, debug, info, warn, error (default info)")
+	collect(ParamKey, "operator static private key, base64 (generated if unset)")
 	collect(ParamListen, "client listener '<schema>://<addr>' (repeatable; default quic://:8443)")
 	collect(ParamNetwork, "vnet entry '<vni>:<cidr>[:<pubkey_b64>,...]' (repeatable; default 0:10.0.0.0/24)")
 	collect(ParamPreset, "preset cid->prefix '<vni>:<cid-hex>:<prefix>' (repeatable)")
@@ -63,7 +65,13 @@ func main() {
 		log.Fatalf("ipc start: %v", err)
 	}
 
+	// Clients encrypt their Noise_IK initiation to this key and must be
+	// configured with it out of band (-server-pub), so it has to be
+	// discoverable — especially when it was generated rather than
+	// supplied via -key.
+	staticPub := op.StaticPub()
 	log.Infof("Operator %x started; ipc on %s", op.UUID(), ipc.Path())
+	log.Infof("Operator static public key: %s", base64.StdEncoding.EncodeToString(staticPub[:]))
 	waitForSignal()
 
 	_ = ipc.Close()

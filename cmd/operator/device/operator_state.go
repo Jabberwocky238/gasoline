@@ -4,11 +4,15 @@ import (
 	"fmt"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 
 	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/noise"
 )
+
+// nextSessionIndex issues a fresh per-session index.
+func (s *operatorState) nextSessionIndex() uint32 { return s.sessionIndexSeq.Add(1) }
 
 type Ctrl interface {
 	Start() error
@@ -37,6 +41,13 @@ type operatorState struct {
 	// Noise static key pair for the operator (responder side of handshakes).
 	staticPriv noise.PrivateKey
 	staticPub  noise.PublicKey
+
+	// cidrs maps VNI -> its CIDR, populated at construction. Used by the
+	// assign allocator to report IPRanges to clients.
+	cidrs map[protocol.VNI_Ty]netip.Prefix
+
+	// sessionIndexSeq issues per-session indices used in packet headers.
+	sessionIndexSeq atomic.Uint32
 
 	subMu  sync.Mutex
 	subs   []ClientEventFn

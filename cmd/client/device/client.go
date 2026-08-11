@@ -18,6 +18,8 @@ import (
 
 	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol"
+	"github.com/jabberwocky238/gasoline/protocol/assign"
+	"github.com/jabberwocky238/gasoline/protocol/noise"
 	"github.com/jabberwocky238/gasoline/transport"
 	transportQuic "github.com/jabberwocky238/gasoline/transport/quic"
 	_ "github.com/jabberwocky238/gasoline/transport/udp" // self-registers
@@ -36,6 +38,7 @@ type Client struct {
 	// non-nil between Start and Close
 	sessionCtx *protocol.SessionContext
 	conn       transport.Conn
+	session    *noise.Session // data-plane keys from the handshake
 	keepalive  *Keepalive
 	tun        *tun.Tun
 
@@ -111,11 +114,20 @@ func (c *Client) dialLocked() (protocol.SessionContext, error) {
 	if c.conn != nil && c.sessionCtx != nil {
 		return c.sessionCtx.Copy(), nil
 	}
-	conn, sc, err := c.dialer.Dial(c.cfg.Endpoint)
+	// Authenticate (handshake), then run the control-plane assignment to learn
+	// our IP. Identity is our static key; the CID is derived from it.
+	dialed, err := c.dialer.Dial(c.cfg.Endpoint)
 	if err != nil {
 		return protocol.SessionContext{}, fmt.Errorf("dial: %w", err)
 	}
-	c.conn = conn
+	cid := protocol.DeriveCID(c.cfg.Pub)
+	sc, err := assign.ClientAssign(dialed.Conn, dialed.Session, c.cfg.VNI, cid)
+	if err != nil {
+		_ = dialed.Conn.Close()
+		return protocol.SessionContext{}, fmt.Errorf("assign: %w", err)
+	}
+	c.conn = dialed.Conn
+	c.session = dialed.Session
 	c.sessionCtx = sc
 	c.lctx.Log().Infof("connected to %s; assigned %s in %s",
 		c.cfg.Endpoint, sc.IP, sc.IPRanges)

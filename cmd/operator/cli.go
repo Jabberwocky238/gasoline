@@ -17,12 +17,14 @@ import (
 //
 //	op-listen   single-valued, host:port for the VXLAN UDP bind address
 //	log-level   single-valued, trace|debug|info|warn|error
+//	key         single-valued, operator static private key (base64); generated if empty
 //	listen      repeatable,    '<schema>://<addr>' client listener
 //	network     repeatable,    '<vni>:<cidr>[:<pubkey_b64>,...]' vnet entry
 //	preset      repeatable,    '<vni>:<cid-hex>:<prefix>' preassigned cid->prefix
 const (
 	ParamOpListen = "op-listen"
 	ParamLogLevel = "log-level"
+	ParamKey      = "key" // operator static private key (base64); generated if empty
 	ParamListen   = "listen"
 	ParamNetwork  = "network"
 	ParamPreset   = "preset"
@@ -35,7 +37,7 @@ const (
 func RegisterOperatorCLIParam(params map[string][]string) (*operator.StaticOperatorConfig, error) {
 	for k := range params {
 		switch k {
-		case ParamOpListen, ParamLogLevel, ParamListen, ParamNetwork, ParamPreset:
+		case ParamOpListen, ParamLogLevel, ParamKey, ParamListen, ParamNetwork, ParamPreset:
 		default:
 			return nil, fmt.Errorf("unknown parameter %q", k)
 		}
@@ -43,6 +45,21 @@ func RegisterOperatorCLIParam(params map[string][]string) (*operator.StaticOpera
 
 	opListen := lastOr(params[ParamOpListen], "0.0.0.0:6677")
 	logLevel := lastOr(params[ParamLogLevel], "info")
+
+	// A persistent identity must be supplied: clients encrypt their
+	// Noise_IK initiation to this key, so regenerating it on every
+	// restart invalidates every client's configuration.
+	var staticPriv noise.PrivateKey
+	if s := strings.TrimSpace(lastOr(params[ParamKey], "")); s != "" {
+		b, err := base64.StdEncoding.DecodeString(s)
+		if err != nil {
+			return nil, fmt.Errorf("key: invalid base64: %w", err)
+		}
+		staticPriv, err = noise.PrivateKeyFromSlice(b)
+		if err != nil {
+			return nil, fmt.Errorf("key: %w", err)
+		}
+	}
 
 	listens := params[ParamListen]
 	if len(listens) == 0 {
@@ -54,7 +71,8 @@ func RegisterOperatorCLIParam(params map[string][]string) (*operator.StaticOpera
 	}
 
 	cfg := &operator.StaticOperatorConfig{
-		Network: make(map[protocol.VNI_Ty]operator.StaticOperatorVNetConfig),
+		Network:    make(map[protocol.VNI_Ty]operator.StaticOperatorVNetConfig),
+		StaticPriv: staticPriv,
 	}
 
 	for _, raw := range listens {

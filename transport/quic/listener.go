@@ -6,7 +6,6 @@ import (
 
 	"github.com/quic-go/quic-go"
 
-	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/handshake"
 	"github.com/jabberwocky238/gasoline/transport"
 )
@@ -24,23 +23,25 @@ func NewListener(addr string, mapper handshake.VNIMapperFn, tlsConf *tls.Config)
 	return &Listener{inner: ln, mapper: mapper}, nil
 }
 
-func (l *Listener) Accept() (transport.Conn, *protocol.SessionContext, error) {
+func (l *Listener) Accept() (transport.Accepted, error) {
 	conn, err := l.inner.Accept(context.Background())
 	if err != nil {
-		return nil, nil, err
+		return transport.Accepted{}, err
 	}
 	stream, err := conn.AcceptStream(context.Background())
 	if err != nil {
 		conn.CloseWithError(0, "stream accept failed")
-		return nil, nil, err
+		return transport.Accepted{}, err
 	}
 
-	sc, _, _, err := handshake.ServerHandshake(stream, l.mapper)
+	auth, err := handshake.ServerHandshake(stream, l.mapper)
 	if err != nil {
 		conn.CloseWithError(0, "handshake failed")
-		return nil, nil, err
+		return transport.Accepted{}, err
 	}
-	return newConn(stream, conn.RemoteAddr().String()), sc, nil
+	return transport.Accepted{
+		Conn: newConn(stream, conn.RemoteAddr().String()), VNI: auth.VNI, CID: auth.CID, ClientPub: auth.ClientPub, Session: auth.Session,
+	}, nil
 }
 
 func (l *Listener) Close() error { return l.inner.Close() }

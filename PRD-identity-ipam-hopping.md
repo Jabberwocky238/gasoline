@@ -384,19 +384,27 @@ UDP listener 现以 `netip.AddrPort` 为键索引 `virtualPeer`（`udp/listener.
 
 **这一节是全篇的地基，前两版 PRD 在此处的设计是错的，现予推翻并说明原因。**
 
-#### 5.4.1 唯一的正确抽象
+#### 5.4.1 两条正交的原则
 
-每个数据面帧自带 `SessionTag(6)` + `DstTag(6)` + AEAD tag。凭这三样，**任何 operator、在任何端口、收到任何来源地址的包，都能独立完成**：
+**订正（第三轮）**：本节前一版把两件正交的事糊成了一件，并错误地拔高成 zerotrust。现拆开：
 
-- **这是谁的包** → 查 `SessionTag`（本地 Raft 副本人人都有）
-- **是不是伪造的** → AEAD tag 校验（伪造者无密钥则必然失败）
-- **该送给谁** → 查 `DstTag`
+**原则一：会话 ≠ 连接。** 会话是逻辑概念（一个 CE 的身份 + 租约 + 密钥），不绑定任何一条具体的传输连接。一个 CE 在其会话生命周期内可以换端口、换 server、换 QUIC 连接，会话不变。这一条**正确，保留**——它是端口跳跃 / 多 IP 跳跃的地基。
 
-**这三件事全部由报文自身承载，不需要任何连接状态。** 因此：
+**原则二：加密是逐跳的（WireGuard 模型），PE 解密。** 用 PE/CE 术语（同 MPLS-VPN）：
 
-> **会话（session）是报文层的概念，传输层不承载会话身份。**
+- **CE = client，PE = operator。**
+- 加密隧道建立在 **CE↔PE**（一对 Noise 密钥），以及 **PE↔PE**（underlay）之间——**不是** CE↔CE 端到端穿透 PE。
+- **PE 是隧道端点，它解密**：收到 CE 的帧 → 解密得到明文 IP 包 → 按明文 dst IP 查 `routingMap`（Raft 全局表：IP → CE → 当前接入 PE）→ 命中本地 CE 直接发，命中远端 PE 就封 `MessageTransport` 转发过去 → 目标 PE 重新加密发给目标 CE。
 
-UDP 与 QUIC 的区别仅在于**字节怎么送达**（一个无状态数据报、一个有状态可靠流），而不在于**这些字节属于谁**。既然会话认同与传输无关，**UDP 具备的一切特性 QUIC 必须同样具备，且实现路径应当一致**。
+这与 WireGuard 的接收路径完全一致（解密 → 按 AllowedIPs 路由 → 写 TUN），也与现有 `forwardFrame` 的 `RouteTargetClient` / `RouteTargetOperator` 两分支完全吻合。
+
+**为什么不做 zerotrust（PE 不解密）**：
+
+1. **路由不需要它**。PE 解密后就能看到明文 dst IP，`routingMap` 用 IP 做键即可定位目标 CE 挂在哪个 PE——不需要 `SessionTag`/`DstTag` 这类明文标签。IP 本身就是路由键。
+2. **握手 RTT 会飞起来**。zerotrust 要 CE↔CE 端到端加密，CE-A 发给 CE-B 前得先跨 PE 做一次 CE↔CE 密钥协商（拿对端公钥、跑 Noise），这是**额外的跨 PE 往返**。逐跳模型里每个 CE 只跟自己的 PE 握一次手，PE 间走已建好的 underlay，**零额外 RTT**。
+3. **管理困难**。PE 看不到内容就无法做集中的路由 / 策略 / 观测。
+
+**因此：`SessionTag` / `DstTag` / 明文标签路由 / "PE 不解密" 全部作废。** 数据面加密（§7）是逐跳 AEAD，PE 解密后按 IP 路由。
 
 #### 5.4.2 前两版错在哪里
 
@@ -408,38 +416,35 @@ UDP 与 QUIC 的区别仅在于**字节怎么送达**（一个无状态数据报
 
 **这一整条推理链的前提就是错的。** 它在努力保护一个本不该存在的绑定：QUIC 连接与会话身份的绑定。一旦解除这个绑定，上述三个问题**全部自动消失**——不是被解决，是根本不产生。
 
-#### 5.4.3 正确设计：QUIC 连接是可丢弃的字节管道
+#### 5.4.3 跳跃的正确实现：跳跃后由新接入 PE 更新 Raft 路由表
+
+会话跟着 CE 走，靠的**不是**明文标签让 PE 无脑转发，而是：**CE 跳到新 PE 后，新 PE 把"这个 CE 的 IP 现在挂我这"提交进 Raft 路由表,全集群立即知道。**
 
 ```
-会话（Raft 中的 sessionEntry，全集群一致，生命周期 = 租约）
-  │
-  │  一个会话在其生命周期内可以使用任意多条 QUIC 连接，
-  │  连接随时可建可弃，不影响会话
-  ↓
-QUIC 连接 A (:20000)   QUIC 连接 B (:20031)   QUIC 连接 C (5.6.7.8:20007)
-  └─ 纯字节管道         └─ 纯字节管道          └─ 另一台机器上的管道
+CE-B 原挂 PE-C     routingMap: 10.0.0.5 → CE-B @ PE-C
+   ↓ CE-B 跳到 PE-D
+PE-D 收到 CE-B 帧 → 解密 → 提交 Raft SessionMigrate: 10.0.0.5 → CE-B @ PE-D
+   ↓ Raft 全集群同步
+此后任一 PE 查 routingMap[10.0.0.5] 都指向 PE-D → 转发正确
 ```
 
-**具体行为**：
-
-- 客户端跳到新的 `(IP, 端口)` 时，**就地建一条新的 QUIC 连接**（或复用已有的），把帧照常发出去。不做 QUIC 连接迁移，不需要保住旧连接。
-- 服务端任意 operator 的任意端口收到帧后，**剥掉 QUIC 这层，拿到帧，按 `SessionTag` 处理**——与它从 UDP socket 上收到这个帧完全没有区别。
-- **不需要** DCID 路由层、`ConnectionIDGenerator`、ownerTag、跨机转发。取消上一版 §6.2bis 的全部机制。
-- QUIC 握手（TLS）开销由客户端**预热**消化：对配置中的每个 server 预先建立并保持一条 QUIC 连接（keepalive 维持），跳跃时直接切换到已就绪的连接，切换本身零延迟。
+- **IP 始终是路由键**，变的只是"该 IP 对应的 CE 当前接入哪个 PE"（`sessionEntry.LastOperator`）。
+- 跳跃 = 提交一条 `SessionMigrate`（§2.6 批处理：不必每包提交，接入点**变化**时提交一次）。
+- `LastOperator` 因此**不是纯观测字段,而是路由决策的一部分**：`routingMap` 的 `RouteTargetOperator` 分支指向 `LastOperator`（订正前一版把它标为"纯观测"的说法）。
+- QUIC 侧：跳到新 `(IP,端口)` 就地建/复用一条 QUIC 连接把帧发出去，PE-D 解密后照上面流程更新路由。QUIC 连接是可丢弃的字节管道，不做连接迁移。握手开销由客户端对每个 server 预热一条连接消化。
 
 #### 5.4.4 由此得到的对称性
 
 | | UDP | QUIC |
 |---|---|---|
-| 会话标识 | `SessionTag`（报文层） | `SessionTag`（报文层）**完全相同** |
+| 会话标识 | overlay IP（路由键） | overlay IP（路由键）**完全相同** |
 | 跳端口 | 换目的端口发包 | 切到该端口的连接 |
 | 跳 IP | 换目的 IP 发包 | 切到该 IP 的连接 |
-| 谁能处理 | **任意 operator 本地处理** | **任意 operator 本地处理** |
-| 额外跳数 | 0 | **0** |
-| operator 崩溃 | 会话不受影响 | **会话不受影响**（连接可弃，重建即可） |
+| 跳跃后定位 | 新 PE 提交 `SessionMigrate` 更新 Raft 路由 | **完全相同** |
+| operator 崩溃 | 会话不受影响（CE 重连别的 PE，新 PE 更新路由） | **完全相同** |
 | 序列推导 | §5.1 算法 | §5.1 算法，**同一份代码** |
 
-**两种传输在会话语义上完全对等，没有任何特例。** 差异只剩传输本身的固有属性：QUIC 提供可靠有序与拥塞控制（并因此每条连接有建立开销），UDP 无连接开销但需自行处理丢包（由上层 TCP 负责）。
+**两种传输在会话语义上完全对等。** 差异只剩传输本身的固有属性：QUIC 提供可靠有序与拥塞控制（每条连接有建立开销），UDP 无连接开销但需自行处理丢包。
 
 #### 5.4.5 代价与取舍
 
@@ -451,41 +456,19 @@ QUIC 连接 A (:20000)   QUIC 连接 B (:20031)   QUIC 连接 C (5.6.7.8:20007)
 
 ## 6. G4：多 server 跳跃
 
-### 6.1 G0 让这件事变得简单
+### 6.1 G0 让这件事简单：PE 解密后按 IP 路由 + 跳跃更新 Raft
 
-在没有共识层的方案里，G4 是最难的一项（收包的 operator 对会话一无所知，需要转发到宿主）。**有了 G0，它几乎是免费的**：
+WireGuard 逐跳模型（§5.4.1 原则二）下，多 server 跳跃是这样的：
 
-每个 operator 都持有全部 session 的完整副本（SessionID、PubKey、IP、HopSecret、租约）。任意 operator 收到任意会话的包，都能：
+1. CE 跳到某个 PE，把帧发过去。
+2. 该 PE **解密**得到明文 IP 包，按明文 dst IP 查本地 `routingMap`（Raft 全局表）：
+   - 目标 CE 挂在**本 PE** → 直接重新加密发给它；
+   - 目标 CE 挂在**远端 PE** → 封 `MessageTransport` 走 underlay 转发过去，目标 PE 再加密发给目标 CE。
+3. 若这次跳跃改变了**源 CE** 的接入点，收包 PE 提交一条 `SessionMigrate` 更新 `routingMap[srcIP] → 源CE @ 本PE`（§5.4.3），全集群同步。
 
-1. 用 `SessionTag` 查本地 FSM → 命中，得知这是哪个会话、对应哪个 overlay IP；
-2. 用本地 `routingMap` 按目的 IP 转发 → 与宿主 operator 的行为完全一致。
+**不需要转发到宿主、不需要 SessionBind 广播、不存在"宿主故障"** —— 任一 PE 都能独立解密并路由，跳跃只是让路由表指向新接入点。这正是强一致 + 逐跳解密的核心收益。
 
-**不需要转发到宿主，不需要 SessionBind 广播，不存在"宿主故障"这一概念。** 这正是你选择强一致的核心收益。
-
-### 6.1bis G5 带来的约束：operator 不能解密
-
-引入端到端加密后，上面第 2 步有一个前提问题：**operator 拿不到传输密钥，它看不见密文里的目的 IP，怎么按 IP 转发？**
-
-这是 G4 与 G5 的真实冲突，必须明确解决。方案：**把路由所需的最小信息放在密文之外**。
-
-```
-frame = SessionTag(6) || Counter(8) || AEAD密文(加密的完整 IP 包)
-         └─ 明文，用于查会话 → 得知源会话
-```
-
-- **上行**（客户端 → operator）：operator 由 `SessionTag` 确定**源**会话；目的地则由密文内的 IP 决定，operator 看不到。
-- 因此 operator 必须能在不解密的前提下知道往哪送。解法是 `SessionTag` 之后**再附一个明文的目的标识**：
-
-```
-frame = SessionTag(6) || DstTag(6) || Counter(8) || AEAD密文
-                        └─ 目的会话的 SessionTag，由客户端填写
-```
-
-客户端在发包前用本地 ARP/路由表把目的 overlay IP 解析为对端的 `SessionTag`（该映射由 operator 经 `DataCtrlPeerAdvertise` 下发——**这条消息已实现编解码但目前无人发送**，§4.3 同款情况）。operator 只需 `DstTag → 会话 → 当前接入 operator`，纯查表转发，全程不解密。
-
-**代价与收益**：每包多 6 字节（总开销见 §7.6 更新）。收益是 operator 彻底退化为"加密信封的邮差"——它知道谁发给谁，但读不到内容。这正是 `ARCHETECT.md` 里"operator 和链路层永远无法知道内部信息"那条零信任目标的落地。
-
-**副作用**：广播/组播（如 ARP 广播）无法用单一 `DstTag` 表达。本期做法是保留一个全零 `DstTag` 表示"广播给同 VNI 所有会话"，由 operator 复制分发；密文仍只有目标能解开（需为广播额外协商组密钥，**本期不做，广播帧走明文**，仅限 ARP 这类不含用户数据的控制流量）。
+（前一版 §6.1bis 设计的 `SessionTag`/`DstTag`/"PE 不解密" zerotrust 机制**已整体作废**，见 §5.4.1 订正。）
 
 ### 6.2 配置与下发
 

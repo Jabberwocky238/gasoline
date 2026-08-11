@@ -21,22 +21,22 @@ func NewDialer(cfg protocol.PresetSessionConfig, id transport.ClientIdentity, tl
 	return &Dialer{cfg: cfg, id: id, tlsConf: tlsConf}
 }
 
-func (d *Dialer) Dial(endpoint string) (transport.Conn, *protocol.SessionContext, error) {
+func (d *Dialer) Dial(endpoint string) (transport.Dialed, error) {
 	conn, err := quic.DialAddr(context.Background(), endpoint, d.tlsConf, nil)
 	if err != nil {
-		return nil, nil, err
+		return transport.Dialed{}, err
 	}
 	stream, err := conn.OpenStreamSync(context.Background())
 	if err != nil {
 		conn.CloseWithError(0, "stream open failed")
-		return nil, nil, err
+		return transport.Dialed{}, err
 	}
 
-	sc, _, err := handshake.ClientHandshake(stream, d.cfg.VNI, d.id.Priv, d.id.Pub, d.id.ServerPub)
+	sess, err := handshake.ClientHandshake(stream, d.cfg.VNI, d.id.Priv, d.id.Pub, d.id.ServerPub)
 	if err != nil {
 		conn.CloseWithError(0, "handshake failed")
-		return nil, nil, err
+		return transport.Dialed{}, err
 	}
 
-	return newConn(stream, conn.RemoteAddr().String()), sc, nil
+	return transport.Dialed{Conn: newConn(stream, conn.RemoteAddr().String()), Session: sess}, nil
 }

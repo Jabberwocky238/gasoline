@@ -101,8 +101,10 @@ type sessionEntry struct {
     HopSecret   [32]byte        // 端口跳跃推导用（可被任意 operator 读取）
     LastTimestamp [12]byte      // Noise 防重放：该公钥见过的最大 TAI64N
 
-    // 注意：数据面传输密钥（send_key/recv_key）**不在此处**——
-    // 它由 Noise 握手在两端本地派生，不进 Raft，operator 无法解密（§7.2）
+    // 数据面传输密钥：Noise 握手派生后随 SessionCreate 写入 Raft（§7.2）。
+    // 任意 operator 凭它加解密该会话的帧——这是多 server 跳跃的前提（逐跳模型，§5.4.1）
+    C2SKey [32]byte         // 客户端→operator 方向
+    S2CKey [32]byte         // operator→客户端 方向
 
     // 哪个密钥在哪个接入点最近接入
     LastOperator [16]byte       // 最近服务它的 operator UUID
@@ -121,7 +123,7 @@ type sessionEntry struct {
 ClientHello(Noise msg1)
   ↓  ← 服务端解密 msg1 得客户端静态公钥，校验 CID 与授权
 ServerHello(Noise msg2)
-  ↓  ← 至此双方已各自派生 send_key / recv_key（不进 Raft）
+  ↓  ← 至此双方已各自派生 send_key / recv_key
 ClientAnswer(空载荷)
   ↓  ← 服务端在此处做唯一一次 Raft 写入：
      Apply(SessionCreate{
@@ -129,6 +131,7 @@ ClientAnswer(空载荷)
         ip:        <本地预选，见下>,
         sessionID: <本地生成>,
         hopSecret,
+        c2sKey, s2cKey,      // Noise 派生的传输密钥，进 Raft（§7.2）
         operator:  self.UUID,
      })
      等待多数派提交 → 提交成功即分配生效
@@ -172,7 +175,7 @@ Raft 的每条日志都要过一轮多数派确认，逐条提交高频事件会
 
 适用于：`SessionRenew`（keepalive 续期）、`SessionMigrate`（接入点变更）、`SessionDrop`（掉线）。
 
-**不批处理**（要求立即生效、且低频）：`SessionCreate`（握手，客户端在等）、`KeyGrant`/`KeyRevoke`、`VNetUpsert`、gasoctl 的踢人操作。
+**不批处理**（要求立即生效、且低频）：`SessionCreate`（握手，客户端在等）、`SessionRekey`（提交前其他 PE 无法解密新密钥帧，§7.4）、`KeyGrant`/`KeyRevoke`、`VNetUpsert`、gasoctl 的踢人操作。
 
 ### 2.7 落点
 
@@ -393,18 +396,18 @@ UDP listener 现以 `netip.AddrPort` 为键索引 `virtualPeer`（`udp/listener.
 **原则二：加密是逐跳的（WireGuard 模型），PE 解密。** 用 PE/CE 术语（同 MPLS-VPN）：
 
 - **CE = client，PE = operator。**
-- 加密隧道建立在 **CE↔PE**（一对 Noise 密钥），以及 **PE↔PE**（underlay）之间——**不是** CE↔CE 端到端穿透 PE。
+- 加密隧道只建立在 **CE↔PE**（一对 Noise 密钥）——**不是** CE↔CE 端到端穿透 PE。**PE↔PE underlay 不加密**：operator 间链路默认可信（内网/专线），本次不做（§7.5）。
 - **PE 是隧道端点，它解密**：收到 CE 的帧 → 解密得到明文 IP 包 → 按明文 dst IP 查 `routingMap`（Raft 全局表：IP → CE → 当前接入 PE）→ 命中本地 CE 直接发，命中远端 PE 就封 `MessageTransport` 转发过去 → 目标 PE 重新加密发给目标 CE。
 
 这与 WireGuard 的接收路径完全一致（解密 → 按 AllowedIPs 路由 → 写 TUN），也与现有 `forwardFrame` 的 `RouteTargetClient` / `RouteTargetOperator` 两分支完全吻合。
 
 **为什么不做 zerotrust（PE 不解密）**：
 
-1. **路由不需要它**。PE 解密后就能看到明文 dst IP，`routingMap` 用 IP 做键即可定位目标 CE 挂在哪个 PE——不需要 `SessionTag`/`DstTag` 这类明文标签。IP 本身就是路由键。
+1. **路由不需要它**。PE 解密后就能看到明文 dst IP，`routingMap` 用 IP 做键即可定位目标 CE 挂在哪个 PE——不需要 `DstTag` 这类明文路由标签。IP 本身就是路由键。（`SessionTag` 保留，但职责不同：它只用于**解密前定位会话密钥**，不参与路由，见 §6.4。）
 2. **握手 RTT 会飞起来**。zerotrust 要 CE↔CE 端到端加密，CE-A 发给 CE-B 前得先跨 PE 做一次 CE↔CE 密钥协商（拿对端公钥、跑 Noise），这是**额外的跨 PE 往返**。逐跳模型里每个 CE 只跟自己的 PE 握一次手，PE 间走已建好的 underlay，**零额外 RTT**。
 3. **管理困难**。PE 看不到内容就无法做集中的路由 / 策略 / 观测。
 
-**因此：`SessionTag` / `DstTag` / 明文标签路由 / "PE 不解密" 全部作废。** 数据面加密（§7）是逐跳 AEAD，PE 解密后按 IP 路由。
+**因此：`DstTag` / 明文标签路由 / "PE 不解密" 全部作废。** 数据面加密（§7）是逐跳 AEAD，PE 解密后按 IP 路由；`SessionTag` 仅作解密密钥索引保留。
 
 #### 5.4.2 前两版错在哪里
 
@@ -449,7 +452,7 @@ PE-D 收到 CE-B 帧 → 解密 → 提交 Raft SessionMigrate: 10.0.0.5 → CE-
 #### 5.4.5 代价与取舍
 
 - **QUIC 侧代价**：客户端需为每个 server 维持一条预热连接（N 个 server = N 条，通常 ≤ 5，可接受）。服务端仍是 N 个端口 = N 个 `quic.Transport`，但**它们之间无需协调**——因为不再有跨 Transport 的连接归并需求，每个 Transport 独立接受连接、独立交出帧即可。
-- **双层 AEAD**：QUIC 传输上，帧先被 Noise AEAD 加密（§7），再被 QUIC 的 TLS 加密一次。CPU 约 +3~5%。这是分层的必然结果，也是端到端保密的前提（QUIC 的 TLS 只保护到当前 operator，Noise 保护到对端客户端）。
+- **双层 AEAD**：QUIC 传输上，帧先被 Noise AEAD 加密（§7），再被 QUIC 的 TLS 加密一次。CPU 约 +3~5%。这是分层的必然结果：QUIC 的 TLS 绑定在单条连接上、随连接销毁；Noise 密钥属于会话，跳到任意 PE 依然有效（§7.5）。
 - **不做 QUIC 连接迁移**：明确放弃使用 QUIC 原生迁移能力。它解决的是"保住同一条连接"，而我们的设计根本不需要保住连接。
 
 ---
@@ -468,7 +471,7 @@ WireGuard 逐跳模型（§5.4.1 原则二）下，多 server 跳跃是这样的
 
 **不需要转发到宿主、不需要 SessionBind 广播、不存在"宿主故障"** —— 任一 PE 都能独立解密并路由，跳跃只是让路由表指向新接入点。这正是强一致 + 逐跳解密的核心收益。
 
-（前一版 §6.1bis 设计的 `SessionTag`/`DstTag`/"PE 不解密" zerotrust 机制**已整体作废**，见 §5.4.1 订正。）
+（前一版 §6.1bis 设计的 `DstTag`/"PE 不解密" zerotrust 机制**已作废**，见 §5.4.1 订正；`SessionTag` 保留为解密密钥索引。）
 
 ### 6.2 配置与下发
 
@@ -489,7 +492,7 @@ servers:
 **上一版此处设计了 QUIC 专用的 ownerTag 路由与跨机转发机制，现已全部删除。** 依据 §5.4 的原则——会话由报文保证，不由连接层保证——QUIC 与 UDP 在跳 IP 这件事上行为完全一致：
 
 - 客户端跳到新的 server IP 时，UDP 直接换目的地址发包；QUIC 切到该 IP 的预热连接发包。
-- 服务端任意 operator 收到帧后，剥掉传输层，按 `SessionTag` 查本地 Raft 副本 → 本地处理。
+- 服务端任意 operator 收到帧后，剥掉传输层，按 `SessionTag` 查本地 Raft 副本取会话密钥 → 解密 → 按 dst IP 路由（§6.1）。
 - **两者都是零额外跳数，都不存在 owner 概念，都不受任何单台 operator 故障影响。**
 
 唯一残留的差异是传输本身的固有属性（QUIC 有连接建立开销、提供可靠有序），与会话语义无关。
@@ -502,21 +505,21 @@ servers:
 - **不是每包都写 Raft**（会压垮集群），走 §2.6 批处理提交 `SessionMigrate`；
 - gasoctl `session list` 可查每个密钥当前的接入点，满足运维观测需求。
 
-**注意其性质**：`LastOperator` 是**纯观测字段**，不参与任何转发决策——转发只依赖 `SessionTag`/`DstTag`，任意 operator 都能独立完成（§5.4）。它的唯一功能性用途是 §9.3 的掉线误判防护（判定前确认"客户端是不是跳去别处了"）。绝不可让转发路径依赖它，否则又会退回"会话绑定某台机器"的错误模型。
+**注意其性质**：`LastOperator` 是**路由决策的一部分**（§5.4.3）——它定义 session 的当前接入点，`routingMap` 的 `RouteTargetOperator` 分支据此把发往该 CE 的包转到正确的 PE。它同时服务于 §9.3 的掉线误判防护（判定前确认"客户端是不是跳去别处了"）。它经 `SessionMigrate` 随跳跃更新，因此不会把会话绑死在某台机器上——绑定的是"当前位置"，不是"归属"。
 
 ### 6.4 数据面来包校验
 
-任意 operator 都会转发任意会话的包，因此必须能识别会话归属并拒绝伪造包。
+任意 operator 都可能收到任意会话的帧，因此必须能定位会话密钥并拒绝伪造包。
 
 **加入 G5 后，这里被简化了**：不再需要独立的转发准入 MAC。
 
 ```
-frame = SessionTag(6) || DstTag(6) || Counter(8) || AEAD密文   ← 见 §7.3
+frame = SessionTag(6) || Counter(8) || AEAD密文   ← 见 §7.3
 ```
 
-- operator 用 `SessionTag`（6 字节）查本地 Raft 副本定位会话 → O(1) 转发；
-- 包的真伪由端到端的 **Poly1305 tag** 保证，比原先 4 字节截断 MAC 强得多；
-- operator **不解密**——它没有传输密钥（密钥不进 Raft），只做转发。这正是端到端加密应有的形态。
+- operator 用 `SessionTag`（6 字节）查本地 Raft 副本取出该会话的传输密钥（§7.2）→ 解密；
+- 包的真伪由 **Poly1305 tag** 保证：伪造者无密钥，解密必失败即丢弃，比原先 4 字节截断 MAC 强得多；
+- 解密得到明文 IP 包后按 dst IP 查 `routingMap` 路由（§6.1）——**不需要 DstTag，IP 本身就是路由键**。
 
 **SessionTag 取 6 字节**（SessionID 前 6 字节，48 bit）：按生日界，百万级并发会话下碰撞概率约 10⁻³，且碰撞只导致一次查表失败后丢包（AEAD 校验必然失败），不构成安全问题。你要求尽可能短，6 字节是可用性与开销的平衡点。
 
@@ -546,23 +549,27 @@ frame = SessionTag(6) || DstTag(6) || Counter(8) || AEAD密文   ← 见 §7.3
                         客户端的 send = 服务端的 recv，反之亦然
 ```
 
-密钥**不进 Raft**——它是每会话、每次握手独立的临时密钥，且具备前向保密（依赖 ephemeral 密钥对）。Raft 中只存静态公钥（身份）、`HopSecret`（跳跃推导）与会话元数据；**没有任何可用于解密数据面的材料**。
+密钥**随 `SessionCreate` 写入 Raft**（§2.3、`sessionEntry.C2SKey/S2CKey`）。逐跳模型下这是必需的：客户端跳到任意 PE，该 PE 都必须能立即解密其帧——若密钥只在原握手 PE 手里，跳跃就得重新握手，G4 的"零额外开销"不成立。
 
-**这带来一个必须解决的设计冲突，见 §7.5。**
+**代价（明确接受）**：
+
+- 任一 operator 被攻破即可解密全部会话流量——这是逐跳模型的固有信任假设（同 MPLS-VPN 对 PE 的信任），不是缺陷；
+- Raft 日志与快照含密钥材料：Raft 传输本身走 QUIC TLS 加密，快照落盘权限 0600；
+- 前向保密以 rekey 为粒度（§7.4）：rekey 用新的 ephemeral 密钥对派生新密钥并覆盖 Raft 中旧值，旧密钥随日志压缩消失。
 
 ### 7.3 数据面帧格式
 
 ```
-frame = SessionTag(6) || DstTag(6) || Counter(8)
+frame = SessionTag(6) || Counter(8)
         || ChaCha20-Poly1305(send_key, Counter, ip_pkt)
            └── 密文 = 明文长度 + 16 字节 Poly1305 tag
 ```
 
-`SessionTag` / `DstTag` 均为明文（operator 靠它们纯查表转发，见 §6.1bis）；`Counter` 明文（AEAD nonce 本就无需保密）。
+`SessionTag` 明文（operator 靠它查会话密钥，见 §6.4）；`Counter` 明文（AEAD nonce 本就无需保密）。**没有 DstTag**——PE 解密后按明文 dst IP 路由（§5.4.1）。
 
 - `Counter`：单调递增的 nonce，每包 +1。ChaCha20-Poly1305 的 96-bit nonce 由 `Counter` 零扩展而来（同 WireGuard）。
 - **同一密钥下 Counter 绝不重复**——这是 AEAD 安全性的绝对前提，达到上限必须 rekey。
-- §6.4 的 4 字节转发准入 MAC **被 AEAD tag 取代**：既然任意 operator 都持有 `SessionKey`（Raft 同步），转发准入改用 `SessionTag` 查表即可；真伪由端到端的 Poly1305 tag 保证。**省下 4 字节，且安全性更强**。
+- 独立的转发准入 MAC **被 AEAD tag 取代**：任意 operator 都持有传输密钥（Raft 同步，§7.2），直接解密验证 Poly1305 tag 即完成准入。**省下 4 字节，且安全性更强**。
 
 ### 7.4 重放窗口与 rekey
 
@@ -572,6 +579,7 @@ frame = SessionTag(6) || DstTag(6) || Counter(8)
   - 发送包数 ≥ 2^60（`REKEY_AFTER_MESSAGES`）
   - 收到对端 rekey 请求
 - rekey 即重跑一次 Noise_IK 握手，**但不重新分配 IP / SessionID**——租约与会话延续，只换传输密钥。这一点必须在实现时明确，否则每 2 分钟客户端就换一次 IP。
+- 新密钥经一条 `SessionRekey` Raft 日志覆盖旧值——**不批处理，立即提交**：提交生效前其他 PE 仍持旧密钥，会把新密钥加密的帧当伪造包丢弃，所以客户端应在收到 rekey 完成确认后再切换新密钥发包（旧密钥保留一个短暂的重叠期用于收包）。
 
 ### 7.5 与 QUIC / UDP 两种传输的关系
 
@@ -582,11 +590,13 @@ frame = SessionTag(6) || DstTag(6) || Counter(8)
 | 现状 | 完全明文 | 已有 TLS 1.3 加密（`transport/quic/tls.go`） |
 | 加 G5 后 | Noise AEAD 加密 | Noise AEAD **再套一层** TLS |
 
-**决策：两种传输都启用 G5，不做例外。** 理由：
+**决策：两种传输都启用 G5，不做例外。G5 是逐跳加密（CE↔PE 段）；PE↔PE underlay 不加密，链路默认可信（内网/专线）。** 理由：
 
-1. **端到端 vs 逐跳**：QUIC 的 TLS 只加密"客户端 ↔ 当前 operator"这一跳。而在 G4 多 server 跳跃下，客户端会连到不同 operator；更重要的是 operator 之间转发走的是**裸 UDP underlay**（`peer_operator.go`），那一段今天完全明文。G5 的密钥是端到端的（客户端 ↔ 会话，跨 operator 不变），**这是 TLS 给不了的**。
+1. **会话密钥 vs 连接密钥**：QUIC 的 TLS 密钥绑定在单条连接上，连接销毁即失效；G4 多 server 跳跃下客户端不断切换 PE 和连接。G5 的密钥属于**会话**（存 Raft，跨 operator、跨连接不变），跳到任意 PE 都直接可用，**这是 TLS 给不了的**。
 2. **一致的安全模型**：若 UDP 加密而 QUIC 不加密，则"用哪个传输"变成安全等级的隐式开关，是设计缺陷。
-3. **代价可接受**：QUIC 上多一层 AEAD，CPU 开销约 +3~5%（ChaCha20 在无 AES-NI 的平台上尤其快），换取端到端保密。
+3. **代价可接受**：QUIC 上多一层 AEAD，CPU 开销约 +3~5%（ChaCha20 在无 AES-NI 的平台上尤其快）。
+
+**PE↔PE 不加密的边界要说清楚**：operator 间转发（`peer_operator.go` UDP underlay）传的是**解密后的明文 IP 包**。这建立在"operator 间链路可信"的运维前提上；若未来要跑公网 underlay，需另起一项给 PE↔PE 加 WireGuard 级隧道，不影响本次设计。
 
 **QUIC 上的具体简化**：QUIC 已保证可靠有序，故 QUIC 传输上的 G5 **不需要重放窗口**（不会乱序不会重复），仅需 AEAD 加解密；`Counter` 仍必须严格递增以满足 nonce 唯一性。UDP 传输则必须完整实现滑动窗口。
 
@@ -602,18 +612,18 @@ QUIC : Noise AEAD + Counter，无重放窗口                ← QUIC 已保序�
 ```
 原始 IP 包                                    1400
 + SessionTag(6)                                  6
-+ DstTag(6)                                      6
 + Counter(8)                                     8
 + Poly1305 tag                                  16
 ────────────────────────────────────────────────
-每包净增                                        36 字节
+每包净增                                        30 字节
 ```
 
-`DEFAULT_MTU` 需由 1400 下调至 **1364**（`tun.go:14`）。若同时跑在已有隧道内需再留余量。
+`DEFAULT_MTU` 需由 1400 下调至 **1370**（`tun.go:14`）。若同时跑在已有隧道内需再留余量。
 
 ### 7.7 落点
 
 - 新增 `protocol/noise/`（见 §3.3）。
+- `consensus/commands.go` 增 `SessionRekey` 日志类型（覆盖 `sessionEntry` 的传输密钥）。
 - `transport/udp/conn.go`、`transport/quic/conn.go`：收发路径加解密；UDP 侧额外挂重放窗口。
 - `protocol/message/`：帧格式增加加密封装层。
 - `go.mod`：`golang.org/x/crypto` 提升为直接依赖。
@@ -782,14 +792,14 @@ lease  list    <vni>
                     │  强一致复制：                     │
    operator A ◄─────┤   vnet / segment / pool          ├─────► operator C
        ▲            │   密钥授权表                      │            ▲
-       │            │   session (含 IP / key / hop)     │            │
+       │            │   session (IP / 传输密钥 / hop)   │            │
        │            │   接入点位置                      │            │
        │            └──────────────┬───────────────────┘            │
        │                     operator B                             │
        │                                                            │
        │  ┌─────────────── 数据面：不走 Raft ──────────────┐        │
-       └──┤  client 帧 (SessionTag+MAC) 可发往任意 operator ├────────┘
-          │  operator 间 IP 包转发仍走 PeerOperator UDP 直连 │
+       └──┤  client 帧 (SessionTag+AEAD) 可发往任意 operator├────────┘
+          │  operator 间明文 IP 包仍走 PeerOperator UDP 直连 │
           └────────────────────────────────────────────────┘
 ```
 
@@ -835,7 +845,9 @@ P1 单独成阶段，因为共识层的正确性无法靠"跑通一次"证明—
 | 异地接入探测引入握手延迟 | 冲突场景下 +1 RTT（≤2s） | 仅在"该密钥已有活跃会话"时触发，正常首次握手零开销；同点位重连不探测 |
 | 密钥被盗用后劫持会话 | 合法用户被挤下线 | 异地接入必须先确认原会话死亡；活着则拒绝（§8.0.2 情形 B） |
 | lock 文件与 Raft 不一致 | 运维误读 | 权威副本在 Raft，磁盘文件仅为镜像；重启从快照恢复而非读文件（§4.5） |
-| 加密与标签增加每包开销 | 有效 MTU 下降 36 字节 | SessionTag 6B + DstTag 6B + Counter 8B + tag 16B；`DEFAULT_MTU` 1400→1364（§7.6） |
+| 加密与标签增加每包开销 | 有效 MTU 下降 30 字节 | SessionTag 6B + Counter 8B + tag 16B；`DEFAULT_MTU` 1400→1370（§7.6） |
+| 传输密钥进 Raft | 任一 operator 沦陷可解密全部流量 | 逐跳模型的固有信任假设（§7.2）；rekey 限损；Raft 传输 QUIC TLS、快照 0600 |
+| PE↔PE underlay 明文 | operator 间链路被窃听则泄露明文 IP 包 | 运维前提：operator 间走内网/专线；公网 underlay 属未来工作（§7.5） |
 | 全区间监听占用 fd | 区间过大时耗尽 | 区间上限硬编码 64 |
 | QUIC 需 N 个 Transport 实例 | 内存开销高于 UDP | 各 Transport 完全独立、无需协调；同受 64 上限约束 |
 | QUIC 预热连接占用资源 | 每个 server 一条常驻连接 | server 数通常 ≤ 5；连接空闲成本低（keepalive 已有） |

@@ -72,6 +72,7 @@ type Reservation struct {
 	IP        netip.Addr
 	Ranges    netip.Prefix
 	SessionID protocol.SessionID_Ty
+	Keys      DataKeys // data-plane keys to persist at Confirm (PRD §7.2)
 }
 
 // Allocator is the operator-side policy the assign server drives, a two-phase
@@ -92,6 +93,15 @@ type Allocator interface {
 	Rollback(vni protocol.VNI_Ty, r Reservation)
 }
 
+// DataKeys are the raw directional data-plane transport keys the handshake
+// derived, carried into the assignment so the Raft-backed allocator can
+// replicate them (PRD §7.2). C2SKey decrypts client->PE, S2CKey encrypts
+// PE->client.
+type DataKeys struct {
+	C2SKey [32]byte
+	S2CKey [32]byte
+}
+
 // ErrIPConflict is returned by Confirm when the reserved IP was committed by
 // another node between Preclaim and Confirm. The assign server retries.
 var ErrIPConflict = errors.New("assign: ip conflict, retry")
@@ -108,12 +118,14 @@ func ServerAssign(
 	vni protocol.VNI_Ty,
 	pubkey noise.PublicKey,
 	sessionIndex uint32,
+	keys DataKeys,
 	alloc Allocator,
 ) (*protocol.SessionContext, error) {
 	sendCtr := uint64(ctrlBase) // operator's monotonic send counter
 	for attempt := 0; attempt < maxAllocRetries; attempt++ {
 		// Preclaim: optimistically pick IP + SessionID (no durable write yet).
 		res, code := alloc.Preclaim(vni, pubkey)
+		res.Keys = keys // carry data-plane keys into Confirm (PRD §7.2)
 
 		claim := serverClaim{Kind: kindClaim, Code: code, IP: res.IP, Ranges: res.Ranges, SessionID: res.SessionID}
 		if code == CodeOK {

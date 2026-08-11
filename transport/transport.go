@@ -48,6 +48,10 @@ type Accepted struct {
 	VNI       protocol.VNI_Ty
 	ClientPub noise.PublicKey
 	Session   *noise.Session
+	// C2SKey/S2CKey are the raw data-plane keys to replicate into Raft so any
+	// PE can decrypt this session's frames (PRD §7.2).
+	C2SKey [32]byte
+	S2CKey [32]byte
 }
 
 // Dialed is the client-side counterpart: the conn plus the authenticated

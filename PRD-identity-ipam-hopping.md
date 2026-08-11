@@ -98,7 +98,6 @@ type sessionEntry struct {
     PubKey      [32]byte
     VNI         protocol.VNI_Ty
     IP          netip.Addr
-    HopSecret   [32]byte        // 端口跳跃推导用（可被任意 operator 读取）
     LastTimestamp [12]byte      // Noise 防重放：该公钥见过的最大 TAI64N
 
     // 数据面传输密钥：Noise 握手派生后随 SessionCreate 写入 Raft（§7.2）。
@@ -130,13 +129,12 @@ ClientAnswer(空载荷)
         pubkey, cid, vni,
         ip:        <本地预选，见下>,
         sessionID: <本地生成>,
-        hopSecret,
         c2sKey, s2cKey,      // Noise 派生的传输密钥，进 Raft（§7.2）
         operator:  self.UUID,
      })
      等待多数派提交 → 提交成功即分配生效
   ↓
-ServerAssign(ip, sessionID, hopSecret, serverList)   ← 此报文起已被 AEAD 加密
+ServerAssign(ip, sessionID, serverList)   ← 此报文起已被 AEAD 加密
 ```
 
 握手报文数**不变**（仍是 4 条），额外成本是 `ClientAnswer` 到 `ServerAssign` 之间的一次 Raft 提交（本地 leader 约 1ms；跨地域跟随者转发至 leader 约 1 RTT）。这是强一致的固有代价，你已确认接受。
@@ -221,7 +219,7 @@ ServerHello:  version(1) cryptoSuite(2) labels
                   msg2 = e_pub(32) || encrypted_empty(16)
 
 ClientAnswer: 保留报文但载荷为空（Noise 在两条消息内已完成认证）
-ServerAssign: ip / sessionID / hopSecret / serverList
+ServerAssign: ip / sessionID / serverList
 ```
 
 **"IK" 的含义**：Initiator 在第一条消息里就把自己的静态公钥（加密后）发出去，且**预先知道** Responder 的静态公钥。后者要求客户端配置里写明目标 server 的公钥——同 WireGuard 的 `PublicKey =` 配置项。
@@ -345,25 +343,23 @@ bindings:
 
 ## 5. G3：端口跳跃
 
+> **实施决策（2026-08-11）：G3 不写任何代码，用 iptables 实现。** 服务端一条
+> `iptables -t nat -A PREROUTING -p udp --dport <range_start>:<range_end> -j REDIRECT --to-ports <listen_port>`
+> 把整个端口区间重定向到单一监听端口——内核层完成，应用无感知；客户端换目的端口不改变自身源地址，会话不受影响。
+> **跳跃是随机的，不推导确定性序列**：客户端在区间内随机选目的端口/IP 即可（`hop_secret` 及 §5.1 的 HMAC 序列推导已废弃）。这行得通的根据正是 §5.4"会话由报文保证"——服务端全区间放开，任意来源包只要带正确 SessionTag + AEAD 就被接受，与端口是否"约定"无关。
+> §5.2/§5.4 的原则不变，是 G4 的地基。P5/P6 阶段相应取消，直接进入 G4。
+
 ### 5.1 设计
 
-服务端在**端口区间**上同时监听，客户端按时间片轮换目标端口。
+服务端在**端口区间**上放开接收（iptables 把区间重定向到单一监听端口，见本节顶部实施决策），客户端**随机**选目标端口。
 
-**关键决策：服务端全区间同时监听，而非跟着时钟切换。**
+**关键决策：跳跃随机，不推导确定性序列。**
 
-- 无时钟同步问题——客户端偏移 ±1 个时间片也能连上；
-- 无切换窗口丢包；
-- 代价是占用 N 个 UDP 套接字（N ≤ 64，可接受）。
+- 无需 `hop_secret`、无需两端约定序列、无时钟同步问题；
+- 客户端每隔 `hop_interval` 在区间内随机挑一个端口发包即可；
+- 服务端凭 SessionTag + AEAD 认包，不关心端口（§5.4）。
 
-**端口序列推导**（两端各自独立计算，无需协商）：
-
-```
-epoch = floor(unix_time / hop_interval)
-idx   = HMAC-SHA256(hop_secret, "gasoline-hop" || vni(4) || epoch(8))[0:2] mod range_size
-port  = range_start + idx
-```
-
-`hop_secret` 在握手时随 `ServerAssign` 下发（见 §5.3），并已存入 Raft，故**任意 operator 都能推导同一客户端的端口序列**——这是 G4 的前提。
+**为什么随机就够**：抗封锁的本质是"目的端口不可预测、且单端口流量不显著"，随机跳跃已满足；确定性序列只会额外引入一个需下发、需存 Raft、需两端同步的秘密，收益为负。
 
 ### 5.2 会话延续性
 
@@ -379,9 +375,9 @@ UDP listener 现以 `netip.AddrPort` 为键索引 `virtualPeer`（`udp/listener.
 
 ### 5.3 握手期的鸡生蛋问题
 
-- 客户端首包发往 `range_start`（引导端口，恒定开放）。
-- `ServerAssign` 通过 **label** 下发 `hop_secret(32B)` + 区间参数 + **全量 server 列表**。`ServerAssign` 目前**没有** labels 字段，需补上 label 段（照抄 `ClientHello`）——这是本项唯一的线格式变更。
-- 此后客户端从当前 epoch 起跳，不再走引导端口。
+- 客户端首包发往 `range_start`（引导端口，恒定开放）完成握手。
+- `ServerAssign` 下发**区间参数** + **全量 server 列表**（各 host + 端口区间 + UUID）。不再下发 `hop_secret`。`ServerAssign` 目前**没有** labels 字段，需补上 label 段（照抄 `ClientHello`）。
+- 此后客户端在区间内随机跳跃，不再固定走引导端口。
 
 ### 5.4 核心原则：会话由报文保证，不由连接层保证
 
@@ -445,7 +441,7 @@ PE-D 收到 CE-B 帧 → 解密 → 提交 Raft SessionMigrate: 10.0.0.5 → CE-
 | 跳 IP | 换目的 IP 发包 | 切到该 IP 的连接 |
 | 跳跃后定位 | 新 PE 提交 `SessionMigrate` 更新 Raft 路由 | **完全相同** |
 | operator 崩溃 | 会话不受影响（CE 重连别的 PE，新 PE 更新路由） | **完全相同** |
-| 序列推导 | §5.1 算法 | §5.1 算法，**同一份代码** |
+| 端口选择 | 区间内随机 | 区间内随机，**同一份代码** |
 
 **两种传输在会话语义上完全对等。** 差异只剩传输本身的固有属性：QUIC 提供可靠有序与拥塞控制（每条连接有建立开销），UDP 无连接开销但需自行处理丢包。
 
@@ -529,7 +525,7 @@ frame = SessionTag(6) || Counter(8) || AEAD密文   ← 见 §7.3
 - `transport/udp/dialer.go`：跳跃 ticker（IP + 端口双维度）。
 - `transport/quic/listener.go`：N 个端口各起一个 `quic.Transport`，彼此独立、无需协调；收到帧后直接交给上层，不做连接归并。
 - `transport/quic/dialer.go`：为每个 server 维持一条预热 QUIC 连接；跳跃时切换连接而非迁移连接。
-- **跳跃逻辑（序列推导、切换时机）在 UDP 与 QUIC 间共用同一份代码**，仅"如何把帧送出去"不同。
+- **跳跃逻辑（随机选点、切换时机）在 UDP 与 QUIC 间共用同一份代码**，仅"如何把帧送出去"不同。
 - 客户端配置从 flag 迁到**配置文件**（多 server 多区间无法用扁平 flag 表达）：新增 `--config <path>`。
 
 ---

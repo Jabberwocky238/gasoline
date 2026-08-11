@@ -59,6 +59,17 @@ func NewSession(keys TransportKeys, isInitiator bool) (*Session, error) {
 	return s, nil
 }
 
+// SessionFromKeys builds a Session directly from raw directional keys. Unlike
+// NewSession (which consumes a handshake's TransportKeys on the machine that ran
+// the handshake), this lets any PE reconstruct a data-plane session from the
+// keys replicated in Raft (PRD §7.2) — the machine a client hopped to never ran
+// the handshake yet must still decrypt its frames. send seals PE->client;
+// recv opens client->PE. isInitiator is false (a PE is always the responder
+// side of the original CE handshake) — it only affects rekey timing.
+func SessionFromKeys(send, recv [32]byte) (*Session, error) {
+	return NewSession(TransportKeys{Send: send, Recv: recv}, false)
+}
+
 // SealNext encrypts plaintext with the next send nonce and returns the counter
 // used plus the ciphertext. The counter must travel on the wire so the peer
 // can reconstruct the nonce for OpenAt.

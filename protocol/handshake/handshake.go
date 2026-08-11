@@ -109,6 +109,12 @@ type AuthResult struct {
 	VNI       protocol.VNI_Ty
 	ClientPub noise.PublicKey
 	Session   *noise.Session
+	// C2SKey/S2CKey are the raw directional transport keys, exposed so the
+	// operator can replicate them into Raft (PRD §7.2) for multi-PE decrypt.
+	// From the responder's view: Recv decrypts client->PE (C2SKey), Send
+	// encrypts PE->client (S2CKey).
+	C2SKey [32]byte
+	S2CKey [32]byte
 }
 
 // ServerHandshake runs the server (responder) authentication. On success it
@@ -176,7 +182,13 @@ func ServerHandshake(rw io.ReadWriter, resolver VNIMapperFn) (AuthResult, error)
 	if _, err := sess.OpenAt(confirmCounter, ca.Ciphertext, confirmAAD, false); err != nil {
 		return fail("client answer did not authenticate: %w", err)
 	}
-	return AuthResult{VNI: hello.VNI, ClientPub: clientPub, Session: sess}, nil
+	return AuthResult{
+		VNI:       hello.VNI,
+		ClientPub: clientPub,
+		Session:   sess,
+		C2SKey:    keys.Recv, // client->PE: responder receives
+		S2CKey:    keys.Send, // PE->client: responder sends
+	}, nil
 }
 
 // rejectAtHello rejects before ServerHello. The client is blocked reading a

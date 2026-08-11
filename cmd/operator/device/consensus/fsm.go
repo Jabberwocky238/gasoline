@@ -27,14 +27,16 @@ type keyGrant struct {
 	StaticIP   netip.Addr
 }
 
-// sessionEntry is the replicated per-session record (PRD §2.2). The data-plane
-// transport keys are deliberately NOT here — they never enter Raft.
+// sessionEntry is the replicated per-session record (PRD §2.2). It includes the
+// data-plane transport keys (PRD §7.2): they enter Raft so any PE a client hops
+// to can decrypt its frames, which is what makes G4 multi-server hopping free.
 type sessionEntry struct {
 	SessionID    protocol.SessionID_Ty
 	PubKey       [32]byte
 	VNI          protocol.VNI_Ty
 	IP           netip.Addr
-	HopSecret    [32]byte
+	C2SKey       [32]byte // decrypts client->PE frames (client's Send key)
+	S2CKey       [32]byte // encrypts PE->client frames (client's Recv key)
 	LastOperator [16]byte
 	LastSeenNano int64
 	ExpiresNano  int64
@@ -110,6 +112,8 @@ func (m *meshState) applyLocked(cmd *Command) error {
 		return m.applySessionDrop(cmd.SessionDrop)
 	case CmdSessionReplace:
 		return m.applySessionReplace(cmd.SessionReplace)
+	case CmdSessionRekey:
+		return m.applySessionRekey(cmd.SessionRekey)
 	default:
 		return fmt.Errorf("consensus: unknown command kind %#x", byte(cmd.Kind))
 	}
@@ -175,7 +179,8 @@ func (m *meshState) applySessionCreate(c *SessionCreate) error {
 		PubKey:       c.PubKey,
 		VNI:          c.VNI,
 		IP:           c.IP,
-		HopSecret:    c.HopSecret,
+		C2SKey:       c.C2SKey,
+		S2CKey:       c.S2CKey,
 		LastOperator: c.Operator,
 		LastSeenNano: c.Now,
 		ExpiresNano:  c.Now + int64(c.LeaseTTL),
@@ -192,6 +197,17 @@ func (m *meshState) applySessionRenew(c *SessionRenew) error {
 	}
 	e.LastSeenNano = c.Now
 	e.ExpiresNano = c.Now + int64(c.LeaseTTL)
+	return nil
+}
+
+func (m *meshState) applySessionRekey(c *SessionRekey) error {
+	e, ok := m.Sessions[c.SessionID]
+	if !ok {
+		return nil
+	}
+	e.C2SKey = c.C2SKey
+	e.S2CKey = c.S2CKey
+	e.LastSeenNano = c.Now
 	return nil
 }
 
@@ -301,6 +317,41 @@ func (s *fsmSnapshot) Release() {}
 //
 // Reads hit the local replica directly; they never go through Raft. Callers
 // tolerate slight staleness on followers (bounded by replication lag).
+
+// SessionKeys is the data-plane view of a session the transport layer needs:
+// the transport keys plus the full SessionID (so a 6-byte tag lookup can verify
+// against the full id) and the current access point.
+type SessionKeys struct {
+	SessionID    protocol.SessionID_Ty
+	VNI          protocol.VNI_Ty
+	IP           netip.Addr
+	C2SKey       [32]byte
+	S2CKey       [32]byte
+	LastOperator [16]byte
+}
+
+// SessionByTag resolves a session from its 6-byte SessionTag (PRD §6.4): the
+// first 6 bytes of the SessionID. A tag collision (~10^-3 at 10^6 sessions)
+// yields the wrong entry, whose keys then fail AEAD open — a dropped packet, not
+// a security hole. Linear scan is fine for now; if session counts grow this
+// gains a tag->id index alongside pubKeyToSession.
+func (m *meshState) SessionByTag(tag [6]byte) (SessionKeys, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for sid, e := range m.Sessions {
+		if [6]byte(sid[:6]) == tag {
+			return SessionKeys{
+				SessionID:    e.SessionID,
+				VNI:          e.VNI,
+				IP:           e.IP,
+				C2SKey:       e.C2SKey,
+				S2CKey:       e.S2CKey,
+				LastOperator: e.LastOperator,
+			}, true
+		}
+	}
+	return SessionKeys{}, false
+}
 
 // SessionByID returns a copy of the session, if present.
 func (m *meshState) SessionByID(sid protocol.SessionID_Ty) (sessionEntry, bool) {

@@ -32,6 +32,7 @@ const (
 	CmdSessionMigrate CmdKind = 0x22 // access-point changed (batched)
 	CmdSessionDrop    CmdKind = 0x23 // remove a session (timeout / kick / revoke)
 	CmdSessionReplace CmdKind = 0x24 // atomic drop-old + create-new for one pubkey
+	CmdSessionRekey   CmdKind = 0x25 // overwrite transport keys after re-handshake
 	CmdBatch          CmdKind = 0xF0 // envelope carrying N commands, applied in order
 )
 
@@ -51,6 +52,7 @@ type Command struct {
 	SessionMigrate *SessionMigrate
 	SessionDrop    *SessionDrop
 	SessionReplace *SessionReplace
+	SessionRekey   *SessionRekey
 	Batch          []Command
 }
 
@@ -90,10 +92,26 @@ type SessionCreate struct {
 	PubKey    [32]byte
 	VNI       protocol.VNI_Ty
 	IP        netip.Addr // pre-selected by the admitting operator
-	HopSecret [32]byte
-	Operator  [16]byte // owner at creation time
-	LeaseTTL  time.Duration
-	Now       int64 // unix nanos, supplied by proposer (FSM must be deterministic)
+	// C2SKey/S2CKey are the Noise-derived data-plane transport keys (PRD §7.2).
+	// They enter Raft so any PE a client hops to can decrypt its frames — the
+	// prerequisite for multi-server hopping (G4). C2SKey decrypts client->PE
+	// frames; S2CKey encrypts PE->client frames. From the client's view these
+	// are its Send / Recv keys respectively.
+	C2SKey   [32]byte
+	S2CKey   [32]byte
+	Operator [16]byte // owner at creation time
+	LeaseTTL time.Duration
+	Now      int64 // unix nanos, supplied by proposer (FSM must be deterministic)
+}
+
+// SessionRekey overwrites a session's transport keys after a re-handshake
+// (PRD §7.4). Committed immediately (not batched): until it applies, other PEs
+// still hold the old keys and would drop frames sealed under the new ones.
+type SessionRekey struct {
+	SessionID protocol.SessionID_Ty
+	C2SKey    [32]byte
+	S2CKey    [32]byte
+	Now       int64
 }
 
 // SessionRenew refreshes a lease (keepalive; batched — PRD §4.3).

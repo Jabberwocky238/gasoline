@@ -41,6 +41,7 @@ func (l *Listener) Accept() (transport.Accepted, error) {
 	}
 	return transport.Accepted{
 		Conn: newConn(stream, conn.RemoteAddr().String()), VNI: auth.VNI, ClientPub: auth.ClientPub, Session: auth.Session,
+		C2SKey: auth.C2SKey, S2CKey: auth.S2CKey,
 	}, nil
 }
 

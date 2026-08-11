@@ -280,7 +280,8 @@ func (o *Operator) routineAcceptClients(tp string, ln transport.Listener) {
 		// SessionID. Use the Raft-backed allocator when consensus is running,
 		// otherwise the pre-consensus preset allocator.
 		alloc := o.allocator()
-		sc, err := assign.ServerAssign(acc.Conn, acc.Session, acc.VNI, acc.ClientPub, o.state.nextSessionIndex(), alloc)
+		keys := assign.DataKeys{C2SKey: acc.C2SKey, S2CKey: acc.S2CKey}
+		sc, err := assign.ServerAssign(acc.Conn, acc.Session, acc.VNI, acc.ClientPub, o.state.nextSessionIndex(), keys, alloc)
 		if err != nil {
 			logger.Errorf("assign on VNI %s: %v", acc.VNI, err)
 			_ = acc.Conn.Close()

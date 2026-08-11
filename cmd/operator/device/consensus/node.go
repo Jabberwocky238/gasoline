@@ -207,6 +207,18 @@ func (n *Node) CommitSession(c *SessionCreate, timeout time.Duration) error {
 	return n.Propose(&Command{Kind: CmdSessionCreate, SessionCreate: c}, timeout)
 }
 
+// SessionByTag resolves data-plane keys for a 6-byte SessionTag against the
+// local replica (no consensus). See meshState.SessionByTag.
+func (n *Node) SessionByTag(tag [6]byte) (SessionKeys, bool) {
+	return n.fsm.SessionByTag(tag)
+}
+
+// MigrateSession records a new access point for a session (batched by the
+// caller in the hop path). See PRD §6.3.
+func (n *Node) MigrateSession(c *SessionMigrate, timeout time.Duration) error {
+	return n.Propose(&Command{Kind: CmdSessionMigrate, SessionMigrate: c}, timeout)
+}
+
 // LeaderID returns the current leader's Raft ID ("" if unknown).
 func (n *Node) LeaderID() string {
 	_, id := n.raft.LeaderWithID()

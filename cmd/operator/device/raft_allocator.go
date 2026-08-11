@@ -42,6 +42,8 @@ func (a *raftAllocator) Confirm(vni protocol.VNI_Ty, pubkey noise.PublicKey, r a
 		PubKey:    pubkey,
 		VNI:       vni,
 		IP:        r.IP,
+		C2SKey:    r.Keys.C2SKey,
+		S2CKey:    r.Keys.S2CKey,
 		Operator:  a.self,
 		LeaseTTL:  a.leaseTTL,
 		Now:       time.Now().UnixNano(),

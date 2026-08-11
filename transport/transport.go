@@ -3,6 +3,7 @@ package transport
 import (
 	"crypto/tls"
 	"fmt"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -71,6 +72,18 @@ type Listener interface {
 	Accept() (Accepted, error)
 	Close() error
 	Addr() string
+}
+
+// HoppableListener is an optional Listener capability for transports that can
+// receive a data frame for an already-established session from a NEW source
+// address (a hopped-in client, PRD §6.4) without a fresh handshake. The demux
+// gets first refusal on datagrams from unknown sources; WriteTo sends replies
+// back to such a source over the shared socket. UDP implements this; QUIC does
+// not (its sessions are bound to connections).
+type HoppableListener interface {
+	Listener
+	SetDataDemux(func(src netip.AddrPort, datagram []byte) bool)
+	WriteTo(dst netip.AddrPort, data []byte) error
 }
 
 // --------------- Factory + registry ---------------

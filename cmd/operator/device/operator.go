@@ -40,6 +40,7 @@ type Operator struct {
 	dataListenAddr  string
 	clientListeners map[string]transport.Listener
 	state           *operatorState
+	hops            *hopTable
 }
 
 // vniResolver is the per-VNI handshake.VNIResolver implementation backed by an
@@ -147,6 +148,7 @@ func New(cfg *StaticOperatorConfig) (*Operator, error) {
 		dataListenAddr:  cfg.OpListenAddr,
 		clientListeners: clientListeners,
 		state:           state,
+		hops:            newHopTable(),
 	}, nil
 }
 
@@ -229,6 +231,7 @@ func (o *Operator) Start() error {
 	}
 	for tp, ln := range o.clientListeners {
 		o.lctx.Log().Infof("Client endpoint (%s) listening on %s", tp, ln.Addr())
+		o.installHopDemux(ln)
 		go o.routineAcceptClients(tp, ln)
 	}
 	go o.routineReaper()

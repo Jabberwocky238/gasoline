@@ -16,9 +16,21 @@ import (
 // consumes; raise further if your workload sustains > 25k pps.
 const peerIncomingCap = 8192
 
+// DataDemux lets the operator claim a datagram from an unknown source as a
+// data frame for an already-established session (a hopped-in client, PRD §6.4)
+// before the listener falls back to treating it as a new handshake. It returns
+// true if it consumed the datagram. src is the datagram's source address so the
+// operator can reply / track the new access point. The []byte is only valid for
+// the call; the demux must copy anything it retains.
+type DataDemux func(src netip.AddrPort, datagram []byte) bool
+
 type Listener struct {
 	rawConn *net.UDPConn
 	mapper  handshake.VNIMapperFn
+
+	// demux, if set, gets first refusal on datagrams from unknown sources: a
+	// hopped-in session's data frame is handled here, not as a new handshake.
+	demux DataDemux
 
 	// peers is guarded by MutexGuard: map[netip.AddrPort]*virtualPeer
 	// Using netip.AddrPort as key avoids per-packet string allocation from remoteAddr.String().
@@ -26,6 +38,15 @@ type Listener struct {
 
 	acceptCh chan acceptResult
 	closed   atomic.Bool
+}
+
+// SetDataDemux installs the hopped-frame handler. Call before Start (i.e.
+// before any datagram arrives). Not safe to change concurrently with readLoop.
+// The parameter is a plain func literal (not the named DataDemux) so this
+// method set satisfies transport.HoppableListener, whose signature uses the
+// same literal.
+func (l *Listener) SetDataDemux(d func(src netip.AddrPort, datagram []byte) bool) {
+	l.demux = d
 }
 
 type virtualPeer struct {
@@ -99,6 +120,16 @@ func (l *Listener) readLoop() {
 			continue
 		}
 
+		// Unknown source. Offer it to the data demux first: a hopped-in
+		// session's data frame is handled there, never as a new handshake
+		// (PRD §8.0.1 — hopping is data-plane, handshake is control-plane, and
+		// they are protocol-distinct). Only if the demux declines do we treat
+		// this as a brand-new handshake.
+		if l.demux != nil && l.demux(key, dg.data) {
+			dg.release()
+			continue
+		}
+
 		// Slow path: new peer (write lock)
 		vp = &virtualPeer{
 			incoming:   make(chan pooledDatagram, peerIncomingCap),
@@ -166,4 +197,13 @@ func (l *Listener) RemoveConn(addr netip.AddrPort) {
 	l.peers.Write(func(m *map[netip.AddrPort]*virtualPeer) {
 		delete(*m, addr)
 	})
+}
+
+// WriteTo sends one datagram to dst over the listener's shared socket. The
+// operator uses it to reply to a hopped-in session whose frames arrive via the
+// data demux (PRD §6.4) — there is no per-peer conn for such a client, the
+// listener socket is the only path back.
+func (l *Listener) WriteTo(dst netip.AddrPort, data []byte) error {
+	_, err := l.rawConn.WriteToUDP(data, net.UDPAddrFromAddrPort(dst))
+	return err
 }

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/jabberwocky238/gasoline/device/client"
+	"github.com/jabberwocky238/gasoline/cmd/client/device"
 	log "github.com/sirupsen/logrus"
 )
 

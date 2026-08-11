@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jabberwocky238/gasoline/device/client"
+	"github.com/jabberwocky238/gasoline/cmd/client/device"
 	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/sirupsen/logrus"
 )

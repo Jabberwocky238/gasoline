@@ -18,23 +18,26 @@ func NewDialer(cfg protocol.PresetSessionConfig, id transport.ClientIdentity) *D
 }
 
 func (d *Dialer) Dial(endpoint string) (transport.Dialed, error) {
-	udpAddr, err := net.ResolveUDPAddr("udp", endpoint)
+	bootAddr, err := net.ResolveUDPAddr("udp", endpoint)
 	if err != nil {
 		return transport.Dialed{}, err
 	}
-	rawConn, err := net.DialUDP("udp", nil, udpAddr)
+	// Bind an UNCONNECTED socket so the data plane can hop its destination at
+	// runtime (PRD §5/§6) and receive replies from any server IP/port. The
+	// handshake runs over the same socket targeting the bootstrap address.
+	rawConn, err := net.ListenUDP("udp", nil)
 	if err != nil {
 		return transport.Dialed{}, err
 	}
 	_ = rawConn.SetReadBuffer(8 * 1024 * 1024)
 	_ = rawConn.SetWriteBuffer(8 * 1024 * 1024)
 
-	adapter := newClientStreamAdapter(rawConn)
+	adapter := newClientStreamAdapterTo(rawConn, bootAddr)
 	sess, err := handshake.ClientHandshake(adapter, d.cfg.VNI, d.id.Priv, d.id.Pub, d.id.ServerPub)
 	if err != nil {
 		rawConn.Close()
 		return transport.Dialed{}, err
 	}
 
-	return transport.Dialed{Conn: newClientConn(rawConn), Session: sess}, nil
+	return transport.Dialed{Conn: newHoppingClientConn(rawConn, bootAddr), Session: sess}, nil
 }

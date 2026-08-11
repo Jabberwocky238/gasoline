@@ -33,6 +33,13 @@ type Conn struct {
 	rawConn    *net.UDPConn
 	remoteAddr *net.UDPAddr
 
+	// hopTarget, when non-nil, makes this an unconnected client socket whose
+	// send destination can change at runtime (PRD §5/§6: client hopping). The
+	// tx path reads it per packet via WriteToUDP; SetHopTarget swaps it. When
+	// nil the conn is a plain connected socket (server-side virtual conns and
+	// non-hopping clients).
+	hopTarget atomic.Pointer[net.UDPAddr]
+
 	// virtual conn fields (server side)
 	incoming  chan pooledDatagram
 	isVirtual bool
@@ -51,6 +58,37 @@ func newClientConn(rawConn *net.UDPConn) *Conn {
 	return c
 }
 
+// newHoppingClientConn wraps an UNCONNECTED client socket whose send target
+// starts at boot and can be changed with SetHopTarget. Reads accept datagrams
+// from any source (a hopped reply comes back from whichever server IP/port the
+// operator used).
+func newHoppingClientConn(rawConn *net.UDPConn, boot *net.UDPAddr) *Conn {
+	c := &Conn{rawConn: rawConn, remoteAddr: boot}
+	c.hopTarget.Store(boot)
+	c.lastActive.Store(time.Now().UnixNano())
+	return c
+}
+
+// SetHopTarget changes the destination subsequent writes go to. Safe to call
+// concurrently with WritePacket.
+func (c *Conn) SetHopTarget(dst *net.UDPAddr) { c.hopTarget.Store(dst) }
+
+// SetHopDest resolves dst ("host:port") and points subsequent writes at it,
+// satisfying transport.HoppingConn. Only valid on a hopping client conn (one
+// created with newHoppingClientConn); a no-op target on a connected conn would
+// be silently ignored by WritePacket, so guard against misuse.
+func (c *Conn) SetHopDest(dst string) error {
+	if c.hopTarget.Load() == nil {
+		return fmt.Errorf("udp: conn is not hopping-capable")
+	}
+	addr, err := net.ResolveUDPAddr("udp", dst)
+	if err != nil {
+		return err
+	}
+	c.hopTarget.Store(addr)
+	return nil
+}
+
 func newVirtualConn(rawConn *net.UDPConn, remoteAddr *net.UDPAddr) *Conn {
 	c := &Conn{
 		rawConn:    rawConn,
@@ -65,9 +103,13 @@ func newVirtualConn(rawConn *net.UDPConn, remoteAddr *net.UDPAddr) *Conn {
 // WritePacket sends one IP packet as a single UDP datagram.
 func (c *Conn) WritePacket(data []byte) error {
 	var err error
-	if c.isVirtual {
+	switch {
+	case c.isVirtual:
 		_, err = c.rawConn.WriteToUDP(data, c.remoteAddr)
-	} else {
+	case c.hopTarget.Load() != nil:
+		// Unconnected hopping socket: send to the current hop target.
+		_, err = c.rawConn.WriteToUDP(data, c.hopTarget.Load())
+	default:
 		_, err = c.rawConn.Write(data)
 	}
 	if err == nil {
@@ -159,6 +201,26 @@ func newClientStreamAdapter(raw *net.UDPConn) *streamAdapter {
 		},
 		writeDatagram: func(p []byte) error {
 			_, err := raw.Write(p)
+			return err
+		},
+	}
+}
+
+// newClientStreamAdapterTo wraps an UNCONNECTED UDPConn for handshake, sending
+// to dst and accepting replies from any source. Used by the hopping client,
+// whose socket must stay unconnected so the data plane can change destination.
+func newClientStreamAdapterTo(raw *net.UDPConn, dst *net.UDPAddr) *streamAdapter {
+	return &streamAdapter{
+		readDatagram: func() ([]byte, error) {
+			buf := make([]byte, 65535)
+			n, _, err := raw.ReadFromUDP(buf)
+			if err != nil {
+				return nil, err
+			}
+			return buf[:n], nil
+		},
+		writeDatagram: func(p []byte) error {
+			_, err := raw.WriteToUDP(p, dst)
 			return err
 		},
 	}

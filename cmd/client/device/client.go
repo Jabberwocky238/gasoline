@@ -41,6 +41,7 @@ type Client struct {
 	session    *noise.Session     // data-plane keys from the handshake
 	tag        datacom.SessionTag // cached tag for outbound frames
 	keepalive  *Keepalive
+	hopper     *Hopper
 	tun        *tun.Tun
 
 	closed atomic.Bool
@@ -172,6 +173,13 @@ func (c *Client) Start() error {
 	c.keepalive = NewKeepalive(c.lctx, conn, c.session, c.tag)
 	c.keepalive.Start()
 
+	// Start hopping across the advertised server list, if any (PRD §5/§6).
+	if h := NewHopper(c.lctx, conn, sc.Servers()); h != nil {
+		c.hopper = h
+		c.hopper.Start()
+		c.lctx.Log().Infof("hopping enabled across %d server(s)", len(sc.Servers()))
+	}
+
 	go c.rxLoop()
 	if c.tun != nil {
 		go c.tunReadLoop()
@@ -196,6 +204,10 @@ func (c *Client) shutdownLocked() {
 	if c.keepalive != nil {
 		c.keepalive.Stop()
 		c.keepalive = nil
+	}
+	if c.hopper != nil {
+		c.hopper.Stop()
+		c.hopper = nil
 	}
 	if c.tun != nil {
 		_ = c.tun.Close()

@@ -62,6 +62,15 @@ type Dialed struct {
 	Session *noise.Session
 }
 
+// HoppingConn is an optional Conn capability: a client conn whose send
+// destination can change at runtime, so the client can hop across server
+// IPs/ports (PRD §5/§6). UDP implements it; QUIC does not (its connection binds
+// the peer). dst is "host:port".
+type HoppingConn interface {
+	Conn
+	SetHopDest(dst string) error
+}
+
 // Dialer creates outbound connections and authenticates (handshake only).
 type Dialer interface {
 	Dial(endpoint string) (Dialed, error)

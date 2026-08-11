@@ -141,16 +141,35 @@ ServerAssign(ip, sessionID, hopSecret, serverList)
 
 - Raft 默认选举超时 1~2s，期间**新握手阻塞**（返回超时，客户端重试即可），**既有 session 的数据转发完全不受影响**（转发只读本地 FSM 副本，不需要 leader）。
 - 跟随者收到握手时把 Raft 写入转发给 leader（hashicorp/raft 的标准做法）；leader 未知时短暂等待选举完成。
-- **需要完善测试**（你的明确要求），见 §8 的 P1 验收项：包含 leader 主动下线、网络分区、少数派隔离三类场景。
+- **需要完善测试**（你的明确要求），见 §9 的 P1 验收项：包含 leader 主动下线、网络分区、少数派隔离三类场景。
 
 ### 2.5 集群成员与传输
 
 - `--raft-peers "uuid@host:port;..."` 声明初始成员；`--raft-bind` 本节点 Raft 监听地址。
+- **集群规模任意**：3/4/5/7 皆可，不强制奇数。偶数节点只是略微浪费（4 节点的 quorum 是 3，容错能力与 3 节点相同），不影响正确性。选举完全交给 hashicorp/raft，配置上零额外心智负担。
 - Transport 实现 `raft.Transport` 接口，底层用 `quic-go`（已在 `go.mod`，QUIC 自带 TLS 加密与多路复用，正适合日志复制 + 快照传输并行）。
 - 快照：FSM 定期 snapshot，新节点加入时传快照而非全量日志重放。
 - **数据面不走 Raft**：IP 包转发仍走既有的 `PeerOperator` UDP 直连路径。Raft 只承载控制状态。这个边界必须清晰，否则吞吐会被共识拖垮。
 
-### 2.6 落点
+**为什么保留 Raft 选举而非"按初始化时间戳定老大"**：多数派（quorum）是"绝不出现双 leader、绝不重复分配 IP"的根源。若改用时间戳定序，网络分区时两侧会各自认定一个存活的"最老"节点为 leader，双方继续分配 IP，**分区恢复后必然冲突且无法自动裁决**——恰好摧毁强一致这一核心目标。时间戳仅在选举平票时作为 tie-break 提示，不替代 quorum。
+
+### 2.6 写入批处理（Batch）
+
+Raft 的每条日志都要过一轮多数派确认，逐条提交高频事件会压垮集群。因此**所有高频写入统一走批处理**：
+
+```
+事件产生 → 本地批队列 → 满足任一条件即打包成一条 Raft 日志提交：
+   · 累积条目数 ≥ 64
+   · 距上次提交 ≥ 500ms
+```
+
+一条 Raft 日志内含多个事件（`BatchOp{ops: []Op}`），FSM 顺序 Apply。这样 keepalive **每次都写 Raft**（语义上不丢事件、状态始终精确），但**不是每次都发起共识**——批处理把 N 次共识压成 1 次。
+
+适用于：`SessionRenew`（keepalive 续期）、`SessionMigrate`（接入点变更）、`SessionDrop`（掉线）。
+
+**不批处理**（要求立即生效、且低频）：`SessionCreate`（握手，客户端在等）、`KeyGrant`/`KeyRevoke`、`VNetUpsert`、gasoctl 的踢人操作。
+
+### 2.7 落点
 
 - 新增 `cmd/operator/device/consensus/`：`fsm.go`（状态机 + Apply）、`transport_quic.go`（raft.Transport over QUIC）、`commands.go`（日志条目类型）。
 - `go.mod` 增 `github.com/hashicorp/raft`。
@@ -246,16 +265,66 @@ VNI 200  (一个虚拟网络组)
 ### 4.3 生命周期
 
 - 租约 TTL 默认 3600s（`--lease-ttl`）。
-- **续期不走 Raft**：既有 keepalive（10s 周期）只更新本地 `LastSeen`；仅当租约过半时才提交一次 Raft `SessionRenew`。否则 10s 一次的全局共识写入会压垮集群——**这是本设计里最重要的性能取舍**。
+- **续期每次都写 Raft，但走批处理**（§2.6）：既有 keepalive 每 10~15s 一次（`keepalive.go:39`），产生一条 `SessionRenew` 进批队列；批队列按"64 条或 500ms"打包成单条 Raft 日志。语义上不丢任何一次续期，集群状态始终精确，同时把 N 次共识压成 1 次。
 - 过期回收由 leader 侧定时任务批量提交 `SessionExpire`，复用既有 `routineReaper` 节奏（30s）。
 - `DataCtrlPrefixChanged`（`message-datactrl.go:53`，已实现编解码但从未有人发送）本次启用：IP 变更时主动下发，客户端重配 TUN。
 
-### 4.4 落点
+### 4.4 配置形态：一个 vnet 一个文件
+
+vnet 定义以文件为单位，作为**集群的种子数据**：
+
+```yaml
+# vnet-200.yaml
+vni: 200
+
+segments:
+  - cidr: 10.0.1.0/24
+    pool: 10.0.1.16/28        # 池必须 ⊆ cidr
+    reserved: [10.0.1.1]      # 网关
+  - cidr: 10.0.2.0/24
+    pool: 10.0.2.0/25
+
+keys:
+  - pubkey: "base64...."
+    allowed_segments: [10.0.1.0/24]
+  - pubkey: "base64...."
+    allowed_segments: [10.0.1.0/24, 10.0.2.0/24]
+```
+
+**加载语义**：`operator --vnet ./vnet-200.yaml`。仅 bootstrap 节点在集群初始化时读取并写入 Raft；此后一切变更走 gasoctl（文件不再是权威）。重复加载已存在的 vni 会被拒绝，除非显式 `--vnet-force`。
+
+### 4.5 固定 IP 与 lock 文件
+
+**默认每个密钥固定 IP**：密钥首次接入时分配的地址即成为其固定绑定，后续永远拿这个 IP（不因租约过期而释放）。
+
+分配结果写入**同名 lock 文件**并经 Raft 同步：
+
+```yaml
+# vnet-200-lock.yaml   ← 由 operator 生成，勿手工编辑
+vni: 200
+bindings:
+  - pubkey: "base64...."
+    ip: 10.0.1.17
+    bound_at: 2026-08-11T13:00:00Z
+  - pubkey: "base64...."
+    ip: 10.0.1.18
+    bound_at: 2026-08-11T13:04:12Z
+```
+
+- lock 文件的**权威副本在 Raft 中**（`vnetDef.Bindings`）；磁盘文件是可读的镜像，由 leader 在绑定变更时落盘，便于运维查看与备份。
+- 集群重启后从 Raft 快照恢复，不依赖磁盘 lock 文件；lock 文件仅在**全新集群 bootstrap** 时可作为种子导入。
+- **解除固定**：`gasoctl ip unlock <vni> <pubkey>`——提交 Raft，删除绑定，该 IP 回池。下次接入重新分配。
+- `gasoctl ip lock <vni> <pubkey> <ip>` 手动指定固定 IP（须在池内且空闲）。
+
+这与 §4.2 的分配优先级一致：固定绑定命中即返回，等价于"续租永不过期"。
+
+### 4.6 落点
 
 - 地址池逻辑进 `consensus/fsm.go`（分配是状态机转移，不能是本地独立行为）。
 - `vniResolver.IP()` 改为走 §2.3 的 Raft 提交路径。
 - 分配结果仍写入既有 `routingMap.SetClient`，路由链路完全复用。
-- gasoctl 增 `lease list <vni>` / `lease release <vni> <cid>` / `vnet add-segment <vni> <cidr> <pool>`。
+- 新增 `cmd/operator/device/vnetfile.go`：YAML 解析 + `Pool ⊆ CIDR` 校验 + lock 文件读写。
+- gasoctl 增 `vnet load <file>` / `vnet add-segment` / `ip lock` / `ip unlock` / `lease list`。
 
 ---
 
@@ -360,7 +429,56 @@ MAC   = HMAC-SHA256(session_key, SessionTag || epoch)[0:4]
 
 ---
 
-## 7. 架构总览
+## 7. 下线与踢人
+
+四条路径，全部经 Raft 全集群生效——这是必须的：多 server 跳跃下客户端可能在任意 operator 上，只在本地踢等于没踢。
+
+### 7.1 手动踢断，允许重连（`gasoctl session kick <vni> <cid>`）
+
+- 提交 `SessionDrop{reason: kicked}` → 全集群移除 session，IP 回池（若非固定绑定）。
+- 当前接入的 operator 向客户端下发 `DataCtrlShutdown{reason: ShutdownGoingAway}`（**该消息已实现编解码，`message-datactrl.go:57`，目前无人发送**）。
+- 客户端收到后关闭连接；因密钥仍有效，可立即重新握手。**固定 IP 绑定保留，重连拿回同一 IP。**
+- 用途：强制刷新会话状态、迁移接入点。
+
+### 7.2 删除密钥强制踢（`gasoctl key revoke <vni> <pubkey>`）
+
+- 提交 `KeyRevoke` → 从密钥表移除 → **级联** `SessionDrop{reason: revoked}` 移除该密钥的所有 session。
+- 同时清除固定 IP 绑定（lock 文件同步更新），IP 回池。
+- 下发 `DataCtrlShutdown{reason: ShutdownPolicy}`。
+- 客户端重连时在 §3.2 验证第 2 步（`pubkey ∈ 密钥表`）失败 → `HandshakeAuthFail`。**永久踢出。**
+
+### 7.3 自动掉线检测
+
+- 判定方：**当前服务该 session 的 operator**（`sessionEntry.LastOperator`）。
+- 判据：`--session-timeout` 秒内（默认 60s，即 4~6 个 keepalive 周期）未收到该 session 的任何帧。
+- 动作：提交 `SessionDrop{reason: timeout}`，走**批处理**（§2.6）——掉线不是紧急事件，批量提交即可。
+- 全集群移除 session、IP 回池（固定绑定保留）。
+
+**误判防护**：多 server 跳跃下，客户端可能已跳到别的 operator。因此判定前必须先检查本地 FSM 的 `LastOperator` 是否仍是自己——若已被别的 operator 更新（对方收到帧时提交了 `SessionMigrate`），则放弃判定。这条检查不能省，否则跳跃会被误判为掉线。
+
+### 7.4 operator 自身下线
+
+- 优雅退出：提交 `SessionDrop` 批量清理自己持有的 session，然后离开 Raft 集群。
+- 崩溃：其持有的 session 由其余节点在 `--session-timeout` 后按 §7.3 清理（任一 operator 发现 `LastOperator` 指向的节点已不在 Raft 集群成员列表中，即可代为判定）。
+- **客户端侧无感**：因为全部 session 状态在 Raft 中，客户端跳到任何存活 operator 都能继续通信——这正是 G0+G4 的收益。
+
+### 7.5 gasoctl 命令汇总
+
+```
+session list [vni]                    # 含 LastOperator / LastSeen
+session kick   <vni> <cid>            # 7.1 可重连
+key    grant   <vni> <pubkey> [seg…]
+key    revoke  <vni> <pubkey>         # 7.2 永久踢出
+ip     lock    <vni> <pubkey> <ip>
+ip     unlock  <vni> <pubkey>         # 解除固定 IP
+vnet   load    <file>
+vnet   add-segment <vni> <cidr> <pool>
+lease  list    <vni>
+```
+
+---
+
+## 8. 架构总览
 
 ```
                     ┌──────── Raft (over QUIC) ────────┐
@@ -382,7 +500,7 @@ MAC   = HMAC-SHA256(session_key, SessionTag || epoch)[0:4]
 
 ---
 
-## 8. 交付顺序
+## 9. 交付顺序
 
 ```
 G0 共识层 ──┬──► G1 身份绑定 ──► G2 动态 IP（分配是 FSM 转移）
@@ -400,19 +518,22 @@ G0 共识层 ──┬──► G1 身份绑定 ──► G2 动态 IP（分配�
 | P5 | G3 SessionID 会话标识（不含跳跃） | 客户端源端口人为变更后会话不中断（同时验证 NAT 重绑定修复） |
 | P6 | G3 端口跳跃（单 server） | 端口按 interval 轮换；跨跳跃点 TCP 长连接不断；时钟偏移 ±1 片仍可连 |
 | P7 | G4 多 server + 配置文件 | 握手于 A，改向 B/C 发包会话不中断；伪造 MAC 的包被丢弃 |
+| P8 | 下线与踢人（§7） | 四条路径各自生效且全集群同步：kick 后可重连且保住固定 IP；revoke 后重连必失败；60s 无帧自动下线；**跳到别的 operator 不被误判为掉线** |
 
-P1 单独成阶段，因为共识层的正确性无法靠"跑通一次"证明——必须主动注入故障。
+P1 单独成阶段，因为共识层的正确性无法靠"跑通一次"证明——必须主动注入故障。P8 置于最后，因为它依赖 G4 才能验证"跳跃 vs 掉线"的区分。
 
 ---
 
-## 9. 风险
+## 10. 风险
 
 | 风险 | 影响 | 应对 |
 |---|---|---|
 | **握手引入 Raft 写入延迟** | 跨地域握手 +1 RTT | 已确认接受；乐观预选 IP 避免二次往返 |
 | **Leader 不可达期间无法新握手** | 1~2s 窗口内新客户端连不上 | 既有 session 转发不受影响；客户端重试；P1 专项测试 |
-| keepalive 若每次写 Raft | 集群被高频写入压垮 | 续期只在租约过半时提交（§4.3），10s 心跳仅更新本地 |
-| 数据面若走 Raft | 吞吐崩塌 | 明确分层：Raft 只承载控制状态（§7） |
+| keepalive 高频写 Raft | 逐条提交会压垮集群 | 每次都写，但走批处理（§2.6）：64 条或 500ms 打包成一条日志，N 次共识压成 1 次 |
+| 数据面若走 Raft | 吞吐崩塌 | 明确分层：Raft 只承载控制状态（§8） |
+| 跳跃被误判为掉线 | 活跃客户端被踢 | 判定前校验 `LastOperator` 是否仍是自己（§7.3），已迁移则放弃判定 |
+| lock 文件与 Raft 不一致 | 运维误读 | 权威副本在 Raft，磁盘文件仅为镜像；重启从快照恢复而非读文件（§4.5） |
 | 会话标签增加每包开销 | 有效 MTU 下降 | 8B 标签 + 4B MAC = 12B；相应下调 `DEFAULT_MTU` |
 | 全区间监听占用 fd | 区间过大时耗尽 | 区间上限硬编码 64 |
 | `AuthContext` 破坏既有接口 | 三个 authenticator 需改签名 | 改动机械，noauth 路径有测试覆盖 |
@@ -420,9 +541,16 @@ P1 单独成阶段，因为共识层的正确性无法靠"跑通一次"证明—
 
 ---
 
-## 10. 待定问题（请评审确认）
+## 11. 待定问题（请评审确认）
 
 1. **会话标签 8B 还是 16B？** 我倾向 8B（SessionID 前 8 字节）+ 4B MAC，共 12B/包。万级会话下碰撞可忽略。
-2. **Raft 集群规模？** 3 或 5 节点（需奇数）。operator 数量若超过集群规模，多出的应作为 **non-voting learner** 加入（只读副本，不参与选举），否则选举延迟随规模劣化。这个分层需要你确认。
-3. **`--network` 静态配置的去留？** 有了 Raft，vnet 定义应由 gasoctl 写入集群。我建议保留它仅作 bootstrap 种子，其后一律走 gasoctl。
-4. **本 PRD 不含数据面加密**，交付后 UDP payload 仍是明文。请确认符合预期。
+2. **批处理窗口 500ms / 64 条是否合适？** 影响的是"客户端掉线后多久被集群感知"，与 60s 的掉线判定相比可忽略，但若你要更实时可调小。
+3. **本 PRD 不含数据面加密**，交付后 UDP payload 仍是明文。请确认符合预期。
+
+### 已确认的决策（本轮）
+
+- ✅ 集群规模任意，不强制奇数；保留 Raft 标准选举与多数派，**不**改为时间戳定序（§2.5）
+- ✅ keepalive 每次都写 Raft，靠批处理聚合（§2.6）
+- ✅ `--network` 降级为 bootstrap 种子，改为一 vnet 一文件（§4.4）
+- ✅ 默认密钥固定 IP + lock 文件 + Raft 同步 + gasoctl 可解除（§4.5）
+- ✅ 掉线自动检测由接入 operator 判定后经 Raft 广播（§7.3）

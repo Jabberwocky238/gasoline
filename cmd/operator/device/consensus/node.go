@@ -4,10 +4,12 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"net/netip"
 	"time"
 
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/raft"
+	"github.com/jabberwocky238/gasoline/protocol"
 	transportQuic "github.com/jabberwocky238/gasoline/transport/quic"
 )
 
@@ -191,6 +193,19 @@ func (n *Node) State() *meshState { return n.fsm }
 
 // IsLeader reports whether this node currently holds leadership.
 func (n *Node) IsLeader() bool { return n.raft.State() == raft.Leader }
+
+// PickIP resolves a free address for pubkey on vni against the local replica
+// (no consensus). See meshState.PickIP.
+func (n *Node) PickIP(vni protocol.VNI_Ty, pubkey [32]byte) (netip.Addr, netip.Prefix, bool) {
+	return n.fsm.PickIP(vni, pubkey)
+}
+
+// CommitSession proposes a SessionCreate through Raft (the durable commit of an
+// IP + SessionID allocation). Returns consensus.ErrIPTaken if the IP was taken
+// by a concurrent commit — the caller retries with a fresh pick.
+func (n *Node) CommitSession(c *SessionCreate, timeout time.Duration) error {
+	return n.Propose(&Command{Kind: CmdSessionCreate, SessionCreate: c}, timeout)
+}
 
 // LeaderID returns the current leader's Raft ID ("" if unknown).
 func (n *Node) LeaderID() string {

@@ -3,6 +3,7 @@ package consensus
 import (
 	"bytes"
 	"encoding/gob"
+	"errors"
 	"fmt"
 	"io"
 	"net/netip"
@@ -158,11 +159,15 @@ func (m *meshState) applyKeyRevoke(c *KeyRevoke) error {
 	return nil
 }
 
+// ErrIPTaken is returned by an apply that would double-assign an IP. The assign
+// server maps it to a retry (optimistic concurrency, PRD §2.3).
+var ErrIPTaken = errors.New("consensus: ip already assigned")
+
 func (m *meshState) applySessionCreate(c *SessionCreate) error {
 	// IP-collision check: the pre-selected IP must be free (PRD §2.3).
 	for _, s := range m.Sessions {
 		if s.VNI == c.VNI && s.IP == c.IP {
-			return fmt.Errorf("consensus: ip %s already assigned in vni %s", c.IP, c.VNI)
+			return ErrIPTaken
 		}
 	}
 	e := &sessionEntry{
@@ -332,6 +337,94 @@ func (m *meshState) VNetCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return len(m.VNets)
+}
+
+// PickIP resolves an address for pubkey on vni against the current local
+// replica. Priority (PRD §4.2):
+//
+//  1. A pinned StaticIP on the key grant (fixed IP) — returned as-is.
+//  2. Otherwise the first free address in any allowed segment's pool,
+//     skipping reserved addresses and any IP already assigned in the vni.
+//
+// This is optimistic: the caller proposes SessionCreate with the returned IP,
+// and the FSM rejects on a commit-time collision so the caller retries. ranges
+// is the segment CIDR the IP was drawn from. ok is false when the key is not
+// granted or the pool is exhausted.
+func (m *meshState) PickIP(vni protocol.VNI_Ty, pub [32]byte) (ip netip.Addr, ranges netip.Prefix, ok bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	vn, exists := m.VNets[vni]
+	if !exists {
+		return netip.Addr{}, netip.Prefix{}, false
+	}
+	grant, granted := vn.AuthKeys[pub]
+	if !granted {
+		return netip.Addr{}, netip.Prefix{}, false
+	}
+
+	// 1. Pinned fixed IP.
+	if grant.StaticIP.IsValid() {
+		return grant.StaticIP, segmentOf(vn, grant.StaticIP), true
+	}
+
+	// 2. First free pool address in an allowed segment.
+	used := m.usedIPsLocked(vni)
+	for _, seg := range vn.Segments {
+		if !allowedSegment(grant, seg.CIDR) {
+			continue
+		}
+		reserved := make(map[netip.Addr]struct{}, len(seg.Reserved))
+		for _, r := range seg.Reserved {
+			reserved[r] = struct{}{}
+		}
+		for a := seg.Pool.Masked().Addr(); seg.Pool.Contains(a); a = a.Next() {
+			if _, r := reserved[a]; r {
+				continue
+			}
+			if _, u := used[a]; u {
+				continue
+			}
+			return a, seg.CIDR, true
+		}
+	}
+	return netip.Addr{}, netip.Prefix{}, false
+}
+
+// usedIPsLocked returns the set of IPs currently assigned in vni. Caller holds
+// the read lock.
+func (m *meshState) usedIPsLocked(vni protocol.VNI_Ty) map[netip.Addr]struct{} {
+	used := make(map[netip.Addr]struct{})
+	for _, s := range m.Sessions {
+		if s.VNI == vni {
+			used[s.IP] = struct{}{}
+		}
+	}
+	return used
+}
+
+// allowedSegment reports whether a grant may draw from segment cidr. An empty
+// AllowedSeg means "any segment in the vni".
+func allowedSegment(g *keyGrant, cidr netip.Prefix) bool {
+	if len(g.AllowedSeg) == 0 {
+		return true
+	}
+	for _, s := range g.AllowedSeg {
+		if s == cidr {
+			return true
+		}
+	}
+	return false
+}
+
+// segmentOf returns the segment CIDR containing ip, or the zero prefix.
+func segmentOf(vn *vnetDef, ip netip.Addr) netip.Prefix {
+	for _, seg := range vn.Segments {
+		if seg.CIDR.Contains(ip) {
+			return seg.CIDR
+		}
+	}
+	return netip.Prefix{}
 }
 
 // --------------- helpers ---------------

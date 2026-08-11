@@ -36,20 +36,14 @@ func (a *localAllocator) Preclaim(vni protocol.VNI_Ty, pubkey noise.PublicKey) (
 }
 
 // Confirm binds sessionID -> the client's /32 in the routing table, making the
-// client reachable. (The preset already fixed the IP; here we install the
-// forwarding entry keyed by the freshly minted SessionID.)
-func (a *localAllocator) Confirm(vni protocol.VNI_Ty, r Reservation) {
-	vn, ok := a.state.vni(vni)
-	if !ok {
-		return
+// client reachable. The preset IP is static (no durable reservation), so
+// Confirm never conflicts.
+func (a *localAllocator) Confirm(vni protocol.VNI_Ty, _ noise.PublicKey, r assign.Reservation) error {
+	if vn, ok := a.state.vni(vni); ok {
+		vn.routingMap.SetClient(r.SessionID, netip.PrefixFrom(r.IP, r.IP.BitLen()))
 	}
-	vn.routingMap.SetClient(r.SessionID, netip.PrefixFrom(r.IP, r.IP.BitLen()))
+	return nil
 }
 
-// Rollback is a no-op for the preset-backed allocator: nothing is reserved
-// (the IP is static), and Confirm hasn't written the route yet. Raft-backed
-// allocation makes this meaningful.
-func (a *localAllocator) Rollback(vni protocol.VNI_Ty, r Reservation) {}
-
-// Reservation aliases assign.Reservation for the method receivers above.
-type Reservation = assign.Reservation
+// Rollback is a no-op: Preclaim reserved nothing durable.
+func (a *localAllocator) Rollback(vni protocol.VNI_Ty, r assign.Reservation) {}

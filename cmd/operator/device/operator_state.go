@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/jabberwocky238/gasoline/cmd/operator/device/consensus"
 	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/noise"
@@ -45,6 +46,11 @@ type operatorState struct {
 	// cidrs maps VNI -> its CIDR, populated at construction. Used by the
 	// assign allocator to report IPRanges to clients.
 	cidrs map[protocol.VNI_Ty]netip.Prefix
+
+	// node is the consensus (Raft) node. When non-nil, IP/SessionID allocation
+	// commits through Raft (raftAllocator); when nil, the pre-consensus
+	// localAllocator (preset + local mint) is used.
+	node *consensus.Node
 
 	// sessionIndexSeq issues per-session indices used in packet headers.
 	sessionIndexSeq atomic.Uint32

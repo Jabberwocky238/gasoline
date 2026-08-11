@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"time"
 
+	"github.com/jabberwocky238/gasoline/cmd/operator/device/consensus"
 	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/assign"
@@ -155,8 +156,27 @@ func (o *Operator) UUID() [16]byte { return o.uuid }
 // StaticPub returns the operator's Noise static public key. Clients need it
 // (out of band) to run the IK handshake against this operator.
 func (o *Operator) StaticPub() noise.PublicKey { return o.state.staticPub }
-func (o *Operator) ConnectedClients() int      { return o.state.totalClients() }
-func (o *Operator) State() *operatorState      { return o.state }
+
+// allocator selects the assign backend: Raft-backed when a consensus node is
+// attached, else the pre-consensus preset allocator.
+func (o *Operator) allocator() assign.Allocator {
+	if o.state.node != nil {
+		return &raftAllocator{
+			node:     o.state.node,
+			state:    o.state,
+			leaseTTL: 3600 * time.Second,
+			self:     o.uuid,
+			timeout:  5 * time.Second,
+		}
+	}
+	return &localAllocator{state: o.state}
+}
+
+// AttachConsensus wires a running consensus node so IP/SessionID allocation
+// commits through Raft. Call before Start.
+func (o *Operator) AttachConsensus(node *consensus.Node) { o.state.node = node }
+func (o *Operator) ConnectedClients() int                { return o.state.totalClients() }
+func (o *Operator) State() *operatorState                { return o.state }
 
 // ClientAddr returns the first client listener's bound address, or
 // the empty string if no listener was configured.
@@ -257,8 +277,9 @@ func (o *Operator) routineAcceptClients(tp string, ln transport.Listener) {
 
 		// Authentication is done (acc carries the identity + Session). Run the
 		// control-plane assignment (preclaim/claim/ack/confirm) to get an IP +
-		// SessionID.
-		alloc := &localAllocator{state: o.state}
+		// SessionID. Use the Raft-backed allocator when consensus is running,
+		// otherwise the pre-consensus preset allocator.
+		alloc := o.allocator()
 		sc, err := assign.ServerAssign(acc.Conn, acc.Session, acc.VNI, acc.ClientPub, o.state.nextSessionIndex(), alloc)
 		if err != nil {
 			logger.Errorf("assign on VNI %s: %v", acc.VNI, err)

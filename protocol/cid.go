@@ -6,7 +6,30 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"golang.org/x/crypto/blake2s"
 )
+
+// cidDomain domain-separates the CID derivation from any other BLAKE2s use.
+var cidDomain = []byte("gaso")
+
+// DeriveCID computes a client's CID from its static public key:
+//
+//	CID = BLAKE2s-256("gaso" || pubkey)[0:8]
+//
+// The CID is therefore a function of identity, not a client-chosen value —
+// this is what makes CID spoofing impossible (PRD §3.1). The server recomputes
+// it from the pubkey recovered during the Noise handshake and rejects any
+// mismatch.
+func DeriveCID(pubkey [32]byte) CID_Ty {
+	h, _ := blake2s.New256(nil)
+	h.Write(cidDomain)
+	h.Write(pubkey[:])
+	sum := h.Sum(nil)
+	var cid CID_Ty
+	copy(cid[:], sum[:8])
+	return cid
+}
 
 // ParseCID accepts a CID written as either a decimal uint64 (default)
 // or a hex string prefixed with "0x"/"0X". Both forms are big-endian

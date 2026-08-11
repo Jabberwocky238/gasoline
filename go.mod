@@ -10,6 +10,7 @@ require (
 	github.com/quic-go/quic-go v0.59.0
 	github.com/sagernet/sing-tun v0.8.7
 	github.com/sirupsen/logrus v1.9.4
+	golang.org/x/crypto v0.48.0
 	golang.org/x/sys v0.41.0
 )
 
@@ -36,7 +37,6 @@ require (
 	github.com/sagernet/sing v0.8.0 // indirect
 	github.com/vishvananda/netns v0.0.5 // indirect
 	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba // indirect
-	golang.org/x/crypto v0.48.0 // indirect
 	golang.org/x/exp v0.0.0-20251017212417-90e834f514db // indirect
 	golang.org/x/net v0.50.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect

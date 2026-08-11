@@ -1,6 +1,6 @@
-# PRD：身份绑定密钥 / 动态 IP 下发 / 端口跳跃 / 多 server 跳跃
+# PRD：共识 / 身份 / 动态 IP / 端口跳跃 / 多 server 跳跃 / 数据面加密
 
-分支：`pure-mesh`　状态：待评审　目标版本：握手协议 v2 + operator 共识层 v1
+分支：`pure-mesh`　状态：待评审　目标版本：握手协议 v2 + operator 共识层 v1 + 数据面 v1
 
 ---
 
@@ -37,10 +37,10 @@ ClientHello(vni, cid) → ServerHello(challenge) → ClientAnswer(response) → 
 | G2 | 动态 IP 下发 | OpenVPN | 地址池按需分配、带租约、断线回收；**IP 与 session 号在一次握手内完成分配**，零额外往返 |
 | G3 | 端口跳跃 | Hysteria2 | 服务端监听端口区间，客户端按共享密钥推导的时间序列跳跃；跳跃对上层数据面透明 |
 | G4 | 多 server 跳跃 | — | 握手绑定单一 host:port；握手成功后可在**任意 server 的任意区间**发送，全部可行 |
+| G5 | 数据面加密 | WireGuard | Noise_IK 握手协商密钥，ChaCha20-Poly1305 加密每个 IP 包；含重放窗口与 rekey |
 
 ### 非目标（本次明确不做）
 
-- **不做数据面加密。** G1 只解决"你是谁"，不解决"链路上谁能看见"。`ARCHETECT.md` 里的零信任端到端加密是独立的后续工作。本 PRD 交付后 payload 仍是明文——QUIC 传输自带 TLS，UDP 传输不带。**验收时须明示，避免误以为已经加密。**
 - 不做 PKI / CA / 证书链。公钥即身份，信任来自授权列表，同 WireGuard。
 - 不做 IPv6 地址池（协议字段预留，不实现）。
 - 不改 gasoctl IPC 的既有命令语义（只做加法）。
@@ -96,8 +96,11 @@ type sessionEntry struct {
     PubKey      [32]byte
     VNI         protocol.VNI_Ty
     IP          netip.Addr
-    SessionKey  [32]byte        // 数据面转发准入 MAC 用
-    HopSecret   [32]byte        // 端口跳跃推导用
+    HopSecret   [32]byte        // 端口跳跃推导用（可被任意 operator 读取）
+    LastTimestamp [12]byte      // Noise 防重放：该公钥见过的最大 TAI64N
+
+    // 注意：数据面传输密钥（send_key/recv_key）**不在此处**——
+    // 它由 Noise 握手在两端本地派生，不进 Raft，operator 无法解密（§7.2）
 
     // 哪个密钥在哪个接入点最近接入
     LastOperator [16]byte       // 最近服务它的 operator UUID
@@ -113,22 +116,22 @@ type sessionEntry struct {
 你的要求：**分配 IP 和 session 号必须在一次握手内完成**。这与 Raft 的"写入需过 leader + 等多数派"存在张力，解法是把三件事合成**一条 Raft 日志**：
 
 ```
-ClientHello
-  ↓
-ServerHello(nonce)
-  ↓
-ClientAnswer(sig)
+ClientHello(Noise msg1)
+  ↓  ← 服务端解密 msg1 得客户端静态公钥，校验 CID 与授权
+ServerHello(Noise msg2)
+  ↓  ← 至此双方已各自派生 send_key / recv_key（不进 Raft）
+ClientAnswer(空载荷)
   ↓  ← 服务端在此处做唯一一次 Raft 写入：
      Apply(SessionCreate{
         pubkey, cid, vni,
         ip:        <本地预选，见下>,
         sessionID: <本地生成>,
-        sessionKey, hopSecret,
+        hopSecret,
         operator:  self.UUID,
      })
      等待多数派提交 → 提交成功即分配生效
   ↓
-ServerAssign(ip, sessionID, hopSecret, serverList)
+ServerAssign(ip, sessionID, hopSecret, serverList)   ← 此报文起已被 AEAD 加密
 ```
 
 握手报文数**不变**（仍是 4 条），额外成本是 `ClientAnswer` 到 `ServerAssign` 之间的一次 Raft 提交（本地 leader 约 1ms；跨地域跟随者转发至 leader 约 1 RTT）。这是强一致的固有代价，你已确认接受。
@@ -141,7 +144,7 @@ ServerAssign(ip, sessionID, hopSecret, serverList)
 
 - Raft 默认选举超时 1~2s，期间**新握手阻塞**（返回超时，客户端重试即可），**既有 session 的数据转发完全不受影响**（转发只读本地 FSM 副本，不需要 leader）。
 - 跟随者收到握手时把 Raft 写入转发给 leader（hashicorp/raft 的标准做法）；leader 未知时短暂等待选举完成。
-- **需要完善测试**（你的明确要求），见 §9 的 P1 验收项：包含 leader 主动下线、网络分区、少数派隔离三类场景。
+- **需要完善测试**（你的明确要求），见 §11 的 P1 验收项：包含 leader 主动下线、网络分区、少数派隔离三类场景。
 
 ### 2.5 集群成员与传输
 
@@ -184,7 +187,10 @@ Raft 的每条日志都要过一轮多数派确认，逐条提交高频事件会
 
 采用 WireGuard 的核心不变式：**身份即密钥，CID 是公钥的函数而非独立输入**。
 
-- 密钥体制：**Ed25519**（32B 公钥 / 64B 签名）。本阶段只需证明持有私钥（认证），不需协商共享密钥；后续做数据面加密时再引入 X25519，两者可共存。
+- 密钥体制：**X25519**（32B 公钥）。
+
+  上一版本 PRD 选的是 Ed25519（签名），因为当时数据面加密是非目标。**加入 G5 后改为 X25519**：Noise_IK 用 DH 而非签名做认证——能算出正确共享密钥本身就证明持有私钥，无需额外签名。同 WireGuard，一把密钥既是身份也是密钥协商材料，不引入第二套密钥体系。
+
 - 推导规则：
 
   ```
@@ -195,43 +201,47 @@ Raft 的每条日志都要过一轮多数派确认，逐条提交高频事件会
 
 - 碰撞：64 位空间。密钥授权写入 Raft 时检测 CID 碰撞并拒绝该条目——把风险从"运行时静默串号"降为"授权时显式报错"。
 
-### 3.2 握手改造
+### 3.2 握手改造：Noise_IK
+
+身份认证与密钥协商合一，握手即 Noise_IK 的两条消息，映射到现有四段式结构：
 
 ```
 ClientHello:  version(1) cryptoSuite(2) vni(4) cid(8) labels
-              + Label[LabelKey_ClientPubKey] = [32]byte          ← 新增
+              + Label[LabelKey_NoiseInitiation] = Noise msg1     ← 新增
+                  msg1 = e_pub(32) || encrypted_static(32+16)
+                                   || encrypted_timestamp(12+16)
 
 ServerHello:  version(1) cryptoSuite(2) labels
-              + Label[LabelKey_Challenge]    = [32]byte nonce    ← 已有
+              + Label[LabelKey_NoiseResponse]   = Noise msg2     ← 新增
+                  msg2 = e_pub(32) || encrypted_empty(16)
 
-ClientAnswer: answerLen(2) + answer
-              answer = Ed25519.Sign(privkey, transcript)         ← 语义改变
+ClientAnswer: 保留报文但载荷为空（Noise 在两条消息内已完成认证）
+ServerAssign: ip / sessionID / hopSecret / serverList
 ```
 
-**签名覆盖范围（transcript binding）**，防重放与降级：
+**"IK" 的含义**：Initiator 在第一条消息里就把自己的静态公钥（加密后）发出去，且**预先知道** Responder 的静态公钥。后者要求客户端配置里写明目标 server 的公钥——同 WireGuard 的 `PublicKey =` 配置项。
 
-```
-transcript = "gasoline-v2-auth"
-           || version(1) || cryptoSuite(2)
-           || vni(4) || cid(8)
-           || client_pubkey(32) || server_nonce(32)
-```
+**认证如何达成（无需签名）**：msg1 中客户端的静态公钥用 `DH(e_client, s_server)` 派生的密钥加密；服务端只有持有 `s_server` 私钥才能解开。反过来，客户端只有持有 `s_client` 私钥才能算出后续 `DH(s_client, e_server)`，得到正确的传输密钥。**能通信本身即完成双向认证**。
 
-服务端验证三步：
+服务端验证三步（顺序不可换）：
 
-1. `CID == derive(pubkey)`　→ 否则拒绝（**这一步堵死冒用**）
-2. `pubkey ∈ FSM 的 VNI 密钥表`　→ 否则拒绝（读本地 Raft 副本，无需网络往返）
-3. `Ed25519.Verify(pubkey, transcript, sig)`　→ 否则拒绝
+1. Noise 解密 msg1 成功 → 得到客户端静态公钥（失败则丢弃，不回包）
+2. `CID == derive(pubkey)`　→ 否则拒绝（**这一步堵死冒用**）
+3. `pubkey ∈ FSM 的 VNI 密钥表`　→ 否则拒绝（读本地 Raft 副本，无需网络往返）
 
-三种失败返回**同一错误码、同一延迟**，不泄露"该公钥是否已授权"。
+失败一律**静默丢弃或返回同一错误码同一延迟**，不泄露"该公钥是否已授权"。
+
+**防重放**：msg1 内含加密的 TAI64N 时间戳，服务端记录每个静态公钥见过的最大时间戳，拒绝更旧的 msg1（同 WireGuard）。该状态随 `keyGrant` 存入 Raft，使**任意 operator 都能拒绝重放**——单机方案在多 server 跳跃下会被绕过，这是 G0 的又一处收益。
 
 ### 3.3 落点
 
-- 新增 `protocol/auth/type-pubkey.go`：`Type = TypePubKey (0x03)`。
-- **接口需扩容**：现有 `Respond(challenge []byte)` 拿不到 transcript 所需字段，改为传 `AuthContext` 结构体。这是唯一的破坏性接口变更，影响三个既有 authenticator（noauth/hmac/userpass 忽略新字段即可）。
+- 新增 `protocol/noise/`：`handshake.go`（IK 模式状态机）、`kdf.go`（HKDF-BLAKE2s）、`cipher.go`（ChaCha20-Poly1305 封装）。依赖 `golang.org/x/crypto`（当前是 indirect，提升为直接依赖）。
+- 新增 `protocol/auth/type-noise.go`：`Type = TypeNoise (0x03)`，把 Noise 状态机接进既有 authenticator 接口。
+- **接口需扩容**：现有 `Respond(challenge []byte)` 无法承载 Noise 的双向状态机，改为传 `AuthContext`（含 vni/cid/静态密钥对/对端公钥）。这是唯一的破坏性接口变更，影响三个既有 authenticator（noauth/hmac/userpass 忽略新字段即可）。
 - `VerifyResponse` 的 `cid` 参数**恢复使用**（当前被丢弃）。
-- 密钥授权改为经 Raft 写入：gasoctl 新增 `key grant <vni> <pubkey> [seg...]` / `key revoke <vni> <pubkey>`。
-- 客户端 `--key <path>`，缺失时生成并落盘（0600）；新增 `client genkey` 输出公钥。
+- 密钥授权经 Raft 写入：gasoctl `key grant <vni> <pubkey> [seg...]` / `key revoke <vni> <pubkey>`。
+- 客户端 `--key <path>`（缺失则生成并落盘 0600）+ 配置文件中每个 server 的 `pubkey`；新增 `client genkey`。
+- **operator 也需要静态密钥对**：`--key <path>`，公钥经 `ServerAssign` 的 server 列表下发（客户端首次仍需带外获知，同 WireGuard）。
 
 ### 3.4 兼容性
 
@@ -357,7 +367,7 @@ UDP listener 现以 `netip.AddrPort` 为键索引 `virtualPeer`（`udp/listener.
 **解决方案：以 SessionID 而非四元组标识会话。**
 
 - 启用当前恒为零的 `SessionContext.SessionID`：握手时生成并经 `ServerAssign` 下发（**线格式已有该字段，无需改 messages.go**）。
-- 数据面每帧前置会话标签（长度见 §9 Q1）。
+- 数据面每帧前置 6 字节会话标签（见 §6.4）。
 - peers 索引主键由 `AddrPort` 改为 SessionID，`AddrPort` 降为辅助索引。已知 SessionID + 新源地址 → 原地更新 `remoteAddr`，**不重新握手**。
 
 顺带修复了 NAT 重绑定断连——一个既有但未记录的缺陷。
@@ -380,13 +390,37 @@ QUIC 有自身的连接迁移与路径验证，叠加我们的跳跃会冲突。
 
 在没有共识层的方案里，G4 是最难的一项（收包的 operator 对会话一无所知，需要转发到宿主）。**有了 G0，它几乎是免费的**：
 
-每个 operator 都持有全部 session 的完整副本（SessionID、PubKey、IP、SessionKey、HopSecret）。任意 operator 收到任意会话的包，都能：
+每个 operator 都持有全部 session 的完整副本（SessionID、PubKey、IP、HopSecret、租约）。任意 operator 收到任意会话的包，都能：
 
-1. 用 SessionID 查本地 FSM → 命中；
-2. 用 `SessionKey` 校验帧 MAC → 确认来包真伪；
-3. 用本地 `routingMap` 转发 → 与宿主 operator 的行为完全一致。
+1. 用 `SessionTag` 查本地 FSM → 命中，得知这是哪个会话、对应哪个 overlay IP；
+2. 用本地 `routingMap` 按目的 IP 转发 → 与宿主 operator 的行为完全一致。
 
 **不需要转发到宿主，不需要 SessionBind 广播，不存在"宿主故障"这一概念。** 这正是你选择强一致的核心收益。
+
+### 6.1bis G5 带来的约束：operator 不能解密
+
+引入端到端加密后，上面第 2 步有一个前提问题：**operator 拿不到传输密钥，它看不见密文里的目的 IP，怎么按 IP 转发？**
+
+这是 G4 与 G5 的真实冲突，必须明确解决。方案：**把路由所需的最小信息放在密文之外**。
+
+```
+frame = SessionTag(6) || Counter(8) || AEAD密文(加密的完整 IP 包)
+         └─ 明文，用于查会话 → 得知源会话
+```
+
+- **上行**（客户端 → operator）：operator 由 `SessionTag` 确定**源**会话；目的地则由密文内的 IP 决定，operator 看不到。
+- 因此 operator 必须能在不解密的前提下知道往哪送。解法是 `SessionTag` 之后**再附一个明文的目的标识**：
+
+```
+frame = SessionTag(6) || DstTag(6) || Counter(8) || AEAD密文
+                        └─ 目的会话的 SessionTag，由客户端填写
+```
+
+客户端在发包前用本地 ARP/路由表把目的 overlay IP 解析为对端的 `SessionTag`（该映射由 operator 经 `DataCtrlPeerAdvertise` 下发——**这条消息已实现编解码但目前无人发送**，§4.3 同款情况）。operator 只需 `DstTag → 会话 → 当前接入 operator`，纯查表转发，全程不解密。
+
+**代价与收益**：每包多 6 字节（总开销见 §7.6 更新）。收益是 operator 彻底退化为"加密信封的邮差"——它知道谁发给谁，但读不到内容。这正是 `ARCHETECT.md` 里"operator 和链路层永远无法知道内部信息"那条零信任目标的落地。
+
+**副作用**：广播/组播（如 ARP 广播）无法用单一 `DstTag` 表达。本期做法是保留一个全零 `DstTag` 表示"广播给同 VNI 所有会话"，由 operator 复制分发；密文仍只有目标能解开（需为广播额外协商组密钥，**本期不做，广播帧走明文**，仅限 ARP 这类不含用户数据的控制流量）。
 
 ### 6.2 配置与下发
 
@@ -412,14 +446,19 @@ servers:
 
 ### 6.4 数据面来包校验
 
-任意 operator 都会转发任意会话的包，因此**必须**校验，否则可被用作放大攻击：
+任意 operator 都会转发任意会话的包，因此必须能识别会话归属并拒绝伪造包。
+
+**加入 G5 后，这里被简化了**：不再需要独立的转发准入 MAC。
 
 ```
-frame = SessionTag(8) || MAC(4) || payload
-MAC   = HMAC-SHA256(session_key, SessionTag || epoch)[0:4]
+frame = SessionTag(6) || DstTag(6) || Counter(8) || AEAD密文   ← 见 §7.3
 ```
 
-4 字节 MAC 挡不住定向攻击，但足以挡住无差别扫描。注意这**不是**数据面加密（§1 非目标仍成立），只是转发准入。
+- operator 用 `SessionTag`（6 字节）查本地 Raft 副本定位会话 → O(1) 转发；
+- 包的真伪由端到端的 **Poly1305 tag** 保证，比原先 4 字节截断 MAC 强得多；
+- operator **不解密**——它没有传输密钥（密钥不进 Raft），只做转发。这正是端到端加密应有的形态。
+
+**SessionTag 取 6 字节**（SessionID 前 6 字节，48 bit）：按生日界，百万级并发会话下碰撞概率约 10⁻³，且碰撞只导致一次查表失败后丢包（AEAD 校验必然失败），不构成安全问题。你要求尽可能短，6 字节是可用性与开销的平衡点。
 
 ### 6.5 落点
 
@@ -429,25 +468,114 @@ MAC   = HMAC-SHA256(session_key, SessionTag || epoch)[0:4]
 
 ---
 
-## 7. 下线与踢人
+## 7. G5：数据面加密（WireGuard AEAD）
+
+### 7.1 现状澄清
+
+`3rdparty/` 下 11 个目录**全部为空**（无 `.gitmodules`，无任何文件），第一方代码中 `aead` / `chacha` / `poly1305` / `noise` 搜索结果为零，`golang.org/x/crypto` 目前只是 sing-tun 拉进来的 **indirect** 依赖。因此本项**需从头实现**，可对照 wireguard-go 的公开实现。
+
+### 7.2 密钥协商
+
+由 §3.2 的 Noise_IK 握手直接产出两把方向密钥：
+
+```
+握手完成 → HKDF 派生 → (send_key, recv_key)   各 32 字节
+                        客户端的 send = 服务端的 recv，反之亦然
+```
+
+密钥**不进 Raft**——它是每会话、每次握手独立的临时密钥，且具备前向保密（依赖 ephemeral 密钥对）。Raft 中只存静态公钥（身份）与 `SessionKey`（§6.4 的转发准入 MAC，与加密密钥是两回事）。
+
+**这带来一个必须解决的设计冲突，见 §7.5。**
+
+### 7.3 数据面帧格式
+
+```
+frame = SessionTag(6) || DstTag(6) || Counter(8)
+        || ChaCha20-Poly1305(send_key, Counter, ip_pkt)
+           └── 密文 = 明文长度 + 16 字节 Poly1305 tag
+```
+
+`SessionTag` / `DstTag` 均为明文（operator 靠它们纯查表转发，见 §6.1bis）；`Counter` 明文（AEAD nonce 本就无需保密）。
+
+- `Counter`：单调递增的 nonce，每包 +1。ChaCha20-Poly1305 的 96-bit nonce 由 `Counter` 零扩展而来（同 WireGuard）。
+- **同一密钥下 Counter 绝不重复**——这是 AEAD 安全性的绝对前提，达到上限必须 rekey。
+- §6.4 的 4 字节转发准入 MAC **被 AEAD tag 取代**：既然任意 operator 都持有 `SessionKey`（Raft 同步），转发准入改用 `SessionTag` 查表即可；真伪由端到端的 Poly1305 tag 保证。**省下 4 字节，且安全性更强**。
+
+### 7.4 重放窗口与 rekey
+
+- **重放窗口**：滑动 bitmap，窗口大小 2048（同 WireGuard）。收到的 Counter 若落在窗口外（过旧）或已被标记，丢弃。
+- **rekey 触发**（任一满足）：
+  - 距上次握手 ≥ 120s（`REKEY_AFTER_TIME`）
+  - 发送包数 ≥ 2^60（`REKEY_AFTER_MESSAGES`）
+  - 收到对端 rekey 请求
+- rekey 即重跑一次 Noise_IK 握手，**但不重新分配 IP / SessionID**——租约与会话延续，只换传输密钥。这一点必须在实现时明确，否则每 2 分钟客户端就换一次 IP。
+
+### 7.5 与 QUIC / UDP 两种传输的关系
+
+这是本项**最需要想清楚的部分**（你的明确要求）。两种传输的安全属性本就不同：
+
+| | UDP 传输 | QUIC 传输 |
+|---|---|---|
+| 现状 | 完全明文 | 已有 TLS 1.3 加密（`transport/quic/tls.go`） |
+| 加 G5 后 | Noise AEAD 加密 | Noise AEAD **再套一层** TLS |
+
+**决策：两种传输都启用 G5，不做例外。** 理由：
+
+1. **端到端 vs 逐跳**：QUIC 的 TLS 只加密"客户端 ↔ 当前 operator"这一跳。而在 G4 多 server 跳跃下，客户端会连到不同 operator；更重要的是 operator 之间转发走的是**裸 UDP underlay**（`peer_operator.go`），那一段今天完全明文。G5 的密钥是端到端的（客户端 ↔ 会话，跨 operator 不变），**这是 TLS 给不了的**。
+2. **一致的安全模型**：若 UDP 加密而 QUIC 不加密，则"用哪个传输"变成安全等级的隐式开关，是设计缺陷。
+3. **代价可接受**：QUIC 上多一层 AEAD，CPU 开销约 +3~5%（ChaCha20 在无 AES-NI 的平台上尤其快），换取端到端保密。
+
+**QUIC 上的具体简化**：QUIC 已保证可靠有序，故 QUIC 传输上的 G5 **不需要重放窗口**（不会乱序不会重复），仅需 AEAD 加解密；`Counter` 仍必须严格递增以满足 nonce 唯一性。UDP 传输则必须完整实现滑动窗口。
+
+```
+UDP  : Noise AEAD + Counter + 重放窗口(2048 bitmap)   ← 完整实现
+QUIC : Noise AEAD + Counter，无重放窗口                ← QUIC 已保序去重
+```
+
+两者共用同一套 `protocol/noise` 密码学代码与同一份帧格式，差异仅在**是否启用窗口检查**，由 `transport.Conn` 的实现决定。
+
+### 7.6 MTU 影响（累计）
+
+```
+原始 IP 包                                    1400
++ SessionTag(6)                                  6
++ DstTag(6)                                      6
++ Counter(8)                                     8
++ Poly1305 tag                                  16
+────────────────────────────────────────────────
+每包净增                                        36 字节
+```
+
+`DEFAULT_MTU` 需由 1400 下调至 **1364**（`tun.go:14`）。若同时跑在已有隧道内需再留余量。
+
+### 7.7 落点
+
+- 新增 `protocol/noise/`（见 §3.3）。
+- `transport/udp/conn.go`、`transport/quic/conn.go`：收发路径加解密；UDP 侧额外挂重放窗口。
+- `protocol/message/`：帧格式增加加密封装层。
+- `go.mod`：`golang.org/x/crypto` 提升为直接依赖。
+
+---
+
+## 8. 下线与踢人
 
 四条路径，全部经 Raft 全集群生效——这是必须的：多 server 跳跃下客户端可能在任意 operator 上，只在本地踢等于没踢。
 
-### 7.1 手动踢断，允许重连（`gasoctl session kick <vni> <cid>`）
+### 8.1 手动踢断，允许重连（`gasoctl session kick <vni> <cid>`）
 
 - 提交 `SessionDrop{reason: kicked}` → 全集群移除 session，IP 回池（若非固定绑定）。
 - 当前接入的 operator 向客户端下发 `DataCtrlShutdown{reason: ShutdownGoingAway}`（**该消息已实现编解码，`message-datactrl.go:57`，目前无人发送**）。
 - 客户端收到后关闭连接；因密钥仍有效，可立即重新握手。**固定 IP 绑定保留，重连拿回同一 IP。**
 - 用途：强制刷新会话状态、迁移接入点。
 
-### 7.2 删除密钥强制踢（`gasoctl key revoke <vni> <pubkey>`）
+### 8.2 删除密钥强制踢（`gasoctl key revoke <vni> <pubkey>`）
 
 - 提交 `KeyRevoke` → 从密钥表移除 → **级联** `SessionDrop{reason: revoked}` 移除该密钥的所有 session。
 - 同时清除固定 IP 绑定（lock 文件同步更新），IP 回池。
 - 下发 `DataCtrlShutdown{reason: ShutdownPolicy}`。
 - 客户端重连时在 §3.2 验证第 2 步（`pubkey ∈ 密钥表`）失败 → `HandshakeAuthFail`。**永久踢出。**
 
-### 7.3 自动掉线检测
+### 8.3 自动掉线检测
 
 - 判定方：**当前服务该 session 的 operator**（`sessionEntry.LastOperator`）。
 - 判据：`--session-timeout` 秒内（默认 60s，即 4~6 个 keepalive 周期）未收到该 session 的任何帧。
@@ -456,13 +584,13 @@ MAC   = HMAC-SHA256(session_key, SessionTag || epoch)[0:4]
 
 **误判防护**：多 server 跳跃下，客户端可能已跳到别的 operator。因此判定前必须先检查本地 FSM 的 `LastOperator` 是否仍是自己——若已被别的 operator 更新（对方收到帧时提交了 `SessionMigrate`），则放弃判定。这条检查不能省，否则跳跃会被误判为掉线。
 
-### 7.4 operator 自身下线
+### 8.4 operator 自身下线
 
 - 优雅退出：提交 `SessionDrop` 批量清理自己持有的 session，然后离开 Raft 集群。
-- 崩溃：其持有的 session 由其余节点在 `--session-timeout` 后按 §7.3 清理（任一 operator 发现 `LastOperator` 指向的节点已不在 Raft 集群成员列表中，即可代为判定）。
+- 崩溃：其持有的 session 由其余节点在 `--session-timeout` 后按 §8.3 清理（任一 operator 发现 `LastOperator` 指向的节点已不在 Raft 集群成员列表中，即可代为判定）。
 - **客户端侧无感**：因为全部 session 状态在 Raft 中，客户端跳到任何存活 operator 都能继续通信——这正是 G0+G4 的收益。
 
-### 7.5 gasoctl 命令汇总
+### 8.5 gasoctl 命令汇总
 
 ```
 session list [vni]                    # 含 LastOperator / LastSeen
@@ -478,7 +606,29 @@ lease  list    <vni>
 
 ---
 
-## 8. 架构总览
+## 9. 传输层兼容矩阵（QUIC / UDP）
+
+本次全部特性都必须在两种传输上有明确行为，不允许"某个传输上悄悄不生效"。
+
+| 特性 | UDP | QUIC | 说明 |
+|---|---|---|---|
+| G0 共识 | — | — | operator 之间的事，与客户端传输无关；Raft 自身固定用 QUIC |
+| G1 Noise 身份 | ✅ | ✅ | 握手在 `transport.Conn` 之上，与传输无关 |
+| G2 动态 IP | ✅ | ✅ | 同上 |
+| G3 端口跳跃 | ✅ | ❌ **报错** | QUIC 有自身连接迁移与路径验证，叠加会冲突 |
+| G4 多 server | ✅ | ⚠️ **重握手** | QUIC 换 server 需新建连接；会话状态在 Raft 中，故能续租同一 IP，但 TCP 长连接会断 |
+| G5 加密 | ✅ 含重放窗口 | ✅ 无重放窗口 | QUIC 已保序去重，仅需 AEAD |
+
+**设计原则**：能力差异必须**显式报错或显式降级**，绝不静默忽略。
+
+- `--transport quic` + 跳跃参数 → 启动即报错，提示改用 udp。
+- QUIC 下的多 server：客户端仍可切换 server，但走完整重握手路径（新 QUIC 连接 + 新 Noise 握手），**IP 与租约不变**（Raft 保证），仅传输密钥更新。这是"可用"而非"透明"，文档需明示。
+
+**为什么不给 QUIC 也做透明跳跃**：QUIC 的连接由其自身的 Connection ID 标识并有路径验证机制，若我们在外层再套一个会话标签并任意更换四元组，会与 QUIC 的迁移逻辑打架（它会认为路径变更需要重新验证，或直接丢弃）。强行绕开等于重写 QUIC 的连接管理。**UDP 传输就是为这个场景准备的**——需要跳跃就用 UDP，需要 QUIC 的可靠有序就接受单端口。
+
+---
+
+## 10. 架构总览
 
 ```
                     ┌──────── Raft (over QUIC) ────────┐
@@ -500,7 +650,7 @@ lease  list    <vni>
 
 ---
 
-## 9. 交付顺序
+## 11. 交付顺序
 
 ```
 G0 共识层 ──┬──► G1 身份绑定 ──► G2 动态 IP（分配是 FSM 转移）
@@ -518,34 +668,34 @@ G0 共识层 ──┬──► G1 身份绑定 ──► G2 动态 IP（分配�
 | P5 | G3 SessionID 会话标识（不含跳跃） | 客户端源端口人为变更后会话不中断（同时验证 NAT 重绑定修复） |
 | P6 | G3 端口跳跃（单 server） | 端口按 interval 轮换；跨跳跃点 TCP 长连接不断；时钟偏移 ±1 片仍可连 |
 | P7 | G4 多 server + 配置文件 | 握手于 A，改向 B/C 发包会话不中断；伪造 MAC 的包被丢弃 |
-| P8 | 下线与踢人（§7） | 四条路径各自生效且全集群同步：kick 后可重连且保住固定 IP；revoke 后重连必失败；60s 无帧自动下线；**跳到别的 operator 不被误判为掉线** |
+| P8 | 下线与踢人（§8） | 四条路径各自生效且全集群同步：kick 后可重连且保住固定 IP；revoke 后重连必失败；60s 无帧自动下线；**跳到别的 operator 不被误判为掉线** |
+| P9 | G5 数据面加密 | 抓包确认 payload 不可读；篡改一字节必被 AEAD 拒绝；重放旧包被窗口丢弃；rekey 后会话与 IP 不变；**UDP 与 QUIC 两条路径都验证** |
 
 P1 单独成阶段，因为共识层的正确性无法靠"跑通一次"证明——必须主动注入故障。P8 置于最后，因为它依赖 G4 才能验证"跳跃 vs 掉线"的区分。
 
 ---
 
-## 10. 风险
+## 12. 风险
 
 | 风险 | 影响 | 应对 |
 |---|---|---|
 | **握手引入 Raft 写入延迟** | 跨地域握手 +1 RTT | 已确认接受；乐观预选 IP 避免二次往返 |
 | **Leader 不可达期间无法新握手** | 1~2s 窗口内新客户端连不上 | 既有 session 转发不受影响；客户端重试；P1 专项测试 |
 | keepalive 高频写 Raft | 逐条提交会压垮集群 | 每次都写，但走批处理（§2.6）：64 条或 500ms 打包成一条日志，N 次共识压成 1 次 |
-| 数据面若走 Raft | 吞吐崩塌 | 明确分层：Raft 只承载控制状态（§8） |
-| 跳跃被误判为掉线 | 活跃客户端被踢 | 判定前校验 `LastOperator` 是否仍是自己（§7.3），已迁移则放弃判定 |
+| 数据面若走 Raft | 吞吐崩塌 | 明确分层：Raft 只承载控制状态（§10） |
+| 跳跃被误判为掉线 | 活跃客户端被踢 | 判定前校验 `LastOperator` 是否仍是自己（§8.3），已迁移则放弃判定 |
 | lock 文件与 Raft 不一致 | 运维误读 | 权威副本在 Raft，磁盘文件仅为镜像；重启从快照恢复而非读文件（§4.5） |
-| 会话标签增加每包开销 | 有效 MTU 下降 | 8B 标签 + 4B MAC = 12B；相应下调 `DEFAULT_MTU` |
+| 加密与标签增加每包开销 | 有效 MTU 下降 36 字节 | SessionTag 6B + DstTag 6B + Counter 8B + tag 16B；`DEFAULT_MTU` 1400→1364（§7.6） |
 | 全区间监听占用 fd | 区间过大时耗尽 | 区间上限硬编码 64 |
 | `AuthContext` 破坏既有接口 | 三个 authenticator 需改签名 | 改动机械，noauth 路径有测试覆盖 |
 | 引入 hashicorp/raft 依赖 | 依赖体积增加 | 成熟度换正确性，已确认接受 |
 
 ---
 
-## 11. 待定问题（请评审确认）
+## 13. 待定问题（请评审确认）
 
-1. **会话标签 8B 还是 16B？** 我倾向 8B（SessionID 前 8 字节）+ 4B MAC，共 12B/包。万级会话下碰撞可忽略。
-2. **批处理窗口 500ms / 64 条是否合适？** 影响的是"客户端掉线后多久被集群感知"，与 60s 的掉线判定相比可忽略，但若你要更实时可调小。
-3. **本 PRD 不含数据面加密**，交付后 UDP payload 仍是明文。请确认符合预期。
+1. **批处理窗口 500ms / 64 条是否合适？** 影响的是"客户端掉线后多久被集群感知"，与 60s 的掉线判定相比可忽略，但若你要更实时可调小。
+2. **rekey 周期 120s 是否合适？** 沿用 WireGuard 默认值。周期越短前向保密粒度越细，但握手开销越高（每次 rekey 是一次 Noise 往返，不走 Raft、不重分配 IP）。
 
 ### 已确认的决策（本轮）
 
@@ -553,4 +703,4 @@ P1 单独成阶段，因为共识层的正确性无法靠"跑通一次"证明—
 - ✅ keepalive 每次都写 Raft，靠批处理聚合（§2.6）
 - ✅ `--network` 降级为 bootstrap 种子，改为一 vnet 一文件（§4.4）
 - ✅ 默认密钥固定 IP + lock 文件 + Raft 同步 + gasoctl 可解除（§4.5）
-- ✅ 掉线自动检测由接入 operator 判定后经 Raft 广播（§7.3）
+- ✅ 掉线自动检测由接入 operator 判定后经 Raft 广播（§8.3）

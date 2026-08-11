@@ -6,10 +6,8 @@ require (
 	github.com/metacubex/bart v0.26.0
 	github.com/metacubex/sing v0.5.7
 	github.com/quic-go/quic-go v0.59.0
-	github.com/sagernet/gvisor v0.0.0-20250811.0-sing-box-mod.1
 	github.com/sagernet/sing-tun v0.8.7
 	github.com/sirupsen/logrus v1.9.4
-	github.com/things-go/go-socks5 v0.1.1
 	golang.org/x/net v0.50.0
 	golang.org/x/sys v0.41.0
 )

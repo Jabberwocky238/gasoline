@@ -6,8 +6,7 @@
 //	request:  Envelope{Kind, Body=concrete Op JSON}
 //	reply:    Envelope{Kind=KindReply, Body=Reply JSON}
 //
-// This is the same wire used between operator and cordinator (see
-// device/cordinator); only the transport differs.
+// The transport is a Unix socket framing one JSON object per line.
 package main
 
 import (

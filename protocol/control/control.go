@@ -1,6 +1,5 @@
-// Package control defines the unified vocabulary used by both
-// gasoctl (operator IPC over Unix socket) and the operator <->
-// cordinator wire (websocket). One op per file.
+// Package control defines the vocabulary used by gasoctl (operator
+// IPC over Unix socket). One op per file.
 //
 // This is a CONTROL plane — bandwidth is irrelevant. Encoding is
 // JSON via MarshalJSON / UnmarshalJSON in json.go. There is
@@ -25,16 +24,13 @@ type Op interface {
 type Kind uint8
 
 const (
-	KindUnknown                Kind = 0x00
-	KindRouteUpsert            Kind = 0x01
-	KindRouteRemove            Kind = 0x02
-	KindRouteQuery             Kind = 0x03
-	KindPeerJoin               Kind = 0x10
-	KindPeerLeave              Kind = 0x11
-	KindCordinatorConnect      Kind = 0x20
-	KindCordinatorDisconnect   Kind = 0x21
-	KindCordinatorConnectReply Kind = 0x22
-	KindReply                  Kind = 0xF0
+	KindUnknown     Kind = 0x00
+	KindRouteUpsert Kind = 0x01
+	KindRouteRemove Kind = 0x02
+	KindRouteQuery  Kind = 0x03
+	KindPeerJoin    Kind = 0x10
+	KindPeerLeave   Kind = 0x11
+	KindReply       Kind = 0xF0
 )
 
 // New returns a zero-valued Op for the given kind, ready to be
@@ -51,12 +47,6 @@ func New(k Kind) Op {
 		return &PeerJoin{}
 	case KindPeerLeave:
 		return &PeerLeave{}
-	case KindCordinatorConnect:
-		return &CordinatorConnect{}
-	case KindCordinatorConnectReply:
-		return &CordinatorConnectReply{}
-	case KindCordinatorDisconnect:
-		return &CordinatorDisconnect{}
 	case KindReply:
 		return &Reply{}
 	}
@@ -68,9 +58,8 @@ func New(k Kind) Op {
 //
 //	{"kind": <byte>, "body": { ...struct fields... }}
 //
-// This is the wire shape for both gasoctl (unix socket) and the
-// cordinator websocket. The transport just frames lines (one JSON
-// object per line) or websocket text frames.
+// This is the wire shape for gasoctl (unix socket); the transport
+// just frames lines (one JSON object per line).
 type Envelope struct {
 	Kind Kind            `json:"kind"`
 	Body json.RawMessage `json:"body,omitempty"`

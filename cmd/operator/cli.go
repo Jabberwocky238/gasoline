@@ -192,7 +192,7 @@ func parseListenerSpec(raw string) (operator.ListenerSpec, error) {
 		Addr:      strings.TrimSpace(addr),
 	}
 	switch spec.Transport {
-	case "tcp", "udp", "quic", "tls":
+	case "udp", "quic":
 	case "":
 		return operator.ListenerSpec{}, fmt.Errorf("listener %q: missing transport", raw)
 	default:

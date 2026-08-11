@@ -31,8 +31,7 @@ type operatorState struct {
 	vnets map[protocol.VNI_Ty]*vniEntry
 	Peers *PeerTable
 
-	// uuid of the local operator (mirrored from Operator.uuid). Used by
-	// CordinatorController so it can identify itself on the wire.
+	// uuid of the local operator (mirrored from Operator.uuid).
 	uuid [16]byte
 
 	subMu  sync.Mutex
@@ -170,44 +169,6 @@ func (s *operatorState) routeDel(cid protocol.CID_Ty) {
 	for _, v := range s.vnets {
 		v.routingMap.DeleteByCID(cid)
 	}
-}
-
-const cordinatorKey = "cordinator"
-
-func (s *operatorState) cordinatorConnect(endpoint string) error {
-	s.mu.Lock()
-	if _, dup := s.ctrls[cordinatorKey]; dup {
-		s.mu.Unlock()
-		return fmt.Errorf("cordinator: already connected to %s", endpoint)
-	}
-	s.mu.Unlock()
-
-	base := newControllerBase(s)
-	cc, err := NewCordinator(&base, endpoint)
-	if err != nil {
-		return err
-	}
-	if err := cc.Start(); err != nil {
-		return err
-	}
-
-	s.mu.Lock()
-	s.ctrls[cordinatorKey] = cc
-	s.mu.Unlock()
-	return nil
-}
-
-func (s *operatorState) cordinatorDisconnect() error {
-	s.mu.Lock()
-	cc, ok := s.ctrls[cordinatorKey]
-	if ok {
-		delete(s.ctrls, cordinatorKey)
-	}
-	s.mu.Unlock()
-	if !ok {
-		return fmt.Errorf("cordinator: not connected")
-	}
-	return cc.Close()
 }
 
 func (s *operatorState) closeAll() {

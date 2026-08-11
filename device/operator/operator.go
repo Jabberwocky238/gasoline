@@ -15,8 +15,6 @@ import (
 	"github.com/jabberwocky238/gasoline/transport"
 	_ "github.com/jabberwocky238/gasoline/transport/quic" // self-registers
 	transportQuic "github.com/jabberwocky238/gasoline/transport/quic"
-	_ "github.com/jabberwocky238/gasoline/transport/tcp" // self-registers
-	_ "github.com/jabberwocky238/gasoline/transport/tls" // self-registers
 	_ "github.com/jabberwocky238/gasoline/transport/udp" // self-registers
 	log "github.com/sirupsen/logrus"
 )

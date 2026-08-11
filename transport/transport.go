@@ -16,7 +16,7 @@ import (
 // Each WritePacket sends exactly one IP packet.
 // Framing is handled internally per transport:
 //   - UDP: one datagram = one packet (no framing needed)
-//   - TCP/TLS/QUIC: length-prefix framing over the byte stream
+//   - QUIC: length-prefix framing over the stream
 //
 // LastActive returns the timestamp of the most recent successful
 // ReadPacket or WritePacket. Callers (operator, client) use this to
@@ -44,7 +44,7 @@ type Listener interface {
 // --------------- Factory + registry ---------------
 //
 // Each transport package self-registers a (DialerFactory, ListenerFactory)
-// pair under a string name (e.g. "tcp", "udp", "tls", "quic") in its
+// pair under a string name (e.g. "udp", "quic") in its
 // init(). Callers go through transport.NewDialer / transport.NewListener
 // so the operator and client don't have to import each transport
 // concrete package directly.

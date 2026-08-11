@@ -6,9 +6,9 @@ import (
 	"github.com/jabberwocky238/gasoline/protocol/control"
 )
 
-// ControllerBase is the shared dispatcher every controller (IPC,
-// Cordinator, …) embeds. It holds a back-reference to the operator
-// state and turns control.Op events into operator-state mutations.
+// ControllerBase is the shared dispatcher every controller (today:
+// IPC) embeds. It holds a back-reference to the operator state and
+// turns control.Op events into operator-state mutations.
 //
 // Consume is request/response shaped:
 //   - For ops that are a query (RouteQuery), it returns a *Reply.
@@ -26,8 +26,8 @@ func newControllerBase(state *operatorState) ControllerBase {
 }
 
 // NewControllerBase returns a controller base wired to op's state.
-// Each controller (IPC, Cordinator, …) accepts a *ControllerBase via
-// its constructor; multiple bases over the same operator are
+// Each controller accepts a *ControllerBase via its
+// constructor; multiple bases over the same operator are
 // equivalent (they all hold the same state pointer), so callers can
 // freely build one per controller or share one across all of them.
 func (o *Operator) NewControllerBase() *ControllerBase {
@@ -85,24 +85,6 @@ func (b *ControllerBase) Consume(op control.Op) control.Op {
 		b.state.Peers.Remove(v.UUID)
 		return nil
 
-	case *control.CordinatorConnect:
-		if err := b.state.cordinatorConnect(v.Endpoint); err != nil {
-			return &control.Reply{OK: false, Payload: err.Error()}
-		}
-		return &control.Reply{OK: true}
-
-	case *control.CordinatorDisconnect:
-		if err := b.state.cordinatorDisconnect(); err != nil {
-			return &control.Reply{OK: false, Payload: err.Error()}
-		}
-		return &control.Reply{OK: true}
-
-	case *control.CordinatorConnectReply:
-		// Pre-load the peer table from the cordinator's snapshot.
-		for i := range v.Peers {
-			b.Consume(&v.Peers[i])
-		}
-		return nil
 	}
 	return nil
 }

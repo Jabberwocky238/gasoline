@@ -20,8 +20,6 @@ func buildOp(args []string) (control.Op, error) {
 	switch args[0] {
 	case "route":
 		return buildRouteOp(args[1:])
-	case "cordinator":
-		return buildCordinatorOp(args[1:])
 	default:
 		return nil, fmt.Errorf("unknown command %q", args[0])
 	}
@@ -83,28 +81,6 @@ func buildRouteOp(args []string) (control.Op, error) {
 	}
 }
 
-func buildCordinatorOp(args []string) (control.Op, error) {
-	if len(args) == 0 {
-		return nil, fmt.Errorf("cordinator: missing subcommand")
-	}
-	switch args[0] {
-	case "connect":
-		if len(args) != 2 {
-			return nil, fmt.Errorf("cordinator connect: usage 'cordinator connect <endpoint>'")
-		}
-		return &control.CordinatorConnect{Endpoint: args[1]}, nil
-
-	case "disconnect":
-		if len(args) != 2 {
-			return nil, fmt.Errorf("cordinator disconnect: usage 'cordinator disconnect <endpoint>'")
-		}
-		return &control.CordinatorDisconnect{Endpoint: args[1]}, nil
-
-	default:
-		return nil, fmt.Errorf("cordinator: unknown op %q", args[0])
-	}
-}
-
 func parseVNI(s string) (protocol.VNI_Ty, error) {
 	v, err := strconv.ParseUint(s, 10, 32)
 	if err != nil {
@@ -122,8 +98,6 @@ Commands:
   route set        <vni> <cid> <prefix>
   route get        <vni> <cid>
   route del        <vni> <cid>
-  cordinator connect    <endpoint>
-  cordinator disconnect <endpoint>
 
 cid: decimal uint64 (default) or "0x..." hex.
 

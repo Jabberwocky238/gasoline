@@ -10,12 +10,12 @@ EXE :=
 endif
 
 # Binaries this repo ships. Each entry is "<name>:./cmd/<name>".
-CMDS := operator cordinator gasoctl client
+CMDS := operator gasoctl client
 
-.PHONY: all build operator cordinator gasoctl client \
+.PHONY: all build operator gasoctl client \
         linux linux-arm64 windows clean \
-        bench-csc-tcp bench-csc-udp bench-csc-quic bench-csc-tls \
-        bench-cssc-tcp bench-cssc-udp bench-cssc-quic bench-cssc-tls
+        bench-csc-udp bench-csc-quic \
+        bench-cssc-udp bench-cssc-quic
 
 all: build
 
@@ -26,9 +26,8 @@ $(OUTPUT_DIR)/%$(EXE): cmd/%
 	@mkdir -p $(OUTPUT_DIR)
 	go build $(GOFLAGS) -o $@ ./cmd/$*
 
-# Convenience aliases — `make operator`, `make cordinator`, etc.
+# Convenience aliases — `make operator`, `make client`, etc.
 operator:   $(OUTPUT_DIR)/operator$(EXE)
-cordinator: $(OUTPUT_DIR)/cordinator$(EXE)
 gasoctl:    $(OUTPUT_DIR)/gasoctl$(EXE)
 client:     $(OUTPUT_DIR)/client$(EXE)
 
@@ -59,21 +58,13 @@ clean:
 
 # bench-{topology}-{transport}
 # topology: csc (client-server-client), cssc (client-server-server-client)
-# transport: tcp, udp, quic, tls
-bench-csc-tcp:
-	go test ./tests/ -v -run TestCSC_TCP -timeout 120s
-
+# transport: udp, quic
 bench-csc-udp:
 	go test ./tests/ -v -run TestCSC_UDP -timeout 120s
 
 bench-csc-quic:
 	go test ./tests/ -v -run TestCSC_QUIC -timeout 120s
 
-bench-csc-tls:
-	go test ./tests/ -v -run TestCSC_TLS -timeout 120s
-
-bench-cssc-tcp:
-	go test ./tests/ -v -run TestCSSC_TCP -timeout 120s
 
 bench-cssc-udp:
 	go test ./tests/ -v -run TestCSSC_UDP -timeout 120s
@@ -81,5 +72,3 @@ bench-cssc-udp:
 bench-cssc-quic:
 	go test ./tests/ -v -run TestCSSC_QUIC -timeout 120s
 
-bench-cssc-tls:
-	go test ./tests/ -v -run TestCSSC_TLS -timeout 120s

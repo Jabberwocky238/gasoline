@@ -86,7 +86,7 @@ func (i *IPCController) Close() error {
 
 // dispatchLine routes one gasoctl command line through the shared
 // ControllerBase. Each subsystem owns its own subcommand parsing
-// (see dispatchRoute / dispatchCordinator) which today still consume
+// (see dispatchRoute) which today still consumes
 // the legacy line vocabulary directly on operatorState; replacing
 // those with control.Op encode/decode is a follow-up.
 func (i *IPCController) dispatchLine(line string) string {
@@ -97,8 +97,6 @@ func (i *IPCController) dispatchLine(line string) string {
 	switch fields[0] {
 	case "route":
 		return i.base.state.dispatchRoute(fields[1:])
-	case "cordinator":
-		return i.base.state.dispatchCordinator(fields[1:])
 	default:
 		return errReply(fmt.Sprintf("unknown command %q", fields[0]))
 	}

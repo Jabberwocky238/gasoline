@@ -17,14 +17,11 @@ import (
 	"sync/atomic"
 
 	"github.com/jabberwocky238/gasoline/common"
-	"github.com/jabberwocky238/gasoline/device/client/quicksocks5"
 	"github.com/jabberwocky238/gasoline/device/tun"
 	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/transport"
 	transportQuic "github.com/jabberwocky238/gasoline/transport/quic"
-	_ "github.com/jabberwocky238/gasoline/transport/tcp" // self-registers
-	_ "github.com/jabberwocky238/gasoline/transport/tls" // self-registers
 	_ "github.com/jabberwocky238/gasoline/transport/udp" // self-registers
 	log "github.com/sirupsen/logrus"
 )
@@ -42,7 +39,6 @@ type Client struct {
 	conn       transport.Conn
 	keepalive  *Keepalive
 	tun        *tun.Tun
-	socks5     *quicksocks5.Server
 
 	closed atomic.Bool
 }
@@ -57,7 +53,7 @@ func New(cfg *StaticClientConfig) (*Client, error) {
 
 	var tlsConf *tls.Config
 	switch cfg.Transport {
-	case "tls", "quic":
+	case "quic":
 		// QUIC requires ALPN; the helper sets it to match the server.
 		tlsConf = transportQuic.InsecureClientTLS()
 	}
@@ -129,9 +125,8 @@ func (c *Client) dialLocked() (protocol.SessionContext, error) {
 }
 
 // Start brings up the data plane on top of an already-dialed (or
-// not-yet-dialed) connection: TUN (if configured), keepalive, rx /
-// tx pumps, and the optional SOCKS5 proxy. If Dial wasn't called
-// first, Start dials itself.
+// not-yet-dialed) connection: TUN (if configured), keepalive, and the
+// rx / tx pumps. If Dial wasn't called first, Start dials itself.
 func (c *Client) Start() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -173,19 +168,6 @@ func (c *Client) Start() error {
 	if c.tun != nil {
 		go c.tunReadLoop()
 	}
-
-	// Optional local SOCKS5 proxy for app-level traffic redirection
-	// without OS-level routing changes.
-	if c.cfg.Socks5Port > 0 {
-		srv, err := quicksocks5.Start(c.lctx.Context(), c.cfg.Socks5Port, c.lctx.Log())
-		if err != nil {
-			c.lctx.Log().Errorf("socks5 start: %v", err)
-			c.shutdownLocked()
-			return fmt.Errorf("socks5 start: %w", err)
-		}
-		c.socks5 = srv
-		c.lctx.Log().Infof("socks5 proxy listening on :%d", c.cfg.Socks5Port)
-	}
 	return nil
 }
 
@@ -203,10 +185,6 @@ func (c *Client) Close() error {
 
 // shutdownLocked tears every resource down. Caller holds c.mu.
 func (c *Client) shutdownLocked() {
-	if c.socks5 != nil {
-		_ = c.socks5.Close()
-		c.socks5 = nil
-	}
 	if c.keepalive != nil {
 		c.keepalive.Stop()
 		c.keepalive = nil

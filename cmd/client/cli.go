@@ -13,14 +13,13 @@ import (
 
 // Recognized parameter keys for RegisterClientCLIParam.
 const (
-	ParamEndpoint   = "endpoint"
-	ParamTransport  = "transport"
-	ParamAuth       = "auth"
-	ParamVNI        = "vni"
-	ParamCID        = "cid"
-	ParamTUN        = "tun"
-	ParamSocks5Port = "socks5-port"
-	ParamLogLevel   = "log-level"
+	ParamEndpoint  = "endpoint"
+	ParamTransport = "transport"
+	ParamAuth      = "auth"
+	ParamVNI       = "vni"
+	ParamCID       = "cid"
+	ParamTUN       = "tun"
+	ParamLogLevel  = "log-level"
 )
 
 // RegisterClientCLIParam turns a parameter map (as produced by main.go's
@@ -30,7 +29,7 @@ const (
 func RegisterClientCLIParam(params map[string][]string) (*client.StaticClientConfig, error) {
 	for k := range params {
 		switch k {
-		case ParamEndpoint, ParamTransport, ParamAuth, ParamVNI, ParamCID, ParamTUN, ParamSocks5Port, ParamLogLevel:
+		case ParamEndpoint, ParamTransport, ParamAuth, ParamVNI, ParamCID, ParamTUN, ParamLogLevel:
 		default:
 			return nil, fmt.Errorf("unknown parameter %q", k)
 		}
@@ -43,9 +42,9 @@ func RegisterClientCLIParam(params map[string][]string) (*client.StaticClientCon
 
 	transport := lastOr(params[ParamTransport], "quic")
 	switch transport {
-	case "tcp", "udp", "quic", "tls":
+	case "udp", "quic":
 	default:
-		return nil, fmt.Errorf("transport %q: must be tcp|udp|quic|tls", transport)
+		return nil, fmt.Errorf("transport %q: must be udp|quic", transport)
 	}
 
 	authStr := lastOr(params[ParamAuth], "noauth")
@@ -66,29 +65,19 @@ func RegisterClientCLIParam(params map[string][]string) (*client.StaticClientCon
 
 	tunName := lastOr(params[ParamTUN], "")
 
-	socks5Port := 0
-	if s := strings.TrimSpace(lastOr(params[ParamSocks5Port], "")); s != "" {
-		p, err := strconv.Atoi(s)
-		if err != nil || p <= 0 || p > 65535 {
-			return nil, fmt.Errorf("socks5-port %q: must be 1..65535", s)
-		}
-		socks5Port = p
-	}
-
 	lvl, err := logrus.ParseLevel(strings.TrimSpace(lastOr(params[ParamLogLevel], "info")))
 	if err != nil {
 		return nil, fmt.Errorf("log-level: %w", err)
 	}
 
 	return &client.StaticClientConfig{
-		Endpoint:   endpoint,
-		Transport:  transport,
-		AuthStr:    authStr,
-		VNI:        protocol.VNI_Ty(vniU),
-		CID:        cid,
-		TUNName:    tunName,
-		Socks5Port: socks5Port,
-		LogLevel:   lvl,
+		Endpoint:  endpoint,
+		Transport: transport,
+		AuthStr:   authStr,
+		VNI:       protocol.VNI_Ty(vniU),
+		CID:       cid,
+		TUNName:   tunName,
+		LogLevel:  lvl,
 	}, nil
 }
 

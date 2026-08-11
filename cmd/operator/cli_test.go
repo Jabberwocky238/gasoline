@@ -41,7 +41,7 @@ func TestRegisterOperatorCLIParam_Defaults(t *testing.T) {
 
 func TestRegisterOperatorCLIParam_RepeatedListenAndNetwork(t *testing.T) {
 	cfg, err := RegisterOperatorCLIParam(map[string][]string{
-		"listen":  {"tcp://127.0.0.1:1000", "tls://127.0.0.1:2000"},
+		"listen":  {"udp://127.0.0.1:1000", "quic://127.0.0.1:2000"},
 		"network": {"1:10.1.0.0/16:noauth", "2:10.2.0.0/16:noauth"},
 	})
 	if err != nil {
@@ -51,7 +51,7 @@ func TestRegisterOperatorCLIParam_RepeatedListenAndNetwork(t *testing.T) {
 	if len(cfg.ClientListeners) != 2 {
 		t.Fatalf("ClientListeners len = %d, want 2", len(cfg.ClientListeners))
 	}
-	if cfg.ClientListeners[0].Transport != "tcp" || cfg.ClientListeners[1].Transport != "tls" {
+	if cfg.ClientListeners[0].Transport != "udp" || cfg.ClientListeners[1].Transport != "quic" {
 		t.Errorf("listeners = %+v", cfg.ClientListeners)
 	}
 

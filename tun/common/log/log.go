@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/jabberwocky238/gasoline/device/tun/common/observable"
+	"github.com/jabberwocky238/gasoline/tun/common/observable"
 
 	log "github.com/sirupsen/logrus"
 )

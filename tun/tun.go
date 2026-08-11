@@ -6,7 +6,7 @@ import (
 	"net/netip"
 	"runtime"
 
-	"github.com/jabberwocky238/gasoline/device/tun/common/log"
+	"github.com/jabberwocky238/gasoline/tun/common/log"
 
 	singTun "github.com/sagernet/sing-tun"
 )

@@ -87,12 +87,20 @@ type Listener interface {
 // receive a data frame for an already-established session from a NEW source
 // address (a hopped-in client, PRD §6.4) without a fresh handshake. The demux
 // gets first refusal on datagrams from unknown sources; WriteTo sends replies
-// back to such a source over the shared socket. UDP implements this; QUIC does
-// not (its sessions are bound to connections).
+// back to such a source over the shared socket. UDP implements this.
 type HoppableListener interface {
 	Listener
 	SetDataDemux(func(src netip.AddrPort, datagram []byte) bool)
 	WriteTo(dst netip.AddrPort, data []byte) error
+}
+
+// QUICHoppableListener is the QUIC analogue: a hopped client opens a fresh QUIC
+// connection and sends a data frame first (PRD §5.4.4). The demux gets each
+// such frame with a per-connection sendFrame closure to reply on the same
+// stream. It returns true if it served the frame as a known session's hop.
+type QUICHoppableListener interface {
+	Listener
+	SetDataDemux(func(remote string, firstFrame []byte, sendFrame func([]byte) error) bool)
 }
 
 // --------------- Factory + registry ---------------

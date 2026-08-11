@@ -330,6 +330,39 @@ type SessionKeys struct {
 	LastOperator [16]byte
 }
 
+// SessionRoute is the routing view of a session: which overlay IP maps to which
+// session on which operator. RouteSnapshot returns one per live session so an
+// operator can rebuild its routing map from the replicated state (PRD §5.4.1 /
+// §6.1 — routing is Raft-driven, not manually pushed).
+type SessionRoute struct {
+	SessionID    protocol.SessionID_Ty
+	VNI          protocol.VNI_Ty
+	IP           netip.Addr
+	LastOperator [16]byte
+}
+
+// RouteSnapshotByVNI returns routing entries for the live sessions of a single
+// VNI. An operator syncs its routing map per-VNI (only the vnets it hosts),
+// never the whole mesh — so route sync cost scales with a node's own VNIs, not
+// the global session count.
+func (m *meshState) RouteSnapshotByVNI(vni protocol.VNI_Ty) []SessionRoute {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var out []SessionRoute
+	for _, e := range m.Sessions {
+		if e.VNI != vni {
+			continue
+		}
+		out = append(out, SessionRoute{
+			SessionID:    e.SessionID,
+			VNI:          e.VNI,
+			IP:           e.IP,
+			LastOperator: e.LastOperator,
+		})
+	}
+	return out
+}
+
 // SessionByTag resolves a session from its 6-byte SessionTag (PRD §6.4): the
 // first 6 bytes of the SessionID. A tag collision (~10^-3 at 10^6 sessions)
 // yields the wrong entry, whose keys then fail AEAD open — a dropped packet, not

@@ -78,8 +78,51 @@ type hopTable struct {
 type hoppedEntry struct {
 	keys      consensus.SessionKeys
 	cp        *PeerClient
-	conn      *hoppedConn
-	installed bool // routing + local client installed for this PE
+	sess      *noise.Session  // reconstructed data-plane session (owns replay window)
+	conn      *hoppedConn     // set for UDP hops (shared-socket reply path)
+	qconn     *quicHoppedConn // set for QUIC hops (per-connection reply path)
+	installed bool            // routing + local client installed for this PE
+}
+
+// quicHoppedConn is a transport.Conn for a QUIC-hopped session: writes seal
+// under S2CKey and go back through the current stream's sendFrame closure (PRD
+// §5.4.4). The closure is swapped whenever the client re-hops onto a new
+// connection.
+type quicHoppedConn struct {
+	sess *noise.Session
+	tag  datacom.SessionTag
+
+	mu     sync.Mutex
+	send   func([]byte) error
+	last   time.Time
+	remote string
+}
+
+func (c *quicHoppedConn) WritePacket(pkt []byte) error {
+	frame, err := datacom.Seal(c.sess, c.tag, pkt)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	send := c.send
+	c.last = time.Now()
+	c.mu.Unlock()
+	if send == nil {
+		return errHoppedNoRead
+	}
+	return send(frame)
+}
+
+func (c *quicHoppedConn) ReadPacket([]byte) (int, error) { return 0, errHoppedNoRead }
+func (c *quicHoppedConn) Close() error                   { return nil }
+func (c *quicHoppedConn) RemoteAddr() string             { c.mu.Lock(); defer c.mu.Unlock(); return c.remote }
+func (c *quicHoppedConn) LastActive() time.Time          { c.mu.Lock(); defer c.mu.Unlock(); return c.last }
+
+func (c *quicHoppedConn) setSender(send func([]byte) error) {
+	c.mu.Lock()
+	c.send = send
+	c.last = time.Now()
+	c.mu.Unlock()
 }
 
 func newHopTable() *hopTable {
@@ -88,15 +131,60 @@ func newHopTable() *hopTable {
 
 // installHopDemux wires the operator's data demux into a hoppable listener, so a
 // data frame arriving from an unknown source for an existing session is served
-// here instead of triggering a fresh handshake (PRD §6.4 / §5.4.3).
+// here instead of triggering a fresh handshake (PRD §6.4 / §5.4.3). Handles both
+// the UDP (shared-socket) and QUIC (per-connection) hop shapes.
 func (o *Operator) installHopDemux(ln transport.Listener) {
-	hl, ok := ln.(transport.HoppableListener)
-	if !ok {
-		return // transport can't hop (e.g. QUIC); nothing to install
+	switch hl := ln.(type) {
+	case transport.HoppableListener:
+		hl.SetDataDemux(func(src netip.AddrPort, datagram []byte) bool {
+			return o.demuxHopped(hl, src, datagram)
+		})
+	case transport.QUICHoppableListener:
+		hl.SetDataDemux(func(remote string, firstFrame []byte, sendFrame func([]byte) error) bool {
+			return o.demuxHoppedQUIC(firstFrame, sendFrame)
+		})
 	}
-	hl.SetDataDemux(func(src netip.AddrPort, datagram []byte) bool {
-		return o.demuxHopped(hl, src, datagram)
-	})
+}
+
+// demuxHoppedQUIC serves a data frame that arrived on a freshly-dialed QUIC
+// connection (PRD §5.4.4). Replies go back through sendFrame (the same stream).
+// Returns true iff the frame belonged to a known session.
+func (o *Operator) demuxHoppedQUIC(datagram []byte, sendFrame func([]byte) error) bool {
+	node := o.state.node
+	if node == nil {
+		return false
+	}
+	tag, counter, ct, err := datacom.ParseHeader(datagram)
+	if err != nil {
+		return false
+	}
+	keys, ok := node.SessionByTag(tag)
+	if !ok {
+		return false
+	}
+
+	entry := o.hops.getOrCreateQUIC(tag, keys, o.state.nextSessionIndex, sendFrame)
+	// Keep the reply path fresh: a later hop to a new connection updates it.
+	entry.qconn.setSender(sendFrame)
+
+	pt, err := datacom.Open(entry.sess, counter, ct, true)
+	if err != nil {
+		return false
+	}
+
+	vn, ok := o.state.vni(keys.VNI)
+	if !ok {
+		return true
+	}
+	if o.hops.markInstalled(tag) {
+		vn.addClient(entry.cp)
+		vn.routingMap.SetClient(keys.SessionID, netip.PrefixFrom(keys.IP, keys.IP.BitLen()))
+		o.migrateSession(keys.SessionID)
+	}
+	if err := vn.forwardFrame(pt, entry.cp); err != nil {
+		o.lctx.Log().Debugf("quic hop forward sid %s: %v", keys.SessionID, err)
+	}
+	return true
 }
 
 // demuxHopped is the DataDemux: it claims a datagram as a data frame for an
@@ -121,7 +209,7 @@ func (o *Operator) demuxHopped(hl transport.HoppableListener, src netip.AddrPort
 
 	// Decrypt with the session's C2SKey (client->PE). A tag collision or forged
 	// frame fails here → decline so it can (harmlessly) fall through.
-	pt, err := datacom.Open(entry.conn.sess, counter, ct, true)
+	pt, err := datacom.Open(entry.sess, counter, ct, true)
 	if err != nil {
 		return false
 	}
@@ -171,7 +259,32 @@ func (t *hopTable) getOrCreate(hl transport.HoppableListener, tag datacom.Sessio
 		IP:           keys.IP,
 	}
 	cp := newPeerClient(conn, sc, sess)
-	e := &hoppedEntry{keys: keys, cp: cp, conn: conn}
+	e := &hoppedEntry{keys: keys, cp: cp, sess: sess, conn: conn}
+	t.byTag[tag] = e
+	return e
+}
+
+// getOrCreateQUIC is the QUIC analogue of getOrCreate: the reply path is a
+// per-connection sendFrame closure rather than a shared socket.
+func (t *hopTable) getOrCreateQUIC(tag datacom.SessionTag, keys consensus.SessionKeys, nextIndex func() uint32, send func([]byte) error) *hoppedEntry {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if e, ok := t.byTag[tag]; ok {
+		return e
+	}
+	sess, err := noise.SessionFromKeys(keys.S2CKey, keys.C2SKey)
+	if err != nil {
+		sess, _ = noise.SessionFromKeys([32]byte{}, [32]byte{})
+	}
+	qconn := &quicHoppedConn{sess: sess, tag: tag, send: send, last: time.Now()}
+	sc := &protocol.SessionContext{
+		SessionID:    keys.SessionID,
+		VNI:          keys.VNI,
+		SessionIndex: nextIndex(),
+		IP:           keys.IP,
+	}
+	cp := newPeerClient(qconn, sc, sess)
+	e := &hoppedEntry{keys: keys, cp: cp, sess: sess, qconn: qconn}
 	t.byTag[tag] = e
 	return e
 }

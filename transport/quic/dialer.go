@@ -38,5 +38,7 @@ func (d *Dialer) Dial(endpoint string) (transport.Dialed, error) {
 		return transport.Dialed{}, err
 	}
 
-	return transport.Dialed{Conn: newConn(stream, conn.RemoteAddr().String()), Session: sess}, nil
+	// Hopping-capable: retain the tls config + connection so the client can hop
+	// by re-dialing a fresh QUIC connection (PRD §5.4.4).
+	return transport.Dialed{Conn: newHoppingClientConn(stream, conn, d.tlsConf), Session: sess}, nil
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/jabberwocky238/gasoline/protocol/datacom"
 	"github.com/jabberwocky238/gasoline/protocol/noise"
 	"github.com/jabberwocky238/gasoline/transport"
+	"github.com/jabberwocky238/gasoline/transport/quic"
 	"github.com/jabberwocky238/gasoline/transport/udp"
 	"github.com/sirupsen/logrus"
 )
@@ -62,11 +63,11 @@ func TestG4_HopToAnotherOperator(t *testing.T) {
 	// --- two operators sharing the node + mesh static key ---
 	uuidA := [16]byte{0xA0}
 	uuidB := [16]byte{0xB0}
-	opA := mkHopOperator(t, uuidA, serverPriv, vni, pubA, pubB)
+	opA := mkHopOperator(t, "udp", uuidA, serverPriv, vni, pubA, pubB)
 	opA.AttachConsensus(node)
 	mustStart(t, opA)
 	defer opA.Close()
-	opB := mkHopOperator(t, uuidB, serverPriv, vni, pubA, pubB)
+	opB := mkHopOperator(t, "udp", uuidB, serverPriv, vni, pubA, pubB)
 	opB.AttachConsensus(node)
 	mustStart(t, opB)
 	defer opB.Close()
@@ -276,6 +277,12 @@ func (h *hopMesh) close() {
 // setupHopMesh stands up the shared two-operator / one-node fixture: A dialed on
 // opA, B dialed on opB, underlay wired, both sessions live in the FSM.
 func setupHopMesh(t *testing.T) *hopMesh {
+	return setupHopMeshTransport(t, "udp")
+}
+
+// setupHopMeshTransport is setupHopMesh parametrized by client transport
+// ("udp" or "quic"). Both operators listen on tp; A/B dial over tp.
+func setupHopMeshTransport(t *testing.T, tp string) *hopMesh {
 	t.Helper()
 	const vni protocol.VNI_Ty = 200
 
@@ -308,10 +315,10 @@ func setupHopMesh(t *testing.T) *hopMesh {
 
 	uuidA := [16]byte{0xA0}
 	uuidB := [16]byte{0xB0}
-	opA := mkHopOperator(t, uuidA, serverPriv, vni, pubA, pubB)
+	opA := mkHopOperator(t, tp, uuidA, serverPriv, vni, pubA, pubB)
 	opA.AttachConsensus(node)
 	mustStart(t, opA)
-	opB := mkHopOperator(t, uuidB, serverPriv, vni, pubA, pubB)
+	opB := mkHopOperator(t, tp, uuidB, serverPriv, vni, pubA, pubB)
 	opB.AttachConsensus(node)
 	mustStart(t, opB)
 
@@ -323,7 +330,7 @@ func setupHopMesh(t *testing.T) *hopMesh {
 	idA := transport.ClientIdentity{Priv: privA, Pub: pubA, ServerPub: serverPub}
 	idB := transport.ClientIdentity{Priv: privB, Pub: pubB, ServerPub: serverPub}
 
-	dialedA, err := udp.NewDialer(protocol.NewPresetSessionConfig(vni), idA).Dial(opA.ClientAddr())
+	dialedA, err := newHopDialer(tp, vni, idA).Dial(opA.ClientAddr())
 	if err != nil {
 		t.Fatalf("A dial: %v", err)
 	}
@@ -331,9 +338,20 @@ func setupHopMesh(t *testing.T) *hopMesh {
 	if err != nil {
 		t.Fatalf("A assign: %v", err)
 	}
-	connB, scB := dialAndAssign(t, udp.NewDialer(protocol.NewPresetSessionConfig(vni), idB), opB.ClientAddr(), idB, vni)
+	connB, scB := dialAndAssign(t, newHopDialer(tp, vni, idB), opB.ClientAddr(), idB, vni)
 
 	return &hopMesh{node: node, opA: opA, opB: opB, connB: connB, dialedA: dialedA, scA: scA, scB: scB}
+}
+
+// newHopDialer builds a client dialer for the given transport.
+func newHopDialer(tp string, vni protocol.VNI_Ty, id transport.ClientIdentity) transport.Dialer {
+	cfg := protocol.NewPresetSessionConfig(vni)
+	switch tp {
+	case "quic":
+		return quic.NewDialer(cfg, id, quic.InsecureClientTLS())
+	default:
+		return udp.NewDialer(cfg, id)
+	}
 }
 
 // --------------- helpers ---------------
@@ -366,7 +384,7 @@ func mustStart(t *testing.T, op *operator.Operator) {
 	}
 }
 
-func mkHopOperator(t *testing.T, uuid [16]byte, priv noise.PrivateKey, vni protocol.VNI_Ty, pubs ...noise.PublicKey) *operator.Operator {
+func mkHopOperator(t *testing.T, tp string, uuid [16]byte, priv noise.PrivateKey, vni protocol.VNI_Ty, pubs ...noise.PublicKey) *operator.Operator {
 	t.Helper()
 	auth := make(map[noise.PublicKey]struct{}, len(pubs))
 	for _, p := range pubs {
@@ -375,7 +393,7 @@ func mkHopOperator(t *testing.T, uuid [16]byte, priv noise.PrivateKey, vni proto
 	op, err := operator.New(&operator.StaticOperatorConfig{
 		UUID:            &uuid,
 		StaticPriv:      priv,
-		ClientListeners: []operator.ListenerSpec{{Transport: "udp", Addr: "127.0.0.1:0"}},
+		ClientListeners: []operator.ListenerSpec{{Transport: tp, Addr: "127.0.0.1:0"}},
 		OpListenAddr:    "127.0.0.1:0",
 		Network: map[protocol.VNI_Ty]operator.StaticOperatorVNetConfig{
 			vni: {VNI: vni, CIDR: "10.0.200.0/24", AuthorizedKeys: auth},

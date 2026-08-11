@@ -112,6 +112,18 @@ func (s *operatorState) vni(vni protocol.VNI_Ty) (*vniEntry, bool) {
 	return v, ok
 }
 
+// vniList returns the VNIs this operator hosts. Used by route sync to walk only
+// local vnets (per-VNI), never the whole mesh.
+func (s *operatorState) vniList() []protocol.VNI_Ty {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]protocol.VNI_Ty, 0, len(s.vnets))
+	for vni := range s.vnets {
+		out = append(out, vni)
+	}
+	return out
+}
+
 func (s *operatorState) addClient(cp *PeerClient) (*vniEntry, error) {
 	v, ok := s.vni(cp.sc.VNI)
 	if !ok {

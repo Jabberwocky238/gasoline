@@ -257,7 +257,47 @@ func (o *Operator) Start() error {
 		go o.routineAcceptClients(tp, ln)
 	}
 	go o.routineReaper()
+	if o.state.node != nil {
+		go o.routineRouteSync()
+	}
 	return nil
+}
+
+// routineRouteSync rebuilds this operator's per-VNI routing map from the
+// Raft-replicated session table (PRD §5.4.1 / §6.1): routing is driven by
+// consensus, not manual pushes. It walks only the VNIs this operator hosts, and
+// for each queries just that VNI's sessions — so the cost scales with a node's
+// own VNIs, not the global session count. For every session it installs a
+// RouteTargetClient route if this operator is the current access point, or a
+// RouteTargetOperator route pointing at whichever operator is. This is what
+// lets a packet destined to a client reach it no matter which operator holds
+// the sender — and what makes a hop's SessionMigrate propagate into routing.
+func (o *Operator) routineRouteSync() {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-o.lctx.Done():
+			return
+		case <-ticker.C:
+		}
+		for _, vni := range o.state.vniList() {
+			vn, ok := o.state.vni(vni)
+			if !ok {
+				continue
+			}
+			for _, r := range o.state.node.RouteSnapshotByVNI(vni) {
+				pfx := netip.PrefixFrom(r.IP, r.IP.BitLen())
+				if r.LastOperator == o.uuid {
+					// Served locally: no-op refresh that also heals a stale
+					// remote route left over from before a hop-back.
+					vn.routingMap.SetClient(r.SessionID, pfx)
+				} else {
+					vn.routingMap.SetOperator(r.LastOperator, pfx)
+				}
+			}
+		}
+	}
 }
 
 func (o *Operator) Close() error {

@@ -213,6 +213,13 @@ func (n *Node) SessionByTag(tag [6]byte) (SessionKeys, bool) {
 	return n.fsm.SessionByTag(tag)
 }
 
+// RouteSnapshotByVNI returns routing entries for one VNI's live sessions, for
+// rebuilding that VNI's routing map from replicated state. See
+// meshState.RouteSnapshotByVNI.
+func (n *Node) RouteSnapshotByVNI(vni protocol.VNI_Ty) []SessionRoute {
+	return n.fsm.RouteSnapshotByVNI(vni)
+}
+
 // MigrateSession records a new access point for a session (batched by the
 // caller in the hop path). See PRD §6.3.
 func (n *Node) MigrateSession(c *SessionMigrate, timeout time.Duration) error {

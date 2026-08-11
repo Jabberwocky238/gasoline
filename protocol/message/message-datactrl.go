@@ -263,45 +263,51 @@ const (
 )
 
 // PeerAdvertise lets a client know a sibling on its VNI just joined
-// or left. Body: subKind(1) + CID(8) + addrLen(1) + addr + cidrBits(1).
+// or left. Body: subKind(1) + SessionID(16) + addrLen(1) + addr + cidrBits(1).
 type PeerAdvertise struct {
 	Buffer *[]byte
 
-	SubKind *PeerAdvertiseKind // pointer view into Buffer
-	CID     *protocol.CID_Ty   // [8]byte view into Buffer
-	addr    []byte             // slice view into Buffer
-	bits    *byte              // pointer view into Buffer
+	SubKind   *PeerAdvertiseKind     // pointer view into Buffer
+	SessionID *protocol.SessionID_Ty // [16]byte view into Buffer
+	addr      []byte                 // slice view into Buffer
+	bits      *byte                  // pointer view into Buffer
 }
 
-func NewPeerAdvertise() *PeerAdvertise { return &PeerAdvertise{Buffer: common.GetBuffer()} }
+func NewPeerAdvertise() *PeerAdvertise    { return &PeerAdvertise{Buffer: common.GetBuffer()} }
 func (*PeerAdvertise) Kind() DataCtrlKind { return DataCtrlPeerAdvertise }
 func (m *PeerAdvertise) Frame() []byte    { return *m.Buffer }
-func (m *PeerAdvertise) Release()         { release(&m.Buffer); m.SubKind = nil; m.CID = nil; m.addr = nil; m.bits = nil }
+func (m *PeerAdvertise) Release() {
+	release(&m.Buffer)
+	m.SubKind = nil
+	m.SessionID = nil
+	m.addr = nil
+	m.bits = nil
+}
 
-func (m *PeerAdvertise) Seal(sub PeerAdvertiseKind, cid protocol.CID_Ty, p netip.Prefix) error {
+func (m *PeerAdvertise) Seal(sub PeerAdvertiseKind, sid protocol.SessionID_Ty, p netip.Prefix) error {
 	rentIfNil(&m.Buffer)
 	addr := p.Addr().AsSlice()
-	b, err := writeHeader(m.Buffer, DataCtrlPeerAdvertise, 1+8+1+len(addr)+1)
+	b, err := writeHeader(m.Buffer, DataCtrlPeerAdvertise, 1+16+1+len(addr)+1)
 	if err != nil {
 		return err
 	}
 	b[2] = byte(sub)
-	copy(b[3:11], cid[:])
-	b[11] = byte(len(addr))
-	copy(b[12:12+len(addr)], addr)
-	b[12+len(addr)] = byte(p.Bits())
+	copy(b[3:19], sid[:])
+	b[19] = byte(len(addr))
+	copy(b[20:20+len(addr)], addr)
+	b[20+len(addr)] = byte(p.Bits())
 	m.bindViews()
 	return nil
 }
 
 func (m *PeerAdvertise) Open() error {
 	b := *m.Buffer
-	if len(b) < dcHeaderSize+1+8+1 {
+	if len(b) < dcHeaderSize+1+16+1 {
 		return fmt.Errorf("peer-advertise: short")
 	}
-	n := int(b[dcHeaderSize+1+8])
-	if len(b) < dcHeaderSize+1+8+1+n+1 {
-		return fmt.Errorf("peer-advertise: short (need %d, got %d)", dcHeaderSize+1+8+1+n+1, len(b))
+	n := int(b[dcHeaderSize+1+16])
+	if len(b) < dcHeaderSize+1+16+1+n+1 {
+		return fmt.Errorf("peer-advertise: short (need %d, got %d)", dcHeaderSize+1+16+1+n+1, len(b))
 	}
 	m.bindViews()
 	return nil
@@ -310,10 +316,10 @@ func (m *PeerAdvertise) Open() error {
 func (m *PeerAdvertise) bindViews() {
 	b := *m.Buffer
 	m.SubKind = (*PeerAdvertiseKind)(&b[dcHeaderSize])
-	m.CID = (*protocol.CID_Ty)(b[dcHeaderSize+1 : dcHeaderSize+1+8])
-	n := int(b[dcHeaderSize+1+8])
-	m.addr = b[dcHeaderSize+1+8+1 : dcHeaderSize+1+8+1+n]
-	m.bits = &b[dcHeaderSize+1+8+1+n]
+	m.SessionID = (*protocol.SessionID_Ty)(b[dcHeaderSize+1 : dcHeaderSize+1+16])
+	n := int(b[dcHeaderSize+1+16])
+	m.addr = b[dcHeaderSize+1+16+1 : dcHeaderSize+1+16+1+n]
+	m.bits = &b[dcHeaderSize+1+16+1+n]
 }
 
 // Prefix decodes the addr/bits views into a netip.Prefix.

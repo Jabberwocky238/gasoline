@@ -28,7 +28,6 @@ func main() {
 	collect(ParamKey, "operator static private key, base64 (generated if unset)")
 	collect(ParamListen, "client listener '<schema>://<addr>' (repeatable; default quic://:8443)")
 	collect(ParamNetwork, "vnet entry '<vni>:<cidr>[:<pubkey_b64>,...]' (repeatable; default 0:10.0.0.0/24)")
-	collect(ParamPreset, "preset cid->prefix '<vni>:<cid-hex>:<prefix>' (repeatable)")
 	ipcSocket := flag.String("ipc", defaultIPCSocket, "gasoctl IPC unix socket path")
 	dryRun := flag.Bool("dry-run", false, "parse and validate config, print it, then exit")
 
@@ -88,10 +87,7 @@ func printConfig(cfg *operator.StaticOperatorConfig, ipcSocket string) {
 	}
 	fmt.Println("network:")
 	for vni, n := range cfg.Network {
-		fmt.Printf("  - vni=%s cidr=%s keys=%d preset=%d\n", vni, n.CIDR, len(n.AuthorizedKeys), len(n.PresetCIDmap))
-		for cid, pfx := range n.PresetCIDmap {
-			fmt.Printf("      %s -> %s\n", cid, pfx)
-		}
+		fmt.Printf("  - vni=%s cidr=%s keys=%d\n", vni, n.CIDR, len(n.AuthorizedKeys))
 	}
 }
 

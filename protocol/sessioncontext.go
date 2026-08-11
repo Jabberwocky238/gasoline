@@ -1,7 +1,8 @@
 package protocol
 
 import (
-	"encoding/binary"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net/netip"
 	"sync"
@@ -14,23 +15,42 @@ func (vni VNI_Ty) String() string {
 	return fmt.Sprintf("%d (0x%06x)", uint32(vni), uint32(vni))
 }
 
-type CID_Ty [8]byte // 8 bytes (64 bits) of client ID, big-endian uint64
+// SessionID_Ty is the cluster-unique session identifier — the equivalent of
+// WireGuard's receiver index, but allocated via Raft 2PC (not per-machine) so
+// it stays consistent across every PE. It is the data-plane decryption key
+// (which session / which keypair) AND the routing key (RouteTargetClient names
+// a session, not a client identity). There is no CID.
+type SessionID_Ty [16]byte
 
-// the canonical log-format for a CID: "<decimal> (0x<hex>)".
-func (cid CID_Ty) String() string {
-	n := binary.BigEndian.Uint64(cid[:])
-	return fmt.Sprintf("%d (0x%x)", n, n)
+// String renders a SessionID as hex.
+func (s SessionID_Ty) String() string { return hex.EncodeToString(s[:]) }
+
+// IsZero reports whether the SessionID is unset.
+func (s SessionID_Ty) IsZero() bool {
+	for _, b := range s {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
 }
 
-type SessionID_Ty [16]byte
+// NewSessionID mints a random 16-byte SessionID. In the Raft path the value is
+// proposed by the admitting PE and committed by consensus; this generator is
+// the source of that proposal (and is used directly in the pre-Raft local
+// path).
+func NewSessionID() SessionID_Ty {
+	var s SessionID_Ty
+	_, _ = rand.Read(s[:])
+	return s
+}
 
 type SessionContext struct {
 	mu sync.RWMutex
 
-	CID          CID_Ty       // 16 hex chars of the client ID
+	SessionID    SessionID_Ty // cluster-unique session id (routing + decryption key)
 	VNI          VNI_Ty       // 24-bit virtual network identifier
-	SessionID    SessionID_Ty // Session ID assigned by server
-	SessionIndex uint32       // Unique session index for this session, used in packet headers
+	SessionIndex uint32       // local session index for logging / packet headers
 	IP           netip.Addr   // Client's assigned IP (e.g. 10.0.0.2)
 	IPRanges     netip.Prefix // Internal network ranges routable via VPN (e.g. 10.0.0.0/24)
 }
@@ -39,23 +59,21 @@ func (sc *SessionContext) Copy() SessionContext {
 	sc.mu.RLock()
 	defer sc.mu.RUnlock()
 	return SessionContext{
-		CID:          sc.CID,
-		VNI:          sc.VNI,
 		SessionID:    sc.SessionID,
+		VNI:          sc.VNI,
 		SessionIndex: sc.SessionIndex,
 		IP:           sc.IP,
 		IPRanges:     sc.IPRanges,
 	}
 }
 
-// PresetSessionConfig is the (vni, cid) pair the client knows up-front
-// (from its CLI / config) and ships in ClientHello. Everything else on
-// SessionContext is filled in by the server during the handshake.
+// PresetSessionConfig is the VNI the client knows up-front (from its config)
+// and ships in ClientHello. The rest of SessionContext is filled in by the
+// server during handshake + assignment.
 type PresetSessionConfig struct {
-	CID CID_Ty
 	VNI VNI_Ty
 }
 
-func NewPresetSessionConfig(cid CID_Ty, vni VNI_Ty) PresetSessionConfig {
-	return PresetSessionConfig{CID: cid, VNI: vni}
+func NewPresetSessionConfig(vni VNI_Ty) PresetSessionConfig {
+	return PresetSessionConfig{VNI: vni}
 }

@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/base64"
 	"fmt"
-	"net/netip"
 	"strconv"
 	"strings"
 
@@ -20,14 +19,12 @@ import (
 //	key         single-valued, operator static private key (base64); generated if empty
 //	listen      repeatable,    '<schema>://<addr>' client listener
 //	network     repeatable,    '<vni>:<cidr>[:<pubkey_b64>,...]' vnet entry
-//	preset      repeatable,    '<vni>:<cid-hex>:<prefix>' preassigned cid->prefix
 const (
 	ParamOpListen = "op-listen"
 	ParamLogLevel = "log-level"
 	ParamKey      = "key" // operator static private key (base64); generated if empty
 	ParamListen   = "listen"
 	ParamNetwork  = "network"
-	ParamPreset   = "preset"
 )
 
 // RegisterOperatorCLIParam turns a parameter map (as produced by main.go's
@@ -37,7 +34,7 @@ const (
 func RegisterOperatorCLIParam(params map[string][]string) (*operator.StaticOperatorConfig, error) {
 	for k := range params {
 		switch k {
-		case ParamOpListen, ParamLogLevel, ParamKey, ParamListen, ParamNetwork, ParamPreset:
+		case ParamOpListen, ParamLogLevel, ParamKey, ParamListen, ParamNetwork:
 		default:
 			return nil, fmt.Errorf("unknown parameter %q", k)
 		}
@@ -96,29 +93,8 @@ func RegisterOperatorCLIParam(params map[string][]string) (*operator.StaticOpera
 		cfg.Network[entry.VNI] = entry
 	}
 
-	// Attach preassigned cid->prefix bindings to their VNI's PresetCIDmap.
-	presets := params[ParamPreset]
-	if len(presets) == 0 {
-		presets = []string{"0:100:10.0.0.1/32", "0:101:10.0.0.2/32", "0:102:10.0.0.3/32"}
-	}
-	for _, raw := range presets {
-		vni, cid, pfx, err := parsePresetEntry(raw)
-		if err != nil {
-			return nil, err
-		}
-		entry, ok := cfg.Network[vni]
-		if !ok {
-			return nil, fmt.Errorf("preset %q: vni %d not declared via --network", raw, vni)
-		}
-		if entry.PresetCIDmap == nil {
-			entry.PresetCIDmap = make(map[protocol.CID_Ty]netip.Prefix)
-		}
-		if existing, dup := entry.PresetCIDmap[cid]; dup && existing != pfx {
-			return nil, fmt.Errorf("preset %q: cid %s already bound to %s", raw, cid.FormatCID(), existing)
-		}
-		entry.PresetCIDmap[cid] = pfx
-		cfg.Network[vni] = entry
-	}
+	// Fixed-IP bindings (pubkey -> IP) come from per-vnet config files loaded
+	// via --root (PRD §4.4), not from the command line.
 
 	lvl, err := logrus.ParseLevel(strings.TrimSpace(logLevel))
 	if err != nil {
@@ -184,29 +160,6 @@ func parseNetworkEntry(raw string) (operator.StaticOperatorVNetConfig, error) {
 		CIDR:           cidr,
 		AuthorizedKeys: keys,
 	}, nil
-}
-
-// parsePresetEntry parses '<vni>:<cid>:<prefix>'. cid is decimal by
-// default; prefix it with 0x for hex.
-func parsePresetEntry(raw string) (protocol.VNI_Ty, protocol.CID_Ty, netip.Prefix, error) {
-	var cid protocol.CID_Ty
-	parts := strings.SplitN(strings.TrimSpace(raw), ":", 3)
-	if len(parts) != 3 {
-		return 0, cid, netip.Prefix{}, fmt.Errorf("preset %q: expected '<vni>:<cid>:<prefix>'", raw)
-	}
-	vniU, err := strconv.ParseUint(strings.TrimSpace(parts[0]), 10, 32)
-	if err != nil {
-		return 0, cid, netip.Prefix{}, fmt.Errorf("preset %q: invalid vni: %w", raw, err)
-	}
-	cid, err = protocol.ParseCID(parts[1])
-	if err != nil {
-		return 0, cid, netip.Prefix{}, fmt.Errorf("preset %q: %w", raw, err)
-	}
-	pfx, err := netip.ParsePrefix(strings.TrimSpace(parts[2]))
-	if err != nil {
-		return 0, cid, netip.Prefix{}, fmt.Errorf("preset %q: invalid prefix: %w", raw, err)
-	}
-	return protocol.VNI_Ty(vniU), cid, pfx, nil
 }
 
 // parseListenerSpec parses '<schema>://<addr>', e.g. 'quic://:8443'.

@@ -82,14 +82,14 @@ func TestSessionCreateRejectsDuplicateIP(t *testing.T) {
 	}
 
 	a := base
-	a.SessionID, a.PubKey, a.CID = sid(1), pub(1), protocol.CID_Ty{1}
+	a.SessionID, a.PubKey = sid(1), pub(1)
 	if err := applyCmd(t, m, &Command{Kind: CmdSessionCreate, SessionCreate: &a}); err != nil {
 		t.Fatalf("first create: %v", err)
 	}
 
 	// Same IP, different session — must collide.
 	b := base
-	b.SessionID, b.PubKey, b.CID = sid(2), pub(2), protocol.CID_Ty{2}
+	b.SessionID, b.PubKey = sid(2), pub(2)
 	if err := applyCmd(t, m, &Command{Kind: CmdSessionCreate, SessionCreate: &b}); err == nil {
 		t.Fatal("expected duplicate-IP rejection, got nil")
 	}
@@ -103,7 +103,7 @@ func TestSessionReplaceKeepsOneSessionPerPubKey(t *testing.T) {
 	now := time.Now().UnixNano()
 
 	first := SessionCreate{
-		SessionID: sid(1), PubKey: pub(9), CID: protocol.CID_Ty{1}, VNI: 200,
+		SessionID: sid(1), PubKey: pub(9), VNI: 200,
 		IP: netip.MustParseAddr("10.0.1.17"), LeaseTTL: time.Hour, Now: now,
 	}
 	if err := applyCmd(t, m, &Command{Kind: CmdSessionCreate, SessionCreate: &first}); err != nil {
@@ -112,7 +112,7 @@ func TestSessionReplaceKeepsOneSessionPerPubKey(t *testing.T) {
 
 	// Replace with a new session for the same pubkey at a different IP.
 	repl := SessionReplace{New: SessionCreate{
-		SessionID: sid(2), PubKey: pub(9), CID: protocol.CID_Ty{1}, VNI: 200,
+		SessionID: sid(2), PubKey: pub(9), VNI: 200,
 		IP: netip.MustParseAddr("10.0.1.18"), LeaseTTL: time.Hour, Now: now,
 	}}
 	if err := applyCmd(t, m, &Command{Kind: CmdSessionReplace, SessionReplace: &repl}); err != nil {
@@ -151,7 +151,7 @@ func TestKeyRevokeCascadesSessionDrop(t *testing.T) {
 		t.Fatalf("grant: %v", err)
 	}
 	create := SessionCreate{
-		SessionID: sid(1), PubKey: pub(5), CID: protocol.CID_Ty{1}, VNI: 200,
+		SessionID: sid(1), PubKey: pub(5), VNI: 200,
 		IP: netip.MustParseAddr("10.0.1.17"), LeaseTTL: time.Hour, Now: now,
 	}
 	if err := applyCmd(t, m, &Command{Kind: CmdSessionCreate, SessionCreate: &create}); err != nil {
@@ -198,7 +198,7 @@ func TestSnapshotRestoreRoundTrip(t *testing.T) {
 	m := NewMeshState()
 	now := time.Now().UnixNano()
 	create := SessionCreate{
-		SessionID: sid(7), PubKey: pub(7), CID: protocol.CID_Ty{7}, VNI: 200,
+		SessionID: sid(7), PubKey: pub(7), VNI: 200,
 		IP: netip.MustParseAddr("10.0.1.17"), LeaseTTL: time.Hour, Now: now,
 	}
 	if err := applyCmd(t, m, &Command{Kind: CmdSessionCreate, SessionCreate: &create}); err != nil {

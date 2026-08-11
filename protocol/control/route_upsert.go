@@ -14,7 +14,7 @@ import (
 // UUID means "reach this prefix via that peer operator".
 type RouteUpsert struct {
 	VNI       protocol.VNI_Ty `json:"vni"`
-	CID       protocol.CID_Ty `json:"cid"`
+	SessionID protocol.SessionID_Ty `json:"session_id"`
 	Prefix    netip.Prefix    `json:"prefix"`
 	OwnerUUID [16]byte        `json:"ownerUUID,omitempty"`
 }

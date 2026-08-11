@@ -7,7 +7,7 @@ import "github.com/jabberwocky238/gasoline/protocol"
 // answer is delivered as a Reply.
 type RouteQuery struct {
 	VNI protocol.VNI_Ty `json:"vni"`
-	CID protocol.CID_Ty `json:"cid"`
+	SessionID protocol.SessionID_Ty `json:"session_id"`
 }
 
 func (RouteQuery) opMarker() {}

@@ -1,15 +1,16 @@
 // Package message defines the on-wire envelope used between operators
 // (and between operators and clients on the data plane).
 //
-// MessageTransport carries one IP packet plus the (vni, cid) addressing
-// metadata that the routing fabric needs to dispatch it. The wire
+// MessageTransport carries one IP packet plus the (vni, sessionID) addressing
+// metadata the routing fabric needs to dispatch it between PEs. The wire
 // layout is fixed:
 //
 //	offset  size  field
 //	0       4     VNI  (big-endian uint32; only the low 24 bits are
 //	                    meaningful — VNI is 24-bit)
-//	4       8     CID
-//	12      n     payload (the IP packet itself, opaque here)
+//	4       16    SessionID  (the target session; WG receiver-index role,
+//	                          but cluster-unique via Raft)
+//	20      n     payload (the IP packet itself, opaque here)
 //
 // The struct's non-buffer fields are *views* into the backing buffer,
 // so seal/parse round-trips are zero-copy past the buffer itself. The
@@ -26,25 +27,25 @@ import (
 )
 
 const (
-	headerSize = 12
+	headerSize = 20
 	vniOffset  = 0
 	vniSize    = 4
-	cidOffset  = 4
-	cidSize    = 8
-	payOffset  = 12
+	sidOffset  = 4
+	sidSize    = 16
+	payOffset  = 20
 )
 
-// MessageTransport is the (vni, cid, payload) envelope.
+// MessageTransport is the (vni, sessionID, payload) envelope.
 //
 // All fields except Buffer are references into Buffer; the only real
 // allocation is Buffer (rented from common.WaitPool). After Seal/Open
 // the field views point at the backing bytes, so reads/writes through
-// VNI/CID/Payload mutate the same memory the wire I/O sees.
+// VNI/SessionID/Payload mutate the same memory the wire I/O sees.
 type MessageTransport struct {
-	VNI     *[vniSize]byte    // big-endian uint32 view into Buffer
-	CID     *protocol.CID_Ty  // [8]byte view into Buffer
-	Payload []byte            // slice of Buffer past the header
-	Buffer  *[]byte           // rented slot; release with (*MessageTransport).Release
+	VNI       *[vniSize]byte         // big-endian uint32 view into Buffer
+	SessionID *protocol.SessionID_Ty // [16]byte view into Buffer
+	Payload   []byte                 // slice of Buffer past the header
+	Buffer    *[]byte                // rented slot; release with (*MessageTransport).Release
 }
 
 // New rents a fresh buffer from the pool. The returned message has no
@@ -63,14 +64,14 @@ func (m *MessageTransport) Release() {
 		m.Buffer = nil
 	}
 	m.VNI = nil
-	m.CID = nil
+	m.SessionID = nil
 	m.Payload = nil
 }
 
-// Seal writes (vni, cid, payload) into Buffer and re-binds the view
+// Seal writes (vni, sessionID, payload) into Buffer and re-binds the view
 // fields to point into that buffer. If Buffer is nil, one is rented.
 // payload bytes are copied; everything else is a pointer rebind.
-func (m *MessageTransport) Seal(vni protocol.VNI_Ty, cid protocol.CID_Ty, payload []byte) error {
+func (m *MessageTransport) Seal(vni protocol.VNI_Ty, sid protocol.SessionID_Ty, payload []byte) error {
 	if m.Buffer == nil {
 		m.Buffer = common.GetBuffer()
 	}
@@ -81,7 +82,7 @@ func (m *MessageTransport) Seal(vni protocol.VNI_Ty, cid protocol.CID_Ty, payloa
 	*m.Buffer = (*m.Buffer)[:need]
 	buf := *m.Buffer
 	binary.BigEndian.PutUint32(buf[vniOffset:vniOffset+vniSize], uint32(vni))
-	copy(buf[cidOffset:cidOffset+cidSize], cid[:])
+	copy(buf[sidOffset:sidOffset+sidSize], sid[:])
 	copy(buf[payOffset:], payload)
 	m.bind()
 	return nil
@@ -107,11 +108,11 @@ func (m *MessageTransport) Open() error {
 	return nil
 }
 
-// bind points VNI / CID / Payload at the current Buffer.
+// bind points VNI / SessionID / Payload at the current Buffer.
 func (m *MessageTransport) bind() {
 	buf := *m.Buffer
 	m.VNI = (*[vniSize]byte)(buf[vniOffset : vniOffset+vniSize])
-	m.CID = (*protocol.CID_Ty)(buf[cidOffset : cidOffset+cidSize])
+	m.SessionID = (*protocol.SessionID_Ty)(buf[sidOffset : sidOffset+sidSize])
 	m.Payload = buf[payOffset:]
 }
 

@@ -50,7 +50,7 @@ func (b *ControllerBase) Consume(op control.Op) control.Op {
 		}
 		var zero [16]byte
 		if v.OwnerUUID == zero || v.OwnerUUID == b.state.uuid {
-			vn.routingMap.SetClient(v.CID, v.Prefix)
+			vn.routingMap.SetClient(v.SessionID, v.Prefix)
 		} else {
 			vn.routingMap.SetOperator(v.OwnerUUID, v.Prefix)
 		}
@@ -61,7 +61,7 @@ func (b *ControllerBase) Consume(op control.Op) control.Op {
 		if !ok {
 			return nil
 		}
-		vn.routingMap.DeleteByCID(v.CID)
+		vn.routingMap.DeleteBySessionID(v.SessionID)
 		return nil
 
 	case *control.RouteQuery:
@@ -69,7 +69,7 @@ func (b *ControllerBase) Consume(op control.Op) control.Op {
 		if !ok {
 			return errReplyOp("unknown vni %s", v.VNI)
 		}
-		pfx, ok := vn.routingMap.LookupByCID(v.CID)
+		pfx, ok := vn.routingMap.LookupBySessionID(v.SessionID)
 		if !ok {
 			return errReplyOp("not found")
 		}

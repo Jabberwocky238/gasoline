@@ -56,41 +56,49 @@ const (
 	CodeConflict Code = 0x02 // identity already has a live session (PRD §8)
 )
 
-// Allocator is the operator-side policy the assign server drives. It is the
-// two-phase-commit backend: Preclaim reserves, Confirm commits, Rollback frees.
-// A local implementation is used today; the Raft-backed one lands in P4.
-type Allocator interface {
-	// Preclaim reserves an address for (vni, cid, pubkey) and returns it plus
-	// the VNI's range. The address is held pending until Confirm or Rollback.
-	Preclaim(vni protocol.VNI_Ty, cid protocol.CID_Ty, pubkey noise.PublicKey) (ip netip.Addr, ranges netip.Prefix, code Code)
-	// Confirm commits a prior Preclaim (client acknowledged).
-	Confirm(vni protocol.VNI_Ty, cid protocol.CID_Ty, ip netip.Addr)
-	// Rollback releases a prior Preclaim (client never acknowledged).
-	Rollback(vni protocol.VNI_Ty, cid protocol.CID_Ty, ip netip.Addr)
+// Reservation is what a successful Preclaim yields: the reserved IP, the VNI's
+// range, and the cluster-unique SessionID minted for this session. IP and
+// SessionID are allocated together (one Raft log entry in the consensus path).
+type Reservation struct {
+	IP        netip.Addr
+	Ranges    netip.Prefix
+	SessionID protocol.SessionID_Ty
 }
 
-// ServerAssign runs the operator side of the two-phase assignment over rw,
-// sealing with sess. cid/pubkey/vni come from the completed handshake. On
-// success it returns the committed SessionContext.
+// Allocator is the operator-side policy the assign server drives. It is the
+// two-phase-commit backend: Preclaim reserves (IP + SessionID), Confirm
+// commits, Rollback frees. Local impl today; Raft-backed lands in P4.
+type Allocator interface {
+	// Preclaim reserves an IP + SessionID for pubkey on vni. Held pending until
+	// Confirm or Rollback.
+	Preclaim(vni protocol.VNI_Ty, pubkey noise.PublicKey) (Reservation, Code)
+	// Confirm commits a prior Preclaim (client acknowledged).
+	Confirm(vni protocol.VNI_Ty, r Reservation)
+	// Rollback releases a prior Preclaim (client never acknowledged).
+	Rollback(vni protocol.VNI_Ty, r Reservation)
+}
+
+// ServerAssign runs the operator side of the two-phase assignment over conn,
+// sealing with sess. pubkey/vni come from the completed handshake. On success
+// it returns the committed SessionContext (IP + SessionID).
 func ServerAssign(
 	conn Conn,
 	sess *noise.Session,
 	vni protocol.VNI_Ty,
-	cid protocol.CID_Ty,
 	pubkey noise.PublicKey,
 	sessionIndex uint32,
 	alloc Allocator,
 ) (*protocol.SessionContext, error) {
-	// preclaim
-	ip, ranges, code := alloc.Preclaim(vni, cid, pubkey)
+	// preclaim: reserve IP + SessionID together
+	res, code := alloc.Preclaim(vni, pubkey)
 
-	claim := serverClaim{Code: code, IP: ip, Ranges: ranges}
+	claim := serverClaim{Code: code, IP: res.IP, Ranges: res.Ranges, SessionID: res.SessionID}
 	if code == CodeOK {
 		claim.SessionIndex = sessionIndex
 	}
 	if err := writeSealed(conn, sess, ctrClaim, claim.marshal()); err != nil {
 		if code == CodeOK {
-			alloc.Rollback(vni, cid, ip)
+			alloc.Rollback(vni, res)
 		}
 		return nil, fmt.Errorf("send ServerClaim: %w", err)
 	}
@@ -101,34 +109,34 @@ func ServerAssign(
 	// wait for ack
 	ackBytes, err := readSealed(conn, sess, ctrAck)
 	if err != nil {
-		alloc.Rollback(vni, cid, ip)
+		alloc.Rollback(vni, res)
 		return nil, fmt.Errorf("recv ClientAck: %w", err)
 	}
 	var ack clientAck
 	if err := ack.unmarshal(ackBytes); err != nil {
-		alloc.Rollback(vni, cid, ip)
+		alloc.Rollback(vni, res)
 		return nil, fmt.Errorf("parse ClientAck: %w", err)
 	}
 	if !ack.Accepted {
-		alloc.Rollback(vni, cid, ip)
+		alloc.Rollback(vni, res)
 		return nil, fmt.Errorf("client rejected assignment")
 	}
 
 	// confirm (commit)
-	alloc.Confirm(vni, cid, ip)
+	alloc.Confirm(vni, res)
 
 	return &protocol.SessionContext{
-		CID:          cid,
+		SessionID:    res.SessionID,
 		VNI:          vni,
 		SessionIndex: sessionIndex,
-		IP:           ip,
-		IPRanges:     ranges,
+		IP:           res.IP,
+		IPRanges:     res.Ranges,
 	}, nil
 }
 
-// ClientAssign runs the client side: receive the claimed IP, accept it, and
-// return the resulting SessionContext.
-func ClientAssign(conn Conn, sess *noise.Session, vni protocol.VNI_Ty, cid protocol.CID_Ty) (*protocol.SessionContext, error) {
+// ClientAssign runs the client side: receive the claimed IP + SessionID, accept
+// it, and return the resulting SessionContext.
+func ClientAssign(conn Conn, sess *noise.Session, vni protocol.VNI_Ty) (*protocol.SessionContext, error) {
 	claimBytes, err := readSealed(conn, sess, ctrClaim)
 	if err != nil {
 		return nil, fmt.Errorf("recv ServerClaim: %w", err)
@@ -148,7 +156,7 @@ func ClientAssign(conn Conn, sess *noise.Session, vni protocol.VNI_Ty, cid proto
 	}
 
 	return &protocol.SessionContext{
-		CID:          cid,
+		SessionID:    claim.SessionID,
 		VNI:          vni,
 		SessionIndex: claim.SessionIndex,
 		IP:           claim.IP,
@@ -158,9 +166,11 @@ func ClientAssign(conn Conn, sess *noise.Session, vni protocol.VNI_Ty, cid proto
 
 // --------------- frames ---------------
 
-// serverClaim: code(1) + sessionIndex(4) + ipLen(1) + ip + rangeLen(1) + range + rangeBits(1)
+// serverClaim: code(1) + sessionID(16) + sessionIndex(4) + ipLen(1) + ip
+//   - rangeLen(1) + range + rangeBits(1)
 type serverClaim struct {
 	Code         Code
+	SessionID    protocol.SessionID_Ty
 	SessionIndex uint32
 	IP           netip.Addr
 	Ranges       netip.Prefix
@@ -175,6 +185,7 @@ func (c serverClaim) marshal() []byte {
 	}
 	var b bytes.Buffer
 	b.WriteByte(byte(c.Code))
+	b.Write(c.SessionID[:])
 	var idx [4]byte
 	binary.BigEndian.PutUint32(idx[:], c.SessionIndex)
 	b.Write(idx[:])
@@ -193,6 +204,9 @@ func (c *serverClaim) unmarshal(b []byte) error {
 		return err
 	}
 	c.Code = Code(code)
+	if _, err := io.ReadFull(r, c.SessionID[:]); err != nil {
+		return err
+	}
 	var idx [4]byte
 	if _, err := io.ReadFull(r, idx[:]); err != nil {
 		return err
@@ -235,27 +249,23 @@ func (c *serverClaim) unmarshal(b []byte) error {
 	return nil
 }
 
-// clientAck: accepted(1) + sessionID(16)
+// clientAck: accepted(1)
 type clientAck struct {
-	Accepted  bool
-	SessionID protocol.SessionID_Ty
+	Accepted bool
 }
 
 func (a clientAck) marshal() []byte {
-	b := make([]byte, 1+16)
 	if a.Accepted {
-		b[0] = 1
+		return []byte{1}
 	}
-	copy(b[1:], a.SessionID[:])
-	return b
+	return []byte{0}
 }
 
 func (a *clientAck) unmarshal(b []byte) error {
-	if len(b) < 1+16 {
+	if len(b) < 1 {
 		return fmt.Errorf("assign: short ClientAck %d", len(b))
 	}
 	a.Accepted = b[0] == 1
-	copy(a.SessionID[:], b[1:17])
 	return nil
 }
 

@@ -9,9 +9,9 @@ import (
 	"github.com/jabberwocky238/gasoline/protocol/noise"
 )
 
-// vniEntry holds per-VNI runtime state: the active client set, an
-// O(1) CID index over those clients, the routing table, and the Noise
-// authorization set.
+// vniEntry holds per-VNI runtime state: the active client set, an O(1)
+// SessionID index over those clients, the routing table, the Noise
+// authorization set, and the fixed-IP preset map.
 type vniEntry struct {
 	mu sync.RWMutex
 
@@ -21,8 +21,12 @@ type vniEntry struct {
 	// this once consensus is wired into the handshake path.
 	authorizedKeys map[noise.PublicKey]struct{}
 
-	clients      map[uint32]*PeerClient          // keyed by SessionIndex
-	clientsByCID map[protocol.CID_Ty]*PeerClient // hot-path index for forwardFrame
+	// presetIP pins a pubkey to a fixed IP (PRD §4.5). Consulted by the
+	// allocator's Preclaim.
+	presetIP map[noise.PublicKey]netip.Prefix
+
+	clients            map[uint32]*PeerClient                // keyed by SessionIndex
+	clientsBySessionID map[protocol.SessionID_Ty]*PeerClient // hot-path index for forwardFrame
 
 	routingMap *vnetRoutingMap
 
@@ -38,10 +42,10 @@ func newVniEntry(authorizedKeys map[noise.PublicKey]struct{}) *vniEntry {
 		authorizedKeys = make(map[noise.PublicKey]struct{})
 	}
 	return &vniEntry{
-		authorizedKeys: authorizedKeys,
-		clients:        make(map[uint32]*PeerClient),
-		clientsByCID:   make(map[protocol.CID_Ty]*PeerClient),
-		routingMap:     newVnetRoutingMap(),
+		authorizedKeys:     authorizedKeys,
+		clients:            make(map[uint32]*PeerClient),
+		clientsBySessionID: make(map[protocol.SessionID_Ty]*PeerClient),
+		routingMap:         newVnetRoutingMap(),
 	}
 }
 
@@ -59,7 +63,7 @@ func (v *vniEntry) addClient(cp *PeerClient) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.clients[cp.sc.SessionIndex] = cp
-	v.clientsByCID[cp.sc.CID] = cp
+	v.clientsBySessionID[cp.sc.SessionID] = cp
 }
 
 func (v *vniEntry) removeClient(sessionIndex uint32) {
@@ -70,11 +74,11 @@ func (v *vniEntry) removeClient(sessionIndex uint32) {
 		return
 	}
 	delete(v.clients, sessionIndex)
-	// Only drop the CID index entry if it still points at *this* client;
-	// a CID re-bound to a fresh session must not be cleared by an old
+	// Only drop the index entry if it still points at *this* client; a
+	// SessionID re-bound to a fresh session must not be cleared by an old
 	// session's teardown.
-	if cur, ok := v.clientsByCID[cp.sc.CID]; ok && cur == cp {
-		delete(v.clientsByCID, cp.sc.CID)
+	if cur, ok := v.clientsBySessionID[cp.sc.SessionID]; ok && cur == cp {
+		delete(v.clientsBySessionID, cp.sc.SessionID)
 	}
 }
 
@@ -93,8 +97,8 @@ func (v *vniEntry) Clients() []*PeerClient {
 //
 //   - Version 3 (keepalive): reflect a v3 packet back to src and stop.
 //   - Version 4/6: LPM dst → RouteTarget.
-//   - RouteTargetClient: O(1) CID lookup, write raw IP to that client.
-//   - RouteTargetOperator: wrap as MessageTransport(vni, dst-cid, ip)
+//   - RouteTargetClient: O(1) SessionID lookup, write raw IP to that client.
+//   - RouteTargetOperator: wrap as MessageTransport(vni, dst-sessionID, ip)
 //     and ship to the peer's UDP underlay.
 //   - Other versions: silently drop.
 //
@@ -139,7 +143,7 @@ func (v *vniEntry) forwardFrame(frame []byte, src *PeerClient) error {
 	switch target.Kind {
 	case RouteTargetClient:
 		v.mu.RLock()
-		cp := v.clientsByCID[target.CID]
+		cp := v.clientsBySessionID[target.SessionID]
 		v.mu.RUnlock()
 		if cp == nil || cp.closed.Load() || cp == src {
 			return nil
@@ -157,7 +161,7 @@ func (v *vniEntry) forwardFrame(frame []byte, src *PeerClient) error {
 		// Wrap and ship. Buffer is rented from the pool, returned on
 		// the way out.
 		m := message.New()
-		if err := m.Seal(v.vni, target.CID, frame); err != nil {
+		if err := m.Seal(v.vni, target.SessionID, frame); err != nil {
 			m.Release()
 			return err
 		}
@@ -203,7 +207,7 @@ func (v *vniEntry) deliverFromPeer(payload []byte) error {
 		return nil
 	}
 	v.mu.RLock()
-	cp := v.clientsByCID[target.CID]
+	cp := v.clientsBySessionID[target.SessionID]
 	v.mu.RUnlock()
 	if cp == nil || cp.closed.Load() {
 		return nil

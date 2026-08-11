@@ -46,7 +46,6 @@ type Conn interface {
 type Accepted struct {
 	Conn      Conn
 	VNI       protocol.VNI_Ty
-	CID       protocol.CID_Ty
 	ClientPub noise.PublicKey
 	Session   *noise.Session
 }

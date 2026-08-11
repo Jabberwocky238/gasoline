@@ -24,11 +24,11 @@ func TestCSC_ICMP_QUIC(t *testing.T) {
 
 	tlsConf := quic.InsecureClientTLS()
 
-	cfgA := protocol.NewPresetSessionConfig(bs.cidA, bs.vni)
+	cfgA := protocol.NewPresetSessionConfig(bs.vni)
 	connA, _ := dialAndAssign(t, quic.NewDialer(cfgA, bs.idA(), tlsConf), bs.op.ClientAddr(), bs.idA(), bs.vni)
 	defer connA.Close()
 
-	cfgB := protocol.NewPresetSessionConfig(bs.cidB, bs.vni)
+	cfgB := protocol.NewPresetSessionConfig(bs.vni)
 	connB, _ := dialAndAssign(t, quic.NewDialer(cfgB, bs.idB(), tlsConf), bs.op.ClientAddr(), bs.idB(), bs.vni)
 	defer connB.Close()
 

@@ -12,11 +12,11 @@ func TestCSSC_UDP(t *testing.T) {
 	defer a.op.Close()
 	defer b.op.Close()
 
-	cfgA := protocol.NewPresetSessionConfig(a.cidA, a.vni)
+	cfgA := protocol.NewPresetSessionConfig(a.vni)
 	connA, _ := dialAndAssign(t, udp.NewDialer(cfgA, a.idA()), a.op.ClientAddr(), a.idA(), a.vni)
 	defer connA.Close()
 
-	cfgB := protocol.NewPresetSessionConfig(b.cidB, b.vni)
+	cfgB := protocol.NewPresetSessionConfig(b.vni)
 	connB, _ := dialAndAssign(t, udp.NewDialer(cfgB, b.idB()), b.op.ClientAddr(), b.idB(), b.vni)
 	defer connB.Close()
 

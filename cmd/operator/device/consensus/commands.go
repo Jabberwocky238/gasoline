@@ -87,7 +87,6 @@ type KeyRevoke struct {
 // SessionCreate is the single Raft write a handshake performs (PRD §2.3).
 type SessionCreate struct {
 	SessionID protocol.SessionID_Ty
-	CID       protocol.CID_Ty
 	PubKey    [32]byte
 	VNI       protocol.VNI_Ty
 	IP        netip.Addr // pre-selected by the admitting operator

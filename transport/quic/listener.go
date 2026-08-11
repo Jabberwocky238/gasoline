@@ -40,7 +40,7 @@ func (l *Listener) Accept() (transport.Accepted, error) {
 		return transport.Accepted{}, err
 	}
 	return transport.Accepted{
-		Conn: newConn(stream, conn.RemoteAddr().String()), VNI: auth.VNI, CID: auth.CID, ClientPub: auth.ClientPub, Session: auth.Session,
+		Conn: newConn(stream, conn.RemoteAddr().String()), VNI: auth.VNI, ClientPub: auth.ClientPub, Session: auth.Session,
 	}, nil
 }
 

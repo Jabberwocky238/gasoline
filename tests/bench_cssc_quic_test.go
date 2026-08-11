@@ -14,11 +14,11 @@ func TestCSSC_QUIC(t *testing.T) {
 
 	tlsConf := quic.InsecureClientTLS()
 
-	cfgA := protocol.NewPresetSessionConfig(a.cidA, a.vni)
+	cfgA := protocol.NewPresetSessionConfig(a.vni)
 	connA, _ := dialAndAssign(t, quic.NewDialer(cfgA, a.idA(), tlsConf), a.op.ClientAddr(), a.idA(), a.vni)
 	defer connA.Close()
 
-	cfgB := protocol.NewPresetSessionConfig(b.cidB, b.vni)
+	cfgB := protocol.NewPresetSessionConfig(b.vni)
 	connB, _ := dialAndAssign(t, quic.NewDialer(cfgB, b.idB(), tlsConf), b.op.ClientAddr(), b.idB(), b.vni)
 	defer connB.Close()
 

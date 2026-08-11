@@ -8,14 +8,15 @@
 //
 // Three auth messages (all in this package):
 //
-//  1. ClientHello  { vni, cid, Label[NoiseInitiation]=msg1 }
+//  1. ClientHello  { vni, Label[NoiseInitiation]=msg1 }
 //  2. ServerHello  { Label[NoiseResponse]=msg2 }
 //  3. ClientAnswer { AEAD(send_key, ∅) }   key confirmation — proves the client
 //     holds its private key
 //
 // After message 3 both sides hold the keypair and the client is authenticated.
-// Identity binding: the server checks CID == DeriveCID(recovered pubkey) and
-// that the key is authorized; all auth failures return the same generic reject.
+// Identity is the recovered static public key (no CID); the server checks the
+// key is authorized on the VNI. All auth failures return the same generic
+// reject.
 package handshake
 
 import (
@@ -101,11 +102,11 @@ func ClientHandshake(
 }
 
 // AuthResult is what a completed server-side authentication yields: the
-// client's declared VNI and CID (from ClientHello, now bound to its verified
-// identity), the recovered static public key, and the transport Session.
+// client's declared VNI, its recovered static public key (its identity), and
+// the transport Session. There is no CID — identity is the public key, and the
+// SessionID is allocated later by package assign.
 type AuthResult struct {
 	VNI       protocol.VNI_Ty
-	CID       protocol.CID_Ty
 	ClientPub noise.PublicKey
 	Session   *noise.Session
 }
@@ -175,7 +176,7 @@ func ServerHandshake(rw io.ReadWriter, resolver VNIMapperFn) (AuthResult, error)
 	if _, err := sess.OpenAt(confirmCounter, ca.Ciphertext, confirmAAD, false); err != nil {
 		return fail("client answer did not authenticate: %w", err)
 	}
-	return AuthResult{VNI: hello.VNI, CID: protocol.DeriveCID(clientPub), ClientPub: clientPub, Session: sess}, nil
+	return AuthResult{VNI: hello.VNI, ClientPub: clientPub, Session: sess}, nil
 }
 
 // rejectAtHello rejects before ServerHello. The client is blocked reading a

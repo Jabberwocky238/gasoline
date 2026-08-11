@@ -30,7 +30,6 @@ type keyGrant struct {
 // transport keys are deliberately NOT here — they never enter Raft.
 type sessionEntry struct {
 	SessionID    protocol.SessionID_Ty
-	CID          protocol.CID_Ty
 	PubKey       [32]byte
 	VNI          protocol.VNI_Ty
 	IP           netip.Addr
@@ -168,7 +167,6 @@ func (m *meshState) applySessionCreate(c *SessionCreate) error {
 	}
 	e := &sessionEntry{
 		SessionID:    c.SessionID,
-		CID:          c.CID,
 		PubKey:       c.PubKey,
 		VNI:          c.VNI,
 		IP:           c.IP,

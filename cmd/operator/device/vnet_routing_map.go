@@ -3,15 +3,17 @@ package operator
 // Longest-prefix-match routing table for one VNI. The trie portion is
 // adapted from WireGuard's common/allowedips.go (binary patricia trie,
 // LPM lookup, MIT licensed). Each leaf carries a RouteTarget that is
-// EITHER a local client (CID) OR a remote peer operator (UUID); LPM
+// EITHER a local client (SessionID) OR a remote peer operator (UUID); LPM
 // lookups return that tagged target so the caller knows whether to
 // forward locally or to ship the frame off to another operator.
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"math/bits"
 	"net/netip"
+	"strings"
 	"sync"
 
 	"github.com/jabberwocky238/gasoline/protocol"
@@ -26,9 +28,9 @@ func (s *operatorState) dispatchRoute(args []string) string {
 	switch args[0] {
 	case "set":
 		if len(args) != 3 {
-			return errReply("route set: usage 'route set <cid> <prefix>'")
+			return errReply("route set: usage 'route set <session-id-hex> <prefix>'")
 		}
-		cid, err := parseCID(args[1])
+		sid, err := parseSessionID(args[1])
 		if err != nil {
 			return errReply(err.Error())
 		}
@@ -36,20 +38,20 @@ func (s *operatorState) dispatchRoute(args []string) string {
 		if err != nil {
 			return errReply(fmt.Sprintf("bad prefix %q: %v", args[2], err))
 		}
-		if err := s.routeSet(cid, pfx); err != nil {
+		if err := s.routeSet(sid, pfx); err != nil {
 			return errReply(err.Error())
 		}
 		return "OK"
 
 	case "get":
 		if len(args) != 2 {
-			return errReply("route get: usage 'route get <cid>'")
+			return errReply("route get: usage 'route get <session-id-hex>'")
 		}
-		cid, err := parseCID(args[1])
+		sid, err := parseSessionID(args[1])
 		if err != nil {
 			return errReply(err.Error())
 		}
-		pfx, ok := s.routeGet(cid)
+		pfx, ok := s.routeGet(sid)
 		if !ok {
 			return errReply("not found")
 		}
@@ -57,13 +59,13 @@ func (s *operatorState) dispatchRoute(args []string) string {
 
 	case "del":
 		if len(args) != 2 {
-			return errReply("route del: usage 'route del <cid>'")
+			return errReply("route del: usage 'route del <session-id-hex>'")
 		}
-		cid, err := parseCID(args[1])
+		sid, err := parseSessionID(args[1])
 		if err != nil {
 			return errReply(err.Error())
 		}
-		s.routeDel(cid)
+		s.routeDel(sid)
 		return "OK"
 
 	default:
@@ -71,8 +73,19 @@ func (s *operatorState) dispatchRoute(args []string) string {
 	}
 }
 
-// parseCID decodes a CID from gasoctl. Decimal by default, "0x..." for hex.
-func parseCID(s string) (protocol.CID_Ty, error) { return protocol.ParseCID(s) }
+// parseSessionID decodes a 16-byte SessionID from a 32-char hex string.
+func parseSessionID(s string) (protocol.SessionID_Ty, error) {
+	var sid protocol.SessionID_Ty
+	b, err := hex.DecodeString(strings.TrimSpace(s))
+	if err != nil {
+		return sid, fmt.Errorf("session-id %q: invalid hex: %v", s, err)
+	}
+	if len(b) != len(sid) {
+		return sid, fmt.Errorf("session-id %q: want %d bytes, got %d", s, len(sid), len(b))
+	}
+	copy(sid[:], b)
+	return sid, nil
+}
 
 func errReply(msg string) string { return "ERR " + msg }
 
@@ -84,7 +97,7 @@ type RouteTargetKind uint8
 
 const (
 	// RouteTargetClient: the prefix is owned by a client that handshakes
-	// directly with this operator. The CID names that client.
+	// directly with this operator. The SessionID names that session.
 	RouteTargetClient RouteTargetKind = iota
 
 	// RouteTargetOperator: the prefix is owned by a client that
@@ -95,9 +108,9 @@ const (
 
 // RouteTarget is the resolved owner of a prefix.
 type RouteTarget struct {
-	Kind   RouteTargetKind
-	CID    protocol.CID_Ty // valid when Kind == RouteTargetClient
-	OpUUID [16]byte        // valid when Kind == RouteTargetOperator
+	Kind      RouteTargetKind
+	SessionID protocol.SessionID_Ty // valid when Kind == RouteTargetClient
+	OpUUID    [16]byte              // valid when Kind == RouteTargetOperator
 }
 
 // --------------- trie ---------------
@@ -267,32 +280,27 @@ func removeExact(root *routingTrieNode, ip []byte, cidr uint8) bool {
 
 // vnetRoutingMap is the per-VNI prefix -> (client | operator) table
 // with LPM lookup on the prefix side and bidirectional reverse maps
-// keyed by client CID and peer operator UUID.
+// keyed by client SessionID and peer operator UUID.
 type vnetRoutingMap struct {
 	mu        sync.RWMutex
 	v4        *routingTrieNode
 	v6        *routingTrieNode
-	cidToPfx  map[protocol.CID_Ty]netip.Prefix
+	sidToPfx  map[protocol.SessionID_Ty]netip.Prefix
 	uuidToPfx map[[16]byte]netip.Prefix
 }
 
 func newVnetRoutingMap() *vnetRoutingMap {
 	return &vnetRoutingMap{
-		cidToPfx:  make(map[protocol.CID_Ty]netip.Prefix),
+		sidToPfx:  make(map[protocol.SessionID_Ty]netip.Prefix),
 		uuidToPfx: make(map[[16]byte]netip.Prefix),
 	}
 }
 
-// Set is a back-compat alias for SetClient.
-func (m *vnetRoutingMap) Set(cid protocol.CID_Ty, prefix netip.Prefix) {
-	m.SetClient(cid, prefix)
-}
-
-// SetClient binds cid <-> prefix as a local client route.
-func (m *vnetRoutingMap) SetClient(cid protocol.CID_Ty, prefix netip.Prefix) {
+// SetClient binds sessionID <-> prefix as a local client route.
+func (m *vnetRoutingMap) SetClient(sid protocol.SessionID_Ty, prefix netip.Prefix) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.setLocked(RouteTarget{Kind: RouteTargetClient, CID: cid}, prefix)
+	m.setLocked(RouteTarget{Kind: RouteTargetClient, SessionID: sid}, prefix)
 }
 
 // SetOperator binds peer-operator-uuid <-> prefix as a remote route.
@@ -307,7 +315,7 @@ func (m *vnetRoutingMap) setLocked(target RouteTarget, prefix netip.Prefix) {
 	// Remove any stale binding for this target identity.
 	switch target.Kind {
 	case RouteTargetClient:
-		if oldPfx, ok := m.cidToPfx[target.CID]; ok && oldPfx != prefix {
+		if oldPfx, ok := m.sidToPfx[target.SessionID]; ok && oldPfx != prefix {
 			m.removeExactLocked(oldPfx)
 		}
 	case RouteTargetOperator:
@@ -337,7 +345,7 @@ func (m *vnetRoutingMap) setLocked(target RouteTarget, prefix netip.Prefix) {
 
 	switch target.Kind {
 	case RouteTargetClient:
-		m.cidToPfx[target.CID] = prefix
+		m.sidToPfx[target.SessionID] = prefix
 	case RouteTargetOperator:
 		m.uuidToPfx[target.OpUUID] = prefix
 	}
@@ -348,17 +356,17 @@ func (m *vnetRoutingMap) setLocked(target RouteTarget, prefix netip.Prefix) {
 func (m *vnetRoutingMap) dropReverseLocked(t RouteTarget) {
 	switch t.Kind {
 	case RouteTargetClient:
-		delete(m.cidToPfx, t.CID)
+		delete(m.sidToPfx, t.SessionID)
 	case RouteTargetOperator:
 		delete(m.uuidToPfx, t.OpUUID)
 	}
 }
 
-// LookupByCID returns the prefix bound to a client cid.
-func (m *vnetRoutingMap) LookupByCID(cid protocol.CID_Ty) (netip.Prefix, bool) {
+// LookupBySessionID returns the prefix bound to a client session.
+func (m *vnetRoutingMap) LookupBySessionID(sid protocol.SessionID_Ty) (netip.Prefix, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	p, ok := m.cidToPfx[cid]
+	p, ok := m.sidToPfx[sid]
 	return p, ok
 }
 
@@ -371,7 +379,7 @@ func (m *vnetRoutingMap) LookupByOpUUID(uuid [16]byte) (netip.Prefix, bool) {
 }
 
 // LookupByIP performs longest-prefix-match: returns the RouteTarget
-// (either a local client CID or a remote operator UUID) whose configured
+// (either a local client SessionID or a remote operator UUID) whose configured
 // prefix is the longest one containing ip.
 func (m *vnetRoutingMap) LookupByIP(ip netip.Addr) (RouteTarget, bool) {
 	m.mu.RLock()
@@ -415,16 +423,16 @@ func (m *vnetRoutingMap) LookupByPrefix(prefix netip.Prefix) (RouteTarget, bool)
 	return node.target, true
 }
 
-// DeleteByCID removes the binding keyed by client cid.
-func (m *vnetRoutingMap) DeleteByCID(cid protocol.CID_Ty) {
+// DeleteBySessionID removes the binding keyed by client session.
+func (m *vnetRoutingMap) DeleteBySessionID(sid protocol.SessionID_Ty) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	pfx, ok := m.cidToPfx[cid]
+	pfx, ok := m.sidToPfx[sid]
 	if !ok {
 		return
 	}
 	m.removeExactLocked(pfx)
-	delete(m.cidToPfx, cid)
+	delete(m.sidToPfx, sid)
 }
 
 // DeleteByOpUUID removes the binding keyed by peer operator UUID.
@@ -456,7 +464,7 @@ func (m *vnetRoutingMap) DeleteByPrefix(prefix netip.Prefix) {
 func (m *vnetRoutingMap) Len() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return len(m.cidToPfx) + len(m.uuidToPfx)
+	return len(m.sidToPfx) + len(m.uuidToPfx)
 }
 
 func (m *vnetRoutingMap) removeExactLocked(prefix netip.Prefix) {

@@ -13,10 +13,14 @@ type StaticOperatorVNetConfig struct {
 	VNI  protocol.VNI_Ty
 	CIDR string
 	// AuthorizedKeys is the set of client static public keys allowed on this
-	// VNI. Empty means "open" (test/bench). The Raft key table supersedes it
+	// VNI. A key not in the set is rejected. The Raft key table supersedes it
 	// once consensus is wired into the handshake.
 	AuthorizedKeys map[noise.PublicKey]struct{}
-	PresetCIDmap   map[protocol.CID_Ty]netip.Prefix
+	// PresetKeyMap statically pins a public key to a fixed IP (the fixed-IP /
+	// lock semantics of PRD §4.5). At handshake the pinned IP is handed out and
+	// the routing table binds sessionID -> prefix. Empty entries fall through to
+	// dynamic pool allocation (P4).
+	PresetKeyMap map[noise.PublicKey]netip.Prefix
 }
 
 // StaticOperatorConfig is the resolved configuration handed to New.

@@ -132,7 +132,7 @@ func (l *Listener) handshakePeer(vp *virtualPeer, key netip.AddrPort) {
 	vp.conn = conn
 
 	l.acceptCh <- acceptResult{accepted: transport.Accepted{
-		Conn: conn, VNI: auth.VNI, CID: auth.CID, ClientPub: auth.ClientPub, Session: auth.Session,
+		Conn: conn, VNI: auth.VNI, ClientPub: auth.ClientPub, Session: auth.Session,
 	}}
 }
 

@@ -45,8 +45,6 @@ func TestRegisterOperatorCLIParam_RepeatedListenAndNetwork(t *testing.T) {
 	cfg, err := RegisterOperatorCLIParam(map[string][]string{
 		"listen":  {"udp://127.0.0.1:1000", "quic://127.0.0.1:2000"},
 		"network": {"1:10.1.0.0/16", "2:10.2.0.0/16"},
-		// Override the VNI-0 preset defaults; this case declares 1 and 2.
-		"preset": {"1:100:10.1.0.1/32", "2:101:10.2.0.1/32"},
 	})
 	if err != nil {
 		t.Fatalf("resolve: %v", err)

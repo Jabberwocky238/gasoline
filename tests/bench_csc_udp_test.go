@@ -11,11 +11,11 @@ func TestCSC_UDP(t *testing.T) {
 	bs := startBenchOperator(t, "udp")
 	defer bs.op.Close()
 
-	cfgA := protocol.NewPresetSessionConfig(bs.cidA, bs.vni)
+	cfgA := protocol.NewPresetSessionConfig(bs.vni)
 	connA, _ := dialAndAssign(t, udp.NewDialer(cfgA, bs.idA()), bs.op.ClientAddr(), bs.idA(), bs.vni)
 	defer connA.Close()
 
-	cfgB := protocol.NewPresetSessionConfig(bs.cidB, bs.vni)
+	cfgB := protocol.NewPresetSessionConfig(bs.vni)
 	connB, _ := dialAndAssign(t, udp.NewDialer(cfgB, bs.idB()), bs.op.ClientAddr(), bs.idB(), bs.vni)
 	defer connB.Close()
 

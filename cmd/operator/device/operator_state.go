@@ -22,7 +22,7 @@ type Ctrl interface {
 // ClientEventFn is invoked whenever a client attaches to or detaches
 // from any VNI on this operator. attached==false means the client
 // just left.
-type ClientEventFn func(vni protocol.VNI_Ty, cid protocol.CID_Ty, prefix netip.Prefix, attached bool)
+type ClientEventFn func(vni protocol.VNI_Ty, sid protocol.SessionID_Ty, prefix netip.Prefix, attached bool)
 
 // operatorState owns every VNI's runtime entry plus the peer-operator
 // table. vniEntry rows are created up-front from the static config; we
@@ -79,13 +79,13 @@ func (s *operatorState) SubscribeClientEvents(fn ClientEventFn) (unsubscribe fun
 	}
 }
 
-func (s *operatorState) emitClientEvent(vni protocol.VNI_Ty, cid protocol.CID_Ty, prefix netip.Prefix, attached bool) {
+func (s *operatorState) emitClientEvent(vni protocol.VNI_Ty, sid protocol.SessionID_Ty, prefix netip.Prefix, attached bool) {
 	s.subMu.Lock()
 	subs := append([]ClientEventFn(nil), s.subs...)
 	s.subMu.Unlock()
 	for _, fn := range subs {
 		if fn != nil {
-			fn(vni, cid, prefix, attached)
+			fn(vni, sid, prefix, attached)
 		}
 	}
 }
@@ -112,8 +112,8 @@ func (s *operatorState) addClient(cp *PeerClient) (*vniEntry, error) {
 		return nil, fmt.Errorf("unknown vni %s", cp.sc.VNI)
 	}
 	v.addClient(cp)
-	pfx, _ := v.routingMap.LookupByCID(cp.sc.CID)
-	s.emitClientEvent(cp.sc.VNI, cp.sc.CID, pfx, true)
+	pfx, _ := v.routingMap.LookupBySessionID(cp.sc.SessionID)
+	s.emitClientEvent(cp.sc.VNI, cp.sc.SessionID, pfx, true)
 	return v, nil
 }
 
@@ -122,9 +122,9 @@ func (s *operatorState) removeClient(cp *PeerClient) {
 	if !ok {
 		return
 	}
-	pfx, _ := v.routingMap.LookupByCID(cp.sc.CID)
+	pfx, _ := v.routingMap.LookupBySessionID(cp.sc.SessionID)
 	v.removeClient(cp.sc.SessionIndex)
-	s.emitClientEvent(cp.sc.VNI, cp.sc.CID, pfx, false)
+	s.emitClientEvent(cp.sc.VNI, cp.sc.SessionID, pfx, false)
 }
 
 func (s *operatorState) totalClients() int {
@@ -155,34 +155,34 @@ func (s *operatorState) snapshot() []*PeerClient {
 // every configured VNI's routingMap and walk every VNI on get. When
 // the wire protocol grows a VNI field these collapse to one lookup.
 
-func (s *operatorState) routeSet(cid protocol.CID_Ty, prefix netip.Prefix) error {
+func (s *operatorState) routeSet(sid protocol.SessionID_Ty, prefix netip.Prefix) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if len(s.vnets) == 0 {
 		return fmt.Errorf("no vnets configured")
 	}
 	for _, v := range s.vnets {
-		v.routingMap.Set(cid, prefix)
+		v.routingMap.SetClient(sid, prefix)
 	}
 	return nil
 }
 
-func (s *operatorState) routeGet(cid protocol.CID_Ty) (netip.Prefix, bool) {
+func (s *operatorState) routeGet(sid protocol.SessionID_Ty) (netip.Prefix, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, v := range s.vnets {
-		if pfx, ok := v.routingMap.LookupByCID(cid); ok {
+		if pfx, ok := v.routingMap.LookupBySessionID(sid); ok {
 			return pfx, true
 		}
 	}
 	return netip.Prefix{}, false
 }
 
-func (s *operatorState) routeDel(cid protocol.CID_Ty) {
+func (s *operatorState) routeDel(sid protocol.SessionID_Ty) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, v := range s.vnets {
-		v.routingMap.DeleteByCID(cid)
+		v.routingMap.DeleteBySessionID(sid)
 	}
 }
 

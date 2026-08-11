@@ -86,13 +86,11 @@ func New(cfg *StaticOperatorConfig) (*Operator, error) {
 		}
 		state.cidrs[vni] = prefix
 		state.registerVNI(vni, entry.AuthorizedKeys)
-		if len(entry.PresetCIDmap) > 0 {
+		if len(entry.PresetKeyMap) > 0 {
 			vn, _ := state.vni(vni)
-			for cid, pfx := range entry.PresetCIDmap {
-				vn.routingMap.Set(cid, pfx)
-			}
+			vn.presetIP = entry.PresetKeyMap
 		}
-		root.Log().Infof("VNet %s: %s (%d preset routes)", vni, prefix, len(entry.PresetCIDmap))
+		root.Log().Infof("VNet %s: %s (%d preset keys)", vni, prefix, len(entry.PresetKeyMap))
 	}
 
 	// One mapper closure shared by every listener. The resolver is auth-only:
@@ -258,11 +256,12 @@ func (o *Operator) routineAcceptClients(tp string, ln transport.Listener) {
 		}
 
 		// Authentication is done (acc carries the identity + Session). Run the
-		// control-plane assignment (preclaim/claim/ack/confirm) to get an IP.
-		alloc := &localAllocator{state: o.state, cidrs: o.state.cidrs}
-		sc, err := assign.ServerAssign(acc.Conn, acc.Session, acc.VNI, acc.CID, acc.ClientPub, o.state.nextSessionIndex(), alloc)
+		// control-plane assignment (preclaim/claim/ack/confirm) to get an IP +
+		// SessionID.
+		alloc := &localAllocator{state: o.state}
+		sc, err := assign.ServerAssign(acc.Conn, acc.Session, acc.VNI, acc.ClientPub, o.state.nextSessionIndex(), alloc)
 		if err != nil {
-			logger.Errorf("assign for cid %s on VNI %s: %v", acc.CID, acc.VNI, err)
+			logger.Errorf("assign on VNI %s: %v", acc.VNI, err)
 			_ = acc.Conn.Close()
 			continue
 		}
@@ -270,13 +269,13 @@ func (o *Operator) routineAcceptClients(tp string, ln transport.Listener) {
 		cp := newPeerClient(acc.Conn, sc)
 		vn, err := o.state.addClient(cp)
 		if err != nil {
-			logger.Errorf("attach cid %s sessionindex %d to VNI %s: %v", cp.sc.CID, cp.sc.SessionIndex, cp.sc.VNI, err)
+			logger.Errorf("attach cid %s sessionindex %d to VNI %s: %v", cp.sc.SessionID, cp.sc.SessionIndex, cp.sc.VNI, err)
 			_ = acc.Conn.Close()
 			continue
 		}
 
 		logger.Infof("cid %s sessionindex %d connected on VNI %s from %s",
-			cp.sc.CID, cp.sc.SessionIndex, cp.sc.VNI, acc.Conn.RemoteAddr())
+			cp.sc.SessionID, cp.sc.SessionIndex, cp.sc.VNI, acc.Conn.RemoteAddr())
 		go o.routineReadFromClient(cp, vn)
 	}
 }
@@ -287,7 +286,7 @@ func (o *Operator) routineReadFromClient(cp *PeerClient, vn *vniEntry) {
 		o.state.removeClient(cp)
 		_ = cp.Conn.Close()
 		cp.closed.Store(true)
-		logger.Infof("cid %s sessionindex %d disconnected", cp.sc.CID, cp.sc.SessionIndex)
+		logger.Infof("cid %s sessionindex %d disconnected", cp.sc.SessionID, cp.sc.SessionIndex)
 	}()
 
 	bufPtr := common.GetBuffer()
@@ -303,7 +302,7 @@ func (o *Operator) routineReadFromClient(cp *PeerClient, vn *vniEntry) {
 
 		n, err := cp.Conn.ReadPacket(readBuf)
 		if err != nil {
-			logger.Debugf("Read from cid %s sessionindex %d: %v", cp.sc.CID, cp.sc.SessionIndex, err)
+			logger.Debugf("Read from cid %s sessionindex %d: %v", cp.sc.SessionID, cp.sc.SessionIndex, err)
 			return
 		}
 		if n == 0 {
@@ -311,7 +310,7 @@ func (o *Operator) routineReadFromClient(cp *PeerClient, vn *vniEntry) {
 		}
 
 		if err := vn.forwardFrame(readBuf[:n], cp); err != nil {
-			logger.Debugf("Forward from cid %s sessionindex %d: %v", cp.sc.CID, cp.sc.SessionIndex, err)
+			logger.Debugf("Forward from cid %s sessionindex %d: %v", cp.sc.SessionID, cp.sc.SessionIndex, err)
 		}
 	}
 }
@@ -332,7 +331,7 @@ func (o *Operator) routineReaper() {
 		now := time.Now()
 		for _, cp := range o.state.snapshot() {
 			if now.Sub(cp.Conn.LastActive()) > idleTimeout {
-				logger.Warnf("Reaping idle cid %s sessionindex %d", cp.sc.CID, cp.sc.SessionIndex)
+				logger.Warnf("Reaping idle cid %s sessionindex %d", cp.sc.SessionID, cp.sc.SessionIndex)
 				_ = cp.Conn.Close()
 			}
 		}

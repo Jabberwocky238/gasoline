@@ -2,7 +2,6 @@ package udp
 
 import (
 	"bytes"
-	"net/netip"
 	"sync"
 	"testing"
 
@@ -20,10 +19,6 @@ type testVNIResolver struct {
 	authorized map[noise.PublicKey]struct{}
 }
 
-func (r testVNIResolver) CIDR() netip.Prefix { return netip.MustParsePrefix("10.0.0.0/24") }
-func (r testVNIResolver) IP(_ protocol.CID_Ty) (netip.Addr, error) {
-	return netip.MustParseAddr("10.0.0.1"), nil
-}
 func (r testVNIResolver) ServerStatic() (noise.PrivateKey, noise.PublicKey) {
 	return r.serverPriv, r.serverPub
 }
@@ -45,7 +40,7 @@ func testMapper(serverPriv noise.PrivateKey, serverPub noise.PublicKey, authoriz
 }
 
 func newTestCfg() protocol.PresetSessionConfig {
-	return protocol.NewPresetSessionConfig(protocol.CID_Ty{}, 0)
+	return protocol.NewPresetSessionConfig(0)
 }
 
 // newTestKeys returns a client identity and a server key pair, with the client
@@ -72,14 +67,13 @@ func TestUDPHandshakeAndPacket(t *testing.T) {
 	defer ln.Close()
 
 	addr := ln.Addr()
-	cid := protocol.DeriveCID(id.Pub)
 	dialer := NewDialer(newTestCfg(), id)
 
 	var wg sync.WaitGroup
 	var serverConn *Conn
 	var serverErr error
 
-	var serverCID protocol.CID_Ty
+	var serverPub noise.PublicKey
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -89,7 +83,7 @@ func TestUDPHandshakeAndPacket(t *testing.T) {
 			return
 		}
 		serverConn = acc.Conn.(*Conn)
-		serverCID = acc.CID
+		serverPub = acc.ClientPub
 	}()
 
 	dialed, err := dialer.Dial(addr)
@@ -104,10 +98,10 @@ func TestUDPHandshakeAndPacket(t *testing.T) {
 		t.Fatalf("Accept: %v", serverErr)
 	}
 
-	// The server derives the CID from the authenticated public key; it must
-	// equal what the client derives from the same key.
-	if serverCID != cid {
-		t.Errorf("server-derived CID %v != expected %v", serverCID, cid)
+	// The server recovers the client's identity (its static public key) from
+	// the Noise handshake; it must equal the one the client dialed with.
+	if serverPub != id.Pub {
+		t.Errorf("server recovered wrong client pubkey")
 	}
 
 	testPacket := []byte{

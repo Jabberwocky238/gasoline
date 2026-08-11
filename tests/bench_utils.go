@@ -31,13 +31,12 @@ const (
 type benchSetup struct {
 	op   *operator.Operator
 	vni  protocol.VNI_Ty
-	cidA protocol.CID_Ty
-	cidB protocol.CID_Ty
 	pfxA netip.Prefix
 	pfxB netip.Prefix
 
 	// Noise identities: two client key pairs and the operators' shared server
-	// public key. Dialers build transport.ClientIdentity from these.
+	// public key. Dialers build transport.ClientIdentity from these. Each
+	// client is preset to its fixed IP (pfxA/pfxB) via PresetKeyMap.
 	privA     noise.PrivateKey
 	pubA      noise.PublicKey
 	privB     noise.PrivateKey
@@ -62,21 +61,20 @@ func dialAndAssign(t *testing.T, d transport.Dialer, endpoint string, id transpo
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	cid := protocol.DeriveCID(id.Pub)
-	sc, err := assign.ClientAssign(dialed.Conn, dialed.Session, vni, cid)
+	sc, err := assign.ClientAssign(dialed.Conn, dialed.Session, vni)
 	if err != nil {
 		t.Fatalf("assign: %v", err)
 	}
 	return dialed.Conn, sc
 }
 
-// startBenchOperators spins up two paired operators: opA owns cidA,
-// opB owns cidB, each knows the other's prefix is reachable through
+// startBenchOperators spins up two paired operators: opA owns client A,
+// opB owns client B, each knows the other's prefix is reachable through
 // the peer. Returns the pair plus the addressing fixtures.
 func startBenchOperators(t *testing.T, tp string) (a, b *benchSetup) {
 	t.Helper()
 
-	// Two client identities; CIDs are derived from their public keys.
+	// Two client identities.
 	privA, pubA, err := noise.GenerateKey()
 	if err != nil {
 		t.Fatalf("genkey A: %v", err)
@@ -85,8 +83,6 @@ func startBenchOperators(t *testing.T, tp string) (a, b *benchSetup) {
 	if err != nil {
 		t.Fatalf("genkey B: %v", err)
 	}
-	cidA := protocol.DeriveCID(pubA)
-	cidB := protocol.DeriveCID(pubB)
 	pfxA := netip.MustParsePrefix("10.0.200.10/32")
 	pfxB := netip.MustParsePrefix("10.0.200.11/32")
 
@@ -98,7 +94,8 @@ func startBenchOperators(t *testing.T, tp string) (a, b *benchSetup) {
 	}
 	authKeys := map[noise.PublicKey]struct{}{pubA: {}, pubB: {}}
 
-	build := func(uuid [16]byte, ownCID protocol.CID_Ty, ownPfx netip.Prefix) *operator.Operator {
+	// Each operator presets (fixed-IP binds) its own client's pubkey.
+	build := func(uuid [16]byte, ownPub noise.PublicKey, ownPfx netip.Prefix) *operator.Operator {
 		cfg := &operator.StaticOperatorConfig{
 			UUID:       &uuid,
 			StaticPriv: serverPriv,
@@ -111,7 +108,7 @@ func startBenchOperators(t *testing.T, tp string) (a, b *benchSetup) {
 					VNI:            benchVNI,
 					CIDR:           benchVNetCIDR,
 					AuthorizedKeys: authKeys,
-					PresetCIDmap:   map[protocol.CID_Ty]netip.Prefix{ownCID: ownPfx},
+					PresetKeyMap:   map[noise.PublicKey]netip.Prefix{ownPub: ownPfx},
 				},
 			},
 			LogLevel: logrus.ErrorLevel,
@@ -128,8 +125,8 @@ func startBenchOperators(t *testing.T, tp string) (a, b *benchSetup) {
 
 	uuidA := [16]byte{0xA0}
 	uuidB := [16]byte{0xB0}
-	opA := build(uuidA, cidA, pfxA)
-	opB := build(uuidB, cidB, pfxB)
+	opA := build(uuidA, pubA, pfxA)
+	opB := build(uuidB, pubB, pfxB)
 
 	apA, errA := netip.ParseAddrPort(opA.DataPlaneAddr())
 	apB, errB := netip.ParseAddrPort(opB.DataPlaneAddr())
@@ -150,9 +147,9 @@ func startBenchOperators(t *testing.T, tp string) (a, b *benchSetup) {
 	keys := benchSetup{
 		privA: privA, pubA: pubA, privB: privB, pubB: pubB, serverPub: serverPub,
 	}
-	a = &benchSetup{op: opA, vni: benchVNI, cidA: cidA, cidB: cidB, pfxA: pfxA, pfxB: pfxB,
+	a = &benchSetup{op: opA, vni: benchVNI, pfxA: pfxA, pfxB: pfxB,
 		privA: keys.privA, pubA: keys.pubA, privB: keys.privB, pubB: keys.pubB, serverPub: keys.serverPub}
-	b = &benchSetup{op: opB, vni: benchVNI, cidA: cidA, cidB: cidB, pfxA: pfxA, pfxB: pfxB,
+	b = &benchSetup{op: opB, vni: benchVNI, pfxA: pfxA, pfxB: pfxB,
 		privA: keys.privA, pubA: keys.pubA, privB: keys.privB, pubB: keys.pubB, serverPub: keys.serverPub}
 	return a, b
 }
@@ -175,8 +172,6 @@ func startBenchOperator(t *testing.T, tp string) *benchSetup {
 	if err != nil {
 		t.Fatalf("genkey server: %v", err)
 	}
-	cidA := protocol.DeriveCID(pubA)
-	cidB := protocol.DeriveCID(pubB)
 	pfxA := netip.MustParsePrefix("10.0.200.10/32")
 	pfxB := netip.MustParsePrefix("10.0.200.11/32")
 
@@ -193,9 +188,9 @@ func startBenchOperator(t *testing.T, tp string) *benchSetup {
 				VNI:            benchVNI,
 				CIDR:           benchVNetCIDR,
 				AuthorizedKeys: map[noise.PublicKey]struct{}{pubA: {}, pubB: {}},
-				PresetCIDmap: map[protocol.CID_Ty]netip.Prefix{
-					cidA: pfxA,
-					cidB: pfxB,
+				PresetKeyMap: map[noise.PublicKey]netip.Prefix{
+					pubA: pfxA,
+					pubB: pfxB,
 				},
 			},
 		},
@@ -212,8 +207,6 @@ func startBenchOperator(t *testing.T, tp string) *benchSetup {
 	return &benchSetup{
 		op:    op,
 		vni:   benchVNI,
-		cidA:  cidA,
-		cidB:  cidB,
 		pfxA:  pfxA,
 		pfxB:  pfxB,
 		privA: privA, pubA: pubA, privB: privB, pubB: pubB, serverPub: serverPub,

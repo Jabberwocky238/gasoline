@@ -10,7 +10,6 @@ import (
 	"syscall"
 
 	"github.com/jabberwocky238/gasoline/cmd/client/device"
-	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/noise"
 	log "github.com/sirupsen/logrus"
 )
@@ -72,15 +71,14 @@ func waitForSignal() {
 	log.Info("Shutting down...")
 }
 
-// genkey prints a fresh Noise key pair plus the derived CID.
+// genkey prints a fresh Noise key pair. The public key is what an operator
+// admin registers (via --network / gasoctl key grant).
 func genkey() {
 	priv, pub, err := noise.GenerateKey()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "genkey: %v\n", err)
 		os.Exit(1)
 	}
-	cid := protocol.DeriveCID(pub)
 	fmt.Printf("private: %s\n", base64.StdEncoding.EncodeToString(priv[:]))
 	fmt.Printf("public:  %s\n", base64.StdEncoding.EncodeToString(pub[:]))
-	fmt.Printf("cid:     %s\n", cid)
 }

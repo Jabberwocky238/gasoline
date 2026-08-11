@@ -47,9 +47,7 @@ type Client struct {
 
 // New constructs an unstarted Client.
 func New(cfg *StaticClientConfig) (*Client, error) {
-	// CID is derived from the client's static public key — identity binding.
-	cid := protocol.DeriveCID(cfg.Pub)
-	preset := protocol.NewPresetSessionConfig(cid, cfg.VNI)
+	preset := protocol.NewPresetSessionConfig(cfg.VNI)
 	id := transport.ClientIdentity{Priv: cfg.Priv, Pub: cfg.Pub, ServerPub: cfg.ServerPub}
 
 	var tlsConf *tls.Config
@@ -69,8 +67,7 @@ func New(cfg *StaticClientConfig) (*Client, error) {
 	}
 	lctx := common.NewLogContext(nil, logger).
 		WithField("component", "client").
-		WithField("vni", cfg.VNI).
-		WithField("cid", cid)
+		WithField("vni", cfg.VNI)
 
 	return &Client{
 		cfg:    cfg,
@@ -115,13 +112,12 @@ func (c *Client) dialLocked() (protocol.SessionContext, error) {
 		return c.sessionCtx.Copy(), nil
 	}
 	// Authenticate (handshake), then run the control-plane assignment to learn
-	// our IP. Identity is our static key; the CID is derived from it.
+	// our IP + SessionID. Identity is our static key.
 	dialed, err := c.dialer.Dial(c.cfg.Endpoint)
 	if err != nil {
 		return protocol.SessionContext{}, fmt.Errorf("dial: %w", err)
 	}
-	cid := protocol.DeriveCID(c.cfg.Pub)
-	sc, err := assign.ClientAssign(dialed.Conn, dialed.Session, c.cfg.VNI, cid)
+	sc, err := assign.ClientAssign(dialed.Conn, dialed.Session, c.cfg.VNI)
 	if err != nil {
 		_ = dialed.Conn.Close()
 		return protocol.SessionContext{}, fmt.Errorf("assign: %w", err)

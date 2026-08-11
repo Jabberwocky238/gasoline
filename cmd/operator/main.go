@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/jabberwocky238/gasoline/cmd/operator/device"
+	"github.com/jabberwocky238/gasoline/cmd/operator/device/consensus"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -28,6 +29,9 @@ func main() {
 	collect(ParamKey, "operator static private key, base64 (generated if unset)")
 	collect(ParamListen, "client listener '<schema>://<addr>' (repeatable; default quic://:8443)")
 	collect(ParamNetwork, "vnet entry '<vni>:<cidr>[:<pubkey_b64>,...]' (repeatable; default 0:10.0.0.0/24)")
+	collect(ParamRaftBind, "this node's Raft QUIC listen address (enables consensus)")
+	collect(ParamRaftPeers, "Raft cluster members 'id@host:port;id2@host:port2'")
+	collect(ParamRaftBootstrap, "'true' on exactly one node to seed a fresh cluster")
 	ipcSocket := flag.String("ipc", defaultIPCSocket, "gasoctl IPC unix socket path")
 	dryRun := flag.Bool("dry-run", false, "parse and validate config, print it, then exit")
 
@@ -52,6 +56,44 @@ func main() {
 	if err != nil {
 		log.Fatalf("operator init: %v", err)
 	}
+
+	// Consensus: build and attach a Raft node when --raft-bind was given, so
+	// IP/SessionID allocation commits through Raft. Without it the operator
+	// runs the pre-consensus preset allocator.
+	var raftNode *consensus.Node
+	if cfg.Raft != nil {
+		peers := make([]consensus.Peer, len(cfg.Raft.Peers))
+		for i, p := range cfg.Raft.Peers {
+			peers[i] = consensus.Peer{ID: p.ID, Addr: p.Addr}
+		}
+		// LocalID must match a peer entry (so this node is in its own voter
+		// set). Default it to the peer whose address equals --raft-bind.
+		localID := cfg.Raft.LocalID
+		if localID == "" {
+			for _, p := range cfg.Raft.Peers {
+				if p.Addr == cfg.Raft.BindAddr {
+					localID = p.ID
+					break
+				}
+			}
+		}
+		if localID == "" {
+			log.Fatalf("consensus: cannot determine local Raft ID; add a --raft-peers entry whose address matches --raft-bind %q", cfg.Raft.BindAddr)
+		}
+		raftNode, err = consensus.NewNode(consensus.Config{
+			LocalID:   localID,
+			BindAddr:  cfg.Raft.BindAddr,
+			Peers:     peers,
+			Bootstrap: cfg.Raft.Bootstrap,
+		})
+		if err != nil {
+			log.Fatalf("consensus init: %v", err)
+		}
+		op.AttachConsensus(raftNode)
+		log.Infof("Consensus (Raft) enabled: id=%s bind=%s peers=%d bootstrap=%v",
+			localID, cfg.Raft.BindAddr, len(peers), cfg.Raft.Bootstrap)
+	}
+
 	if err := op.Start(); err != nil {
 		log.Fatalf("operator start: %v", err)
 	}
@@ -75,6 +117,9 @@ func main() {
 
 	_ = ipc.Close()
 	_ = op.Close()
+	if raftNode != nil {
+		_ = raftNode.Shutdown()
+	}
 }
 
 func printConfig(cfg *operator.StaticOperatorConfig, ipcSocket string) {
@@ -88,6 +133,12 @@ func printConfig(cfg *operator.StaticOperatorConfig, ipcSocket string) {
 	fmt.Println("network:")
 	for vni, n := range cfg.Network {
 		fmt.Printf("  - vni=%s cidr=%s keys=%d\n", vni, n.CIDR, len(n.AuthorizedKeys))
+	}
+	if cfg.Raft != nil {
+		fmt.Printf("raft:      bind=%s peers=%d bootstrap=%v\n",
+			cfg.Raft.BindAddr, len(cfg.Raft.Peers), cfg.Raft.Bootstrap)
+	} else {
+		fmt.Println("raft:      disabled")
 	}
 }
 

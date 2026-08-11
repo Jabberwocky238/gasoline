@@ -19,12 +19,18 @@ import (
 //	key         single-valued, operator static private key (base64); generated if empty
 //	listen      repeatable,    '<schema>://<addr>' client listener
 //	network     repeatable,    '<vni>:<cidr>[:<pubkey_b64>,...]' vnet entry
+//	raft-bind   single-valued, this node's Raft QUIC listen address
+//	raft-peers  single-valued, 'id@host:port;id2@host:port2' cluster members
+//	raft-bootstrap single-valued, "true" on exactly one node to seed the cluster
 const (
-	ParamOpListen = "op-listen"
-	ParamLogLevel = "log-level"
-	ParamKey      = "key" // operator static private key (base64); generated if empty
-	ParamListen   = "listen"
-	ParamNetwork  = "network"
+	ParamOpListen      = "op-listen"
+	ParamLogLevel      = "log-level"
+	ParamKey           = "key" // operator static private key (base64); generated if empty
+	ParamListen        = "listen"
+	ParamNetwork       = "network"
+	ParamRaftBind      = "raft-bind"
+	ParamRaftPeers     = "raft-peers"
+	ParamRaftBootstrap = "raft-bootstrap"
 )
 
 // RegisterOperatorCLIParam turns a parameter map (as produced by main.go's
@@ -34,7 +40,8 @@ const (
 func RegisterOperatorCLIParam(params map[string][]string) (*operator.StaticOperatorConfig, error) {
 	for k := range params {
 		switch k {
-		case ParamOpListen, ParamLogLevel, ParamKey, ParamListen, ParamNetwork:
+		case ParamOpListen, ParamLogLevel, ParamKey, ParamListen, ParamNetwork,
+			ParamRaftBind, ParamRaftPeers, ParamRaftBootstrap:
 		default:
 			return nil, fmt.Errorf("unknown parameter %q", k)
 		}
@@ -96,6 +103,15 @@ func RegisterOperatorCLIParam(params map[string][]string) (*operator.StaticOpera
 	// Fixed-IP bindings (pubkey -> IP) come from per-vnet config files loaded
 	// via --root (PRD §4.4), not from the command line.
 
+	// Consensus (Raft) — enabled iff --raft-bind is given.
+	if bind := strings.TrimSpace(lastOr(params[ParamRaftBind], "")); bind != "" {
+		rc, err := parseRaftConfig(bind, lastOr(params[ParamRaftPeers], ""), lastOr(params[ParamRaftBootstrap], ""))
+		if err != nil {
+			return nil, err
+		}
+		cfg.Raft = rc
+	}
+
 	lvl, err := logrus.ParseLevel(strings.TrimSpace(logLevel))
 	if err != nil {
 		return nil, fmt.Errorf("log-level: %w", err)
@@ -103,6 +119,34 @@ func RegisterOperatorCLIParam(params map[string][]string) (*operator.StaticOpera
 	cfg.LogLevel = lvl
 
 	return cfg, nil
+}
+
+// parseRaftConfig builds a RaftConfig from the --raft-* params. peers is a
+// ';'-separated list of 'id@host:port'. bootstrap is "true"/"1" to seed.
+func parseRaftConfig(bind, peers, bootstrap string) (*operator.RaftConfig, error) {
+	rc := &operator.RaftConfig{BindAddr: strings.TrimSpace(bind)}
+	switch strings.TrimSpace(bootstrap) {
+	case "", "false", "0":
+	case "true", "1":
+		rc.Bootstrap = true
+	default:
+		return nil, fmt.Errorf("raft-bootstrap %q: want true|false", bootstrap)
+	}
+	for _, entry := range strings.Split(peers, ";") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		id, addr, ok := strings.Cut(entry, "@")
+		if !ok {
+			return nil, fmt.Errorf("raft-peers %q: expected 'id@host:port'", entry)
+		}
+		rc.Peers = append(rc.Peers, operator.RaftPeer{ID: strings.TrimSpace(id), Addr: strings.TrimSpace(addr)})
+	}
+	if rc.Bootstrap && len(rc.Peers) == 0 {
+		return nil, fmt.Errorf("raft-bootstrap requires --raft-peers")
+	}
+	return rc, nil
 }
 
 func lastOr(vs []string, fallback string) string {

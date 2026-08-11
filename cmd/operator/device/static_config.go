@@ -36,8 +36,30 @@ type StaticOperatorConfig struct {
 	// out of band, same as WireGuard).
 	StaticPriv noise.PrivateKey
 
+	// Raft, when non-nil, enables the consensus-backed IP/SessionID allocator.
+	// nil leaves the operator on the pre-consensus preset allocator.
+	Raft *RaftConfig
+
 	Network  map[protocol.VNI_Ty]StaticOperatorVNetConfig
 	LogLevel logrus.Level
+}
+
+// RaftConfig is the parsed --raft-* configuration for the consensus layer.
+type RaftConfig struct {
+	// LocalID is this node's stable Raft ID (defaults to the operator UUID hex).
+	LocalID string
+	// BindAddr is the QUIC address this node's Raft transport listens on.
+	BindAddr string
+	// Peers is the initial cluster membership ("id@host:port" entries).
+	Peers []RaftPeer
+	// Bootstrap seeds a brand-new cluster from Peers. Set on exactly one node.
+	Bootstrap bool
+}
+
+// RaftPeer names one cluster member.
+type RaftPeer struct {
+	ID   string
+	Addr string
 }
 
 // ListenerSpec is a parsed '<schema>://<addr>' entry.

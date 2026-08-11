@@ -176,3 +176,48 @@ func TestParseListenerSpec(t *testing.T) {
 		})
 	}
 }
+
+func TestRegisterOperatorCLIParam_Raft(t *testing.T) {
+	t.Run("disabled by default", func(t *testing.T) {
+		cfg, err := RegisterOperatorCLIParam(nil)
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		if cfg.Raft != nil {
+			t.Errorf("Raft should be nil without --raft-bind")
+		}
+	})
+
+	t.Run("bootstrap cluster", func(t *testing.T) {
+		cfg, err := RegisterOperatorCLIParam(map[string][]string{
+			"raft-bind":      {"127.0.0.1:7000"},
+			"raft-peers":     {"a@127.0.0.1:7000;b@127.0.0.1:7001"},
+			"raft-bootstrap": {"true"},
+		})
+		if err != nil {
+			t.Fatalf("resolve: %v", err)
+		}
+		if cfg.Raft == nil {
+			t.Fatal("Raft should be set")
+		}
+		if cfg.Raft.BindAddr != "127.0.0.1:7000" || !cfg.Raft.Bootstrap {
+			t.Errorf("raft = %+v", cfg.Raft)
+		}
+		if len(cfg.Raft.Peers) != 2 || cfg.Raft.Peers[0].ID != "a" || cfg.Raft.Peers[1].Addr != "127.0.0.1:7001" {
+			t.Errorf("peers = %+v", cfg.Raft.Peers)
+		}
+	})
+
+	cases := map[string]map[string][]string{
+		"bootstrap without peers": {"raft-bind": {"127.0.0.1:7000"}, "raft-bootstrap": {"true"}},
+		"bad peer format":         {"raft-bind": {"127.0.0.1:7000"}, "raft-peers": {"noatsign"}},
+		"bad bootstrap value":     {"raft-bind": {"127.0.0.1:7000"}, "raft-bootstrap": {"maybe"}},
+	}
+	for name, params := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := RegisterOperatorCLIParam(params); err == nil {
+				t.Fatalf("expected error for %v", params)
+			}
+		})
+	}
+}

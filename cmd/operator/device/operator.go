@@ -23,11 +23,11 @@ import (
 )
 
 // MessageTransport header layout for the receive parser (the message
-// package owns the encode side).
+// package owns the encode side): VNI(4) || SessionID(16) || payload.
 const (
-	msgHeaderSize = 12
+	msgHeaderSize = 20
 	msgVNIOff     = 0
-	msgPayOff     = 12
+	msgPayOff     = 20
 )
 
 // Operator is the per-process control + data plane orchestrator.

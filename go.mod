@@ -8,7 +8,6 @@ require (
 	github.com/quic-go/quic-go v0.59.0
 	github.com/sagernet/sing-tun v0.8.7
 	github.com/sirupsen/logrus v1.9.4
-	golang.org/x/net v0.50.0
 	golang.org/x/sys v0.41.0
 )
 
@@ -21,6 +20,7 @@ require (
 	github.com/mdlayher/netlink v1.9.0 // indirect
 	github.com/mdlayher/socket v0.5.1 // indirect
 	github.com/sagernet/fswatch v0.1.1 // indirect
+	github.com/sagernet/gvisor v0.0.0-20250811.0-sing-box-mod.1 // indirect
 	github.com/sagernet/netlink v0.0.0-20240916134442-83396419aa8b // indirect
 	github.com/sagernet/nftables v0.3.0-beta.4 // indirect
 	github.com/sagernet/sing v0.8.0 // indirect
@@ -28,6 +28,7 @@ require (
 	go4.org/netipx v0.0.0-20231129151722-fdeea329fbba // indirect
 	golang.org/x/crypto v0.48.0 // indirect
 	golang.org/x/exp v0.0.0-20251017212417-90e834f514db // indirect
+	golang.org/x/net v0.50.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 )

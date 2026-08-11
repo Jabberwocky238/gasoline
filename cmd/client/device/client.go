@@ -17,12 +17,12 @@ import (
 	"sync/atomic"
 
 	"github.com/jabberwocky238/gasoline/common"
-	"github.com/jabberwocky238/gasoline/tun"
 	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/transport"
 	transportQuic "github.com/jabberwocky238/gasoline/transport/quic"
 	_ "github.com/jabberwocky238/gasoline/transport/udp" // self-registers
+	"github.com/jabberwocky238/gasoline/tun"
 	log "github.com/sirupsen/logrus"
 )
 

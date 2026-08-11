@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/cmd/operator/device"
+	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/transport"

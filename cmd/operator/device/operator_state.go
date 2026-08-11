@@ -7,7 +7,7 @@ import (
 
 	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol"
-	"github.com/jabberwocky238/gasoline/protocol/auth"
+	"github.com/jabberwocky238/gasoline/protocol/noise"
 )
 
 type Ctrl interface {
@@ -33,6 +33,10 @@ type operatorState struct {
 
 	// uuid of the local operator (mirrored from Operator.uuid).
 	uuid [16]byte
+
+	// Noise static key pair for the operator (responder side of handshakes).
+	staticPriv noise.PrivateKey
+	staticPub  noise.PublicKey
 
 	subMu  sync.Mutex
 	subs   []ClientEventFn
@@ -75,10 +79,10 @@ func (s *operatorState) emitClientEvent(vni protocol.VNI_Ty, cid protocol.CID_Ty
 	}
 }
 
-func (s *operatorState) registerVNI(vni protocol.VNI_Ty, authn auth.ServerAuthenticator) {
+func (s *operatorState) registerVNI(vni protocol.VNI_Ty, authorizedKeys map[noise.PublicKey]struct{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	v := newVniEntry(authn)
+	v := newVniEntry(authorizedKeys)
 	v.vni = vni
 	v.peers = s.Peers
 	s.vnets[vni] = v

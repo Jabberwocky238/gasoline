@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 
+	"github.com/jabberwocky238/gasoline/protocol/noise"
 	"github.com/sirupsen/logrus"
 )
 
@@ -42,7 +44,7 @@ func TestRegisterOperatorCLIParam_Defaults(t *testing.T) {
 func TestRegisterOperatorCLIParam_RepeatedListenAndNetwork(t *testing.T) {
 	cfg, err := RegisterOperatorCLIParam(map[string][]string{
 		"listen":  {"udp://127.0.0.1:1000", "quic://127.0.0.1:2000"},
-		"network": {"1:10.1.0.0/16:noauth", "2:10.2.0.0/16:noauth"},
+		"network": {"1:10.1.0.0/16", "2:10.2.0.0/16"},
 		// Override the VNI-0 preset defaults; this case declares 1 and 2.
 		"preset": {"1:100:10.1.0.1/32", "2:101:10.2.0.1/32"},
 	})
@@ -83,7 +85,7 @@ func TestRegisterOperatorCLIParam_SingleValuedTakesLast(t *testing.T) {
 
 func TestRegisterOperatorCLIParam_DuplicateVNI(t *testing.T) {
 	_, err := RegisterOperatorCLIParam(map[string][]string{
-		"network": {"5:10.5.0.0/16:noauth", "5:10.6.0.0/16:noauth"},
+		"network": {"5:10.5.0.0/16", "5:10.6.0.0/16"},
 	})
 	if err == nil || !strings.Contains(err.Error(), "duplicate vni") {
 		t.Fatalf("err = %v, want duplicate vni error", err)
@@ -109,32 +111,38 @@ func TestRegisterOperatorCLIParam_UnknownKey(t *testing.T) {
 }
 
 func TestParseNetworkEntry(t *testing.T) {
-	t.Run("noauth", func(t *testing.T) {
-		got, err := parseNetworkEntry("7:10.7.0.0/24:noauth")
+	t.Run("no keys", func(t *testing.T) {
+		got, err := parseNetworkEntry("7:10.7.0.0/24")
 		if err != nil {
 			t.Fatalf("err: %v", err)
 		}
-		if got.VNI != 7 || got.CIDR != "10.7.0.0/24" || got.Auth == nil {
+		if got.VNI != 7 || got.CIDR != "10.7.0.0/24" || len(got.AuthorizedKeys) != 0 {
 			t.Errorf("got %+v", got)
 		}
 	})
-	t.Run("hmac", func(t *testing.T) {
-		got, err := parseNetworkEntry("7:10.7.0.0/24:hmac:id1:secret1")
+	t.Run("with pubkeys", func(t *testing.T) {
+		_, pub1, _ := noise.GenerateKey()
+		_, pub2, _ := noise.GenerateKey()
+		b1 := base64.StdEncoding.EncodeToString(pub1[:])
+		b2 := base64.StdEncoding.EncodeToString(pub2[:])
+		got, err := parseNetworkEntry("7:10.7.0.0/24:" + b1 + "," + b2)
 		if err != nil {
 			t.Fatalf("err: %v", err)
 		}
-		if got.VNI != 7 || got.CIDR != "10.7.0.0/24" || got.Auth == nil {
-			t.Errorf("got %+v", got)
+		if len(got.AuthorizedKeys) != 2 {
+			t.Errorf("want 2 keys, got %d", len(got.AuthorizedKeys))
+		}
+		if _, ok := got.AuthorizedKeys[pub1]; !ok {
+			t.Error("pub1 not authorized")
 		}
 	})
 
 	cases := map[string]string{
-		"missing auth":      "7:10.7.0.0/24",
-		"only vni":          "abc",
-		"bad vni":           "x:10.0.0.0/24:noauth",
-		"empty cidr":        "1::noauth",
-		"empty auth type":   "1:10.0.0.0/24:",
-		"unknown auth type": "1:10.0.0.0/24:bogus:",
+		"only vni":       "abc",
+		"bad vni":        "x:10.0.0.0/24",
+		"empty cidr":     "1:",
+		"bad pubkey b64": "1:10.0.0.0/24:not!base64",
+		"short pubkey":   "1:10.0.0.0/24:" + base64.StdEncoding.EncodeToString([]byte{1, 2, 3}),
 	}
 	for name, in := range cases {
 		t.Run(name, func(t *testing.T) {

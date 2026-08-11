@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"fmt"
 	"net/netip"
 	"strconv"
@@ -8,7 +9,7 @@ import (
 
 	"github.com/jabberwocky238/gasoline/cmd/operator/device"
 	"github.com/jabberwocky238/gasoline/protocol"
-	"github.com/jabberwocky238/gasoline/protocol/auth"
+	"github.com/jabberwocky238/gasoline/protocol/noise"
 	"github.com/sirupsen/logrus"
 )
 
@@ -17,7 +18,7 @@ import (
 //	op-listen   single-valued, host:port for the VXLAN UDP bind address
 //	log-level   single-valued, trace|debug|info|warn|error
 //	listen      repeatable,    '<schema>://<addr>' client listener
-//	network     repeatable,    '<vni>:<cidr>:<authtype>[:<authdata>]' vnet entry
+//	network     repeatable,    '<vni>:<cidr>[:<pubkey_b64>,...]' vnet entry
 //	preset      repeatable,    '<vni>:<cid-hex>:<prefix>' preassigned cid->prefix
 const (
 	ParamOpListen = "op-listen"
@@ -49,7 +50,7 @@ func RegisterOperatorCLIParam(params map[string][]string) (*operator.StaticOpera
 	}
 	nets := params[ParamNetwork]
 	if len(nets) == 0 {
-		nets = []string{"0:10.0.0.0/24:noauth"}
+		nets = []string{"0:10.0.0.0/24"}
 	}
 
 	cfg := &operator.StaticOperatorConfig{
@@ -117,16 +118,17 @@ func lastOr(vs []string, fallback string) string {
 	return vs[len(vs)-1]
 }
 
-// parseNetworkEntry parses '<vni>:<cidr>:<authtype>[:<authdata>]'.
+// parseNetworkEntry parses '<vni>:<cidr>[:<pubkey_b64>,<pubkey_b64>...]'.
 //
-// authtype + authdata is forwarded to auth.ParseServerAuth as either
-// "<authtype>" (e.g. "noauth") or "<authtype>:<authdata>" (e.g.
-// "hmac:id:secret", "userpass:user:hash").
+// The optional third segment is a comma-separated list of authorized client
+// static public keys (standard base64, 32 bytes each). An empty or absent list
+// means the VNI is open (no key check) — convenient for tests/benches; a
+// populated list locks the VNI to those identities.
 func parseNetworkEntry(raw string) (operator.StaticOperatorVNetConfig, error) {
 	raw = strings.TrimSpace(raw)
-	parts := strings.SplitN(raw, ":", 4)
-	if len(parts) < 3 {
-		return operator.StaticOperatorVNetConfig{}, fmt.Errorf("network entry %q: expected '<vni>:<cidr>:<authtype>[:<authdata>]'", raw)
+	parts := strings.SplitN(raw, ":", 3)
+	if len(parts) < 2 {
+		return operator.StaticOperatorVNetConfig{}, fmt.Errorf("network entry %q: expected '<vni>:<cidr>[:<pubkey_b64>,...]'", raw)
 	}
 	vniU, err := strconv.ParseUint(strings.TrimSpace(parts[0]), 10, 32)
 	if err != nil {
@@ -136,24 +138,33 @@ func parseNetworkEntry(raw string) (operator.StaticOperatorVNetConfig, error) {
 	if cidr == "" {
 		return operator.StaticOperatorVNetConfig{}, fmt.Errorf("network entry %q: empty cidr", raw)
 	}
-	authType := strings.TrimSpace(parts[2])
-	if authType == "" {
-		return operator.StaticOperatorVNetConfig{}, fmt.Errorf("network entry %q: empty auth type", raw)
-	}
-	authSpec := authType
-	if len(parts) == 4 {
-		if rest := strings.TrimSpace(parts[3]); rest != "" {
-			authSpec = authType + ":" + rest
+
+	var keys map[noise.PublicKey]struct{}
+	if len(parts) == 3 {
+		if list := strings.TrimSpace(parts[2]); list != "" {
+			keys = make(map[noise.PublicKey]struct{})
+			for _, k := range strings.Split(list, ",") {
+				k = strings.TrimSpace(k)
+				if k == "" {
+					continue
+				}
+				b, err := base64.StdEncoding.DecodeString(k)
+				if err != nil {
+					return operator.StaticOperatorVNetConfig{}, fmt.Errorf("network entry %q: bad pubkey %q: %w", raw, k, err)
+				}
+				pub, err := noise.PublicKeyFromSlice(b)
+				if err != nil {
+					return operator.StaticOperatorVNetConfig{}, fmt.Errorf("network entry %q: pubkey %q: %w", raw, k, err)
+				}
+				keys[pub] = struct{}{}
+			}
 		}
 	}
-	serverAuth, err := auth.ParseServerAuth(authSpec)
-	if err != nil {
-		return operator.StaticOperatorVNetConfig{}, fmt.Errorf("network entry %q: auth: %w", raw, err)
-	}
+
 	return operator.StaticOperatorVNetConfig{
-		VNI:  protocol.VNI_Ty(vniU),
-		CIDR: cidr,
-		Auth: serverAuth,
+		VNI:            protocol.VNI_Ty(vniU),
+		CIDR:           cidr,
+		AuthorizedKeys: keys,
 	}, nil
 }
 

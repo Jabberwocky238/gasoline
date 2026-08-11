@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/jabberwocky238/gasoline/protocol"
-	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/transport/quic"
 )
 
@@ -15,14 +14,14 @@ func TestCSC_QUIC(t *testing.T) {
 	tlsConf := quic.InsecureClientTLS()
 
 	cfgA := protocol.NewPresetSessionConfig(bs.cidA, bs.vni)
-	connA, _, err := quic.NewDialer(cfgA, &auth.NoAuthClient{}, tlsConf).Dial(bs.op.ClientAddr())
+	connA, _, err := quic.NewDialer(cfgA, bs.idA(), tlsConf).Dial(bs.op.ClientAddr())
 	if err != nil {
 		t.Fatalf("ClientA dial: %v", err)
 	}
 	defer connA.Close()
 
 	cfgB := protocol.NewPresetSessionConfig(bs.cidB, bs.vni)
-	connB, _, err := quic.NewDialer(cfgB, &auth.NoAuthClient{}, tlsConf).Dial(bs.op.ClientAddr())
+	connB, _, err := quic.NewDialer(cfgB, bs.idB(), tlsConf).Dial(bs.op.ClientAddr())
 	if err != nil {
 		t.Fatalf("ClientB dial: %v", err)
 	}

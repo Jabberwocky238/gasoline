@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/jabberwocky238/gasoline/protocol"
-	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/transport/udp"
 )
 
@@ -13,14 +12,14 @@ func TestCSC_UDP(t *testing.T) {
 	defer bs.op.Close()
 
 	cfgA := protocol.NewPresetSessionConfig(bs.cidA, bs.vni)
-	connA, _, err := udp.NewDialer(cfgA, &auth.NoAuthClient{}).Dial(bs.op.ClientAddr())
+	connA, _, err := udp.NewDialer(cfgA, bs.idA()).Dial(bs.op.ClientAddr())
 	if err != nil {
 		t.Fatalf("ClientA dial: %v", err)
 	}
 	defer connA.Close()
 
 	cfgB := protocol.NewPresetSessionConfig(bs.cidB, bs.vni)
-	connB, _, err := udp.NewDialer(cfgB, &auth.NoAuthClient{}).Dial(bs.op.ClientAddr())
+	connB, _, err := udp.NewDialer(cfgB, bs.idB()).Dial(bs.op.ClientAddr())
 	if err != nil {
 		t.Fatalf("ClientB dial: %v", err)
 	}

@@ -1,13 +1,14 @@
 package main
 
 import (
-	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"strconv"
 	"strings"
 
 	"github.com/jabberwocky238/gasoline/cmd/client/device"
 	"github.com/jabberwocky238/gasoline/protocol"
+	"github.com/jabberwocky238/gasoline/protocol/noise"
 	"github.com/sirupsen/logrus"
 )
 
@@ -15,9 +16,9 @@ import (
 const (
 	ParamEndpoint  = "endpoint"
 	ParamTransport = "transport"
-	ParamAuth      = "auth"
 	ParamVNI       = "vni"
-	ParamCID       = "cid"
+	ParamKey       = "key"        // client static private key (base64); generated if empty
+	ParamServerPub = "server-pub" // operator static public key (base64), required
 	ParamTUN       = "tun"
 	ParamLogLevel  = "log-level"
 )
@@ -29,7 +30,7 @@ const (
 func RegisterClientCLIParam(params map[string][]string) (*client.StaticClientConfig, error) {
 	for k := range params {
 		switch k {
-		case ParamEndpoint, ParamTransport, ParamAuth, ParamVNI, ParamCID, ParamTUN, ParamLogLevel:
+		case ParamEndpoint, ParamTransport, ParamVNI, ParamKey, ParamServerPub, ParamTUN, ParamLogLevel:
 		default:
 			return nil, fmt.Errorf("unknown parameter %q", k)
 		}
@@ -47,8 +48,6 @@ func RegisterClientCLIParam(params map[string][]string) (*client.StaticClientCon
 		return nil, fmt.Errorf("transport %q: must be udp|quic", transport)
 	}
 
-	authStr := lastOr(params[ParamAuth], "noauth")
-
 	vniStr := lastOr(params[ParamVNI], "")
 	if vniStr == "" {
 		return nil, fmt.Errorf("--vni is required")
@@ -58,9 +57,18 @@ func RegisterClientCLIParam(params map[string][]string) (*client.StaticClientCon
 		return nil, fmt.Errorf("vni %q: %v", vniStr, err)
 	}
 
-	cid, err := resolveCID(lastOr(params[ParamCID], ""))
+	priv, pub, err := resolveClientKey(lastOr(params[ParamKey], ""))
 	if err != nil {
-		return nil, fmt.Errorf("cid: %w", err)
+		return nil, fmt.Errorf("key: %w", err)
+	}
+
+	serverPubStr := lastOr(params[ParamServerPub], "")
+	if serverPubStr == "" {
+		return nil, fmt.Errorf("--server-pub is required (operator static public key, base64)")
+	}
+	serverPub, err := decodePub(serverPubStr)
+	if err != nil {
+		return nil, fmt.Errorf("server-pub: %w", err)
 	}
 
 	tunName := lastOr(params[ParamTUN], "")
@@ -73,9 +81,10 @@ func RegisterClientCLIParam(params map[string][]string) (*client.StaticClientCon
 	return &client.StaticClientConfig{
 		Endpoint:  endpoint,
 		Transport: transport,
-		AuthStr:   authStr,
 		VNI:       protocol.VNI_Ty(vniU),
-		CID:       cid,
+		Priv:      priv,
+		Pub:       pub,
+		ServerPub: serverPub,
 		TUNName:   tunName,
 		LogLevel:  lvl,
 	}, nil
@@ -88,15 +97,28 @@ func lastOr(vs []string, fallback string) string {
 	return vs[len(vs)-1]
 }
 
-// resolveCID parses a CID (decimal default, "0x..." for hex) or
-// generates a random one if s is empty.
-func resolveCID(s string) (protocol.CID_Ty, error) {
-	var cid protocol.CID_Ty
+// resolveClientKey decodes a base64 private key, or generates a fresh pair
+// when s is empty. Returns the private and derived public key.
+func resolveClientKey(s string) (noise.PrivateKey, noise.PublicKey, error) {
 	if s == "" {
-		if _, err := rand.Read(cid[:]); err != nil {
-			return cid, err
-		}
-		return cid, nil
+		return noise.GenerateKey()
 	}
-	return protocol.ParseCID(s)
+	b, err := base64.StdEncoding.DecodeString(strings.TrimSpace(s))
+	if err != nil {
+		return noise.PrivateKey{}, noise.PublicKey{}, fmt.Errorf("invalid base64: %w", err)
+	}
+	priv, err := noise.PrivateKeyFromSlice(b)
+	if err != nil {
+		return noise.PrivateKey{}, noise.PublicKey{}, err
+	}
+	return priv, priv.Public(), nil
+}
+
+// decodePub decodes a base64-encoded 32-byte public key.
+func decodePub(s string) (noise.PublicKey, error) {
+	b, err := base64.StdEncoding.DecodeString(strings.TrimSpace(s))
+	if err != nil {
+		return noise.PublicKey{}, fmt.Errorf("invalid base64: %w", err)
+	}
+	return noise.PublicKeyFromSlice(b)
 }

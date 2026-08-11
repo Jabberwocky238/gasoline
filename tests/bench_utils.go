@@ -13,7 +13,7 @@ import (
 	"github.com/jabberwocky238/gasoline/cmd/operator/device"
 	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol"
-	"github.com/jabberwocky238/gasoline/protocol/auth"
+	"github.com/jabberwocky238/gasoline/protocol/noise"
 	"github.com/jabberwocky238/gasoline/transport"
 	"github.com/sirupsen/logrus"
 )
@@ -34,6 +34,22 @@ type benchSetup struct {
 	cidB protocol.CID_Ty
 	pfxA netip.Prefix
 	pfxB netip.Prefix
+
+	// Noise identities: two client key pairs and the operators' shared server
+	// public key. Dialers build transport.ClientIdentity from these.
+	privA     noise.PrivateKey
+	pubA      noise.PublicKey
+	privB     noise.PrivateKey
+	pubB      noise.PublicKey
+	serverPub noise.PublicKey
+}
+
+// idA / idB return the ClientIdentity for each client against this fixture.
+func (s *benchSetup) idA() transport.ClientIdentity {
+	return transport.ClientIdentity{Priv: s.privA, Pub: s.pubA, ServerPub: s.serverPub}
+}
+func (s *benchSetup) idB() transport.ClientIdentity {
+	return transport.ClientIdentity{Priv: s.privB, Pub: s.pubB, ServerPub: s.serverPub}
 }
 
 // startBenchOperators spins up two paired operators: opA owns cidA,
@@ -42,24 +58,42 @@ type benchSetup struct {
 func startBenchOperators(t *testing.T, tp string) (a, b *benchSetup) {
 	t.Helper()
 
-	cidA := protocol.CID_Ty{0, 0, 0, 0, 0, 0, 0, 0xA1}
-	cidB := protocol.CID_Ty{0, 0, 0, 0, 0, 0, 0, 0xB1}
+	// Two client identities; CIDs are derived from their public keys.
+	privA, pubA, err := noise.GenerateKey()
+	if err != nil {
+		t.Fatalf("genkey A: %v", err)
+	}
+	privB, pubB, err := noise.GenerateKey()
+	if err != nil {
+		t.Fatalf("genkey B: %v", err)
+	}
+	cidA := protocol.DeriveCID(pubA)
+	cidB := protocol.DeriveCID(pubB)
 	pfxA := netip.MustParsePrefix("10.0.200.10/32")
 	pfxB := netip.MustParsePrefix("10.0.200.11/32")
 
+	// All operators in a mesh share one static key pair, so a client hands the
+	// same ServerPub to any of them.
+	serverPriv, serverPub, err := noise.GenerateKey()
+	if err != nil {
+		t.Fatalf("genkey server: %v", err)
+	}
+	authKeys := map[noise.PublicKey]struct{}{pubA: {}, pubB: {}}
+
 	build := func(uuid [16]byte, ownCID protocol.CID_Ty, ownPfx netip.Prefix) *operator.Operator {
 		cfg := &operator.StaticOperatorConfig{
-			UUID: &uuid,
+			UUID:       &uuid,
+			StaticPriv: serverPriv,
 			ClientListeners: []operator.ListenerSpec{
 				{Transport: tp, Addr: "127.0.0.1:0"},
 			},
 			OpListenAddr: "127.0.0.1:0",
 			Network: map[protocol.VNI_Ty]operator.StaticOperatorVNetConfig{
 				benchVNI: {
-					VNI:          benchVNI,
-					CIDR:         benchVNetCIDR,
-					Auth:         &auth.NoAuthServer{},
-					PresetCIDmap: map[protocol.CID_Ty]netip.Prefix{ownCID: ownPfx},
+					VNI:            benchVNI,
+					CIDR:           benchVNetCIDR,
+					AuthorizedKeys: authKeys,
+					PresetCIDmap:   map[protocol.CID_Ty]netip.Prefix{ownCID: ownPfx},
 				},
 			},
 			LogLevel: logrus.ErrorLevel,
@@ -95,8 +129,13 @@ func startBenchOperators(t *testing.T, tp string) (a, b *benchSetup) {
 		t.Fatalf("opB SetPeerRoute: %v", err)
 	}
 
-	a = &benchSetup{op: opA, vni: benchVNI, cidA: cidA, cidB: cidB, pfxA: pfxA, pfxB: pfxB}
-	b = &benchSetup{op: opB, vni: benchVNI, cidA: cidA, cidB: cidB, pfxA: pfxA, pfxB: pfxB}
+	keys := benchSetup{
+		privA: privA, pubA: pubA, privB: privB, pubB: pubB, serverPub: serverPub,
+	}
+	a = &benchSetup{op: opA, vni: benchVNI, cidA: cidA, cidB: cidB, pfxA: pfxA, pfxB: pfxB,
+		privA: keys.privA, pubA: keys.pubA, privB: keys.privB, pubB: keys.pubB, serverPub: keys.serverPub}
+	b = &benchSetup{op: opB, vni: benchVNI, cidA: cidA, cidB: cidB, pfxA: pfxA, pfxB: pfxB,
+		privA: keys.privA, pubA: keys.pubA, privB: keys.privB, pubB: keys.pubB, serverPub: keys.serverPub}
 	return a, b
 }
 
@@ -106,23 +145,36 @@ func startBenchOperators(t *testing.T, tp string) (a, b *benchSetup) {
 func startBenchOperator(t *testing.T, tp string) *benchSetup {
 	t.Helper()
 
-	cidA := protocol.CID_Ty{0, 0, 0, 0, 0, 0, 0, 0xA1}
-	cidB := protocol.CID_Ty{0, 0, 0, 0, 0, 0, 0, 0xB1}
+	privA, pubA, err := noise.GenerateKey()
+	if err != nil {
+		t.Fatalf("genkey A: %v", err)
+	}
+	privB, pubB, err := noise.GenerateKey()
+	if err != nil {
+		t.Fatalf("genkey B: %v", err)
+	}
+	serverPriv, serverPub, err := noise.GenerateKey()
+	if err != nil {
+		t.Fatalf("genkey server: %v", err)
+	}
+	cidA := protocol.DeriveCID(pubA)
+	cidB := protocol.DeriveCID(pubB)
 	pfxA := netip.MustParsePrefix("10.0.200.10/32")
 	pfxB := netip.MustParsePrefix("10.0.200.11/32")
 
 	uuid := [16]byte{0xA0}
 	cfg := &operator.StaticOperatorConfig{
-		UUID: &uuid,
+		UUID:       &uuid,
+		StaticPriv: serverPriv,
 		ClientListeners: []operator.ListenerSpec{
 			{Transport: tp, Addr: "127.0.0.1:0"},
 		},
 		OpListenAddr: "127.0.0.1:0",
 		Network: map[protocol.VNI_Ty]operator.StaticOperatorVNetConfig{
 			benchVNI: {
-				VNI:  benchVNI,
-				CIDR: benchVNetCIDR,
-				Auth: &auth.NoAuthServer{},
+				VNI:            benchVNI,
+				CIDR:           benchVNetCIDR,
+				AuthorizedKeys: map[noise.PublicKey]struct{}{pubA: {}, pubB: {}},
 				PresetCIDmap: map[protocol.CID_Ty]netip.Prefix{
 					cidA: pfxA,
 					cidB: pfxB,
@@ -140,12 +192,13 @@ func startBenchOperator(t *testing.T, tp string) *benchSetup {
 		t.Fatalf("operator.Start: %v", err)
 	}
 	return &benchSetup{
-		op:   op,
-		vni:  benchVNI,
-		cidA: cidA,
-		cidB: cidB,
-		pfxA: pfxA,
-		pfxB: pfxB,
+		op:    op,
+		vni:   benchVNI,
+		cidA:  cidA,
+		cidB:  cidB,
+		pfxA:  pfxA,
+		pfxB:  pfxB,
+		privA: privA, pubA: pubA, privB: privB, pubB: pubB, serverPub: serverPub,
 	}
 }
 

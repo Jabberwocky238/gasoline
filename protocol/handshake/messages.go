@@ -22,8 +22,11 @@ type ServerHello struct {
 	Labels      genericLabelMap
 }
 
+// ClientAnswer is the third handshake message. With Noise_IK the mutual
+// authentication is already complete after ServerHello, so its payload is
+// empty; the message is retained to keep the four-step framing.
 type ClientAnswer struct {
-	challengeAnswer []byte
+	answer []byte
 }
 
 type ServerAssign struct {
@@ -90,12 +93,12 @@ func (m *ServerHello) Decode(r io.Reader) error {
 // ClientAnswer: answerLen(2) + answer
 func (m *ClientAnswer) Encode(w io.Writer) error {
 	header := make([]byte, 2)
-	binary.BigEndian.PutUint16(header, uint16(len(m.challengeAnswer)))
+	binary.BigEndian.PutUint16(header, uint16(len(m.answer)))
 	if _, err := w.Write(header); err != nil {
 		return err
 	}
-	if len(m.challengeAnswer) > 0 {
-		_, err := w.Write(m.challengeAnswer)
+	if len(m.answer) > 0 {
+		_, err := w.Write(m.answer)
 		return err
 	}
 	return nil
@@ -108,8 +111,8 @@ func (m *ClientAnswer) Decode(r io.Reader) error {
 	}
 	answerLen := binary.BigEndian.Uint16(header)
 	if answerLen > 0 {
-		m.challengeAnswer = make([]byte, answerLen)
-		if _, err := io.ReadFull(r, m.challengeAnswer); err != nil {
+		m.answer = make([]byte, answerLen)
+		if _, err := io.ReadFull(r, m.answer); err != nil {
 			return err
 		}
 	}

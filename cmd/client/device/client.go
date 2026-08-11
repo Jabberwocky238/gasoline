@@ -18,7 +18,6 @@ import (
 
 	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol"
-	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/transport"
 	transportQuic "github.com/jabberwocky238/gasoline/transport/quic"
 	_ "github.com/jabberwocky238/gasoline/transport/udp" // self-registers
@@ -45,11 +44,10 @@ type Client struct {
 
 // New constructs an unstarted Client.
 func New(cfg *StaticClientConfig) (*Client, error) {
-	clientAuth, err := auth.ParseClientAuth(cfg.AuthStr, []byte("default-fingerprint"))
-	if err != nil {
-		return nil, fmt.Errorf("auth: %w", err)
-	}
-	preset := protocol.NewPresetSessionConfig(cfg.CID, cfg.VNI)
+	// CID is derived from the client's static public key — identity binding.
+	cid := protocol.DeriveCID(cfg.Pub)
+	preset := protocol.NewPresetSessionConfig(cid, cfg.VNI)
+	id := transport.ClientIdentity{Priv: cfg.Priv, Pub: cfg.Pub, ServerPub: cfg.ServerPub}
 
 	var tlsConf *tls.Config
 	switch cfg.Transport {
@@ -57,7 +55,7 @@ func New(cfg *StaticClientConfig) (*Client, error) {
 		// QUIC requires ALPN; the helper sets it to match the server.
 		tlsConf = transportQuic.InsecureClientTLS()
 	}
-	dialer, err := transport.NewDialer(cfg.Transport, preset, clientAuth, tlsConf)
+	dialer, err := transport.NewDialer(cfg.Transport, preset, id, tlsConf)
 	if err != nil {
 		return nil, fmt.Errorf("dialer: %w", err)
 	}
@@ -69,7 +67,7 @@ func New(cfg *StaticClientConfig) (*Client, error) {
 	lctx := common.NewLogContext(nil, logger).
 		WithField("component", "client").
 		WithField("vni", cfg.VNI).
-		WithField("cid", cfg.CID)
+		WithField("cid", cid)
 
 	return &Client{
 		cfg:    cfg,

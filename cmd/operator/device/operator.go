@@ -10,8 +10,8 @@ import (
 
 	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol"
-	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/protocol/handshake"
+	"github.com/jabberwocky238/gasoline/protocol/noise"
 	"github.com/jabberwocky238/gasoline/transport"
 	_ "github.com/jabberwocky238/gasoline/transport/quic" // self-registers
 	transportQuic "github.com/jabberwocky238/gasoline/transport/quic"
@@ -42,12 +42,17 @@ type Operator struct {
 // vniResolver is the per-VNI handshake.VNIResolver implementation
 // backed by an operator's vniEntry.
 type vniResolver struct {
-	vn   *vniEntry
-	cidr netip.Prefix
+	vn         *vniEntry
+	cidr       netip.Prefix
+	staticPriv noise.PrivateKey
+	staticPub  noise.PublicKey
 }
 
-func (r *vniResolver) CIDR() netip.Prefix                      { return r.cidr }
-func (r *vniResolver) Authenticator() auth.ServerAuthenticator { return r.vn.authenticator }
+func (r *vniResolver) CIDR() netip.Prefix { return r.cidr }
+func (r *vniResolver) ServerStatic() (noise.PrivateKey, noise.PublicKey) {
+	return r.staticPriv, r.staticPub
+}
+func (r *vniResolver) Authorized(pubkey noise.PublicKey) bool { return r.vn.authorized(pubkey) }
 func (r *vniResolver) IP(cid protocol.CID_Ty) (netip.Addr, error) {
 	pfx, ok := r.vn.routingMap.LookupByCID(cid)
 	if !ok {
@@ -63,6 +68,21 @@ func New(cfg *StaticOperatorConfig) (*Operator, error) {
 
 	state := newOperatorState(root)
 
+	// Operator static key pair (Noise responder identity). Generate one if the
+	// config supplied none; its public key is conveyed to clients out of band.
+	var zeroPriv noise.PrivateKey
+	if cfg.StaticPriv == zeroPriv {
+		priv, pub, err := noise.GenerateKey()
+		if err != nil {
+			root.Cancel()
+			return nil, fmt.Errorf("generate operator static key: %w", err)
+		}
+		state.staticPriv, state.staticPub = priv, pub
+	} else {
+		state.staticPriv = cfg.StaticPriv
+		state.staticPub = cfg.StaticPriv.Public()
+	}
+
 	// VNI registration + preset routes.
 	cidrs := make(map[protocol.VNI_Ty]netip.Prefix)
 	for vni, entry := range cfg.Network {
@@ -72,7 +92,7 @@ func New(cfg *StaticOperatorConfig) (*Operator, error) {
 			return nil, fmt.Errorf("vni %s cidr %q: %w", vni, entry.CIDR, err)
 		}
 		cidrs[vni] = prefix
-		state.registerVNI(vni, entry.Auth)
+		state.registerVNI(vni, entry.AuthorizedKeys)
 		if len(entry.PresetCIDmap) > 0 {
 			vn, _ := state.vni(vni)
 			for cid, pfx := range entry.PresetCIDmap {
@@ -91,7 +111,7 @@ func New(cfg *StaticOperatorConfig) (*Operator, error) {
 		if !ok {
 			return nil, fmt.Errorf("no config for vni %s", vni)
 		}
-		return &vniResolver{vn: vn, cidr: cidr}, nil
+		return &vniResolver{vn: vn, cidr: cidr, staticPriv: state.staticPriv, staticPub: state.staticPub}, nil
 	}
 
 	if len(cfg.ClientListeners) == 0 {
@@ -138,9 +158,13 @@ func New(cfg *StaticOperatorConfig) (*Operator, error) {
 
 // --------------- Identity / accessors ---------------
 
-func (o *Operator) UUID() [16]byte        { return o.uuid }
-func (o *Operator) ConnectedClients() int { return o.state.totalClients() }
-func (o *Operator) State() *operatorState { return o.state }
+func (o *Operator) UUID() [16]byte { return o.uuid }
+
+// StaticPub returns the operator's Noise static public key. Clients need it
+// (out of band) to run the IK handshake against this operator.
+func (o *Operator) StaticPub() noise.PublicKey { return o.state.staticPub }
+func (o *Operator) ConnectedClients() int      { return o.state.totalClients() }
+func (o *Operator) State() *operatorState      { return o.state }
 
 // ClientAddr returns the first client listener's bound address, or
 // the empty string if no listener was configured.

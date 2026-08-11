@@ -120,7 +120,7 @@ func (l *Listener) readLoop() {
 // On failure, cleans up the peer entry.
 func (l *Listener) handshakePeer(vp *virtualPeer, key netip.AddrPort) {
 	adapter := newVirtualStreamAdapter(l.rawConn, vp.remoteAddr, vp.incoming)
-	sc, err := handshake.ServerHandshake(adapter, l.mapper)
+	sc, _, _, err := handshake.ServerHandshake(adapter, l.mapper)
 	if err != nil {
 		l.peers.Write(func(m *map[netip.AddrPort]*virtualPeer) {
 			delete(*m, key)

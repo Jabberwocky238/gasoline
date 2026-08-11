@@ -35,7 +35,7 @@ func (l *Listener) Accept() (transport.Conn, *protocol.SessionContext, error) {
 		return nil, nil, err
 	}
 
-	sc, err := handshake.ServerHandshake(stream, l.mapper)
+	sc, _, _, err := handshake.ServerHandshake(stream, l.mapper)
 	if err != nil {
 		conn.CloseWithError(0, "handshake failed")
 		return nil, nil, err

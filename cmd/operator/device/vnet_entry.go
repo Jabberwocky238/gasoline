@@ -5,16 +5,21 @@ import (
 	"sync"
 
 	"github.com/jabberwocky238/gasoline/protocol"
-	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/protocol/message"
+	"github.com/jabberwocky238/gasoline/protocol/noise"
 )
 
 // vniEntry holds per-VNI runtime state: the active client set, an
-// O(1) CID index over those clients, the routing table, and the auth
-// strategy.
+// O(1) CID index over those clients, the routing table, and the Noise
+// authorization set.
 type vniEntry struct {
-	mu            sync.RWMutex
-	authenticator auth.ServerAuthenticator
+	mu sync.RWMutex
+
+	// authorizedKeys is the set of static public keys allowed on this VNI.
+	// A key not in the set is rejected — there is no open/noauth mode.
+	// Seeded from config; the Raft-backed key table (PRD §2.2) supersedes
+	// this once consensus is wired into the handshake path.
+	authorizedKeys map[noise.PublicKey]struct{}
 
 	clients      map[uint32]*PeerClient          // keyed by SessionIndex
 	clientsByCID map[protocol.CID_Ty]*PeerClient // hot-path index for forwardFrame
@@ -28,13 +33,26 @@ type vniEntry struct {
 	vni   protocol.VNI_Ty
 }
 
-func newVniEntry(authn auth.ServerAuthenticator) *vniEntry {
-	return &vniEntry{
-		authenticator: authn,
-		clients:       make(map[uint32]*PeerClient),
-		clientsByCID:  make(map[protocol.CID_Ty]*PeerClient),
-		routingMap:    newVnetRoutingMap(),
+func newVniEntry(authorizedKeys map[noise.PublicKey]struct{}) *vniEntry {
+	if authorizedKeys == nil {
+		authorizedKeys = make(map[noise.PublicKey]struct{})
 	}
+	return &vniEntry{
+		authorizedKeys: authorizedKeys,
+		clients:        make(map[uint32]*PeerClient),
+		clientsByCID:   make(map[protocol.CID_Ty]*PeerClient),
+		routingMap:     newVnetRoutingMap(),
+	}
+}
+
+// authorized reports whether pubkey may join this VNI. There is no "open"
+// mode: a key absent from the table is rejected. Identity-by-key is the only
+// admission scheme — noauth/hmac/userpass were removed wholesale.
+func (v *vniEntry) authorized(pubkey noise.PublicKey) bool {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	_, ok := v.authorizedKeys[pubkey]
+	return ok
 }
 
 func (v *vniEntry) addClient(cp *PeerClient) {

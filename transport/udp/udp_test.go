@@ -7,39 +7,73 @@ import (
 	"testing"
 
 	"github.com/jabberwocky238/gasoline/protocol"
-	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/protocol/handshake"
+	"github.com/jabberwocky238/gasoline/protocol/noise"
+	"github.com/jabberwocky238/gasoline/transport"
 )
 
+// testVNIResolver is a Noise-only resolver: it holds the server key pair and
+// the set of authorized client keys.
 type testVNIResolver struct {
-	auth auth.ServerAuthenticator
+	serverPriv noise.PrivateKey
+	serverPub  noise.PublicKey
+	authorized map[noise.PublicKey]struct{}
 }
 
-func (r testVNIResolver) CIDR() netip.Prefix                          { return netip.MustParsePrefix("10.0.0.0/24") }
-func (r testVNIResolver) IP(_ protocol.CID_Ty) (netip.Addr, error)    { return netip.MustParseAddr("10.0.0.1"), nil }
-func (r testVNIResolver) Authenticator() auth.ServerAuthenticator     { return r.auth }
+func (r testVNIResolver) CIDR() netip.Prefix { return netip.MustParsePrefix("10.0.0.0/24") }
+func (r testVNIResolver) IP(_ protocol.CID_Ty) (netip.Addr, error) {
+	return netip.MustParseAddr("10.0.0.1"), nil
+}
+func (r testVNIResolver) ServerStatic() (noise.PrivateKey, noise.PublicKey) {
+	return r.serverPriv, r.serverPub
+}
+func (r testVNIResolver) Authorized(pub noise.PublicKey) bool {
+	_, ok := r.authorized[pub]
+	return ok
+}
 
-func testMapper(a auth.ServerAuthenticator) handshake.VNIMapperFn {
+// testHarness bundles a server key pair and a mapper that authorizes the given
+// client public keys.
+func testMapper(serverPriv noise.PrivateKey, serverPub noise.PublicKey, authorized ...noise.PublicKey) handshake.VNIMapperFn {
+	set := make(map[noise.PublicKey]struct{}, len(authorized))
+	for _, k := range authorized {
+		set[k] = struct{}{}
+	}
 	return func(_ protocol.VNI_Ty) (handshake.VNIResolver, error) {
-		return testVNIResolver{auth: a}, nil
+		return testVNIResolver{serverPriv: serverPriv, serverPub: serverPub, authorized: set}, nil
 	}
 }
 
-func newTestCfg(cid protocol.CID_Ty) protocol.PresetSessionConfig {
-	return protocol.NewPresetSessionConfig(cid, 0)
+func newTestCfg() protocol.PresetSessionConfig {
+	return protocol.NewPresetSessionConfig(protocol.CID_Ty{}, 0)
+}
+
+// newTestKeys returns a client identity and a server key pair, with the client
+// pre-authorized. genServer==nil generates one.
+func newTestIdentity(t *testing.T) (transport.ClientIdentity, noise.PrivateKey, noise.PublicKey) {
+	t.Helper()
+	cPriv, cPub, err := noise.GenerateKey()
+	if err != nil {
+		t.Fatalf("client genkey: %v", err)
+	}
+	sPriv, sPub, err := noise.GenerateKey()
+	if err != nil {
+		t.Fatalf("server genkey: %v", err)
+	}
+	return transport.ClientIdentity{Priv: cPriv, Pub: cPub, ServerPub: sPub}, sPriv, sPub
 }
 
 func TestUDPHandshakeAndPacket(t *testing.T) {
-	serverAuth := &auth.NoAuthServer{}
-	ln, err := NewListener("127.0.0.1:0", testMapper(serverAuth))
+	id, sPriv, sPub := newTestIdentity(t)
+	ln, err := NewListener("127.0.0.1:0", testMapper(sPriv, sPub, id.Pub))
 	if err != nil {
 		t.Fatalf("NewListener: %v", err)
 	}
 	defer ln.Close()
 
 	addr := ln.Addr()
-	cid := protocol.CID_Ty{0x02, 0x10, 0x20, 0x30, 0, 0, 0, 0}
-	dialer := NewDialer(newTestCfg(cid), &auth.NoAuthClient{})
+	cid := protocol.DeriveCID(id.Pub)
+	dialer := NewDialer(newTestCfg(), id)
 
 	var wg sync.WaitGroup
 	var serverConn *Conn
@@ -135,14 +169,14 @@ func TestUDPHandshakeAndPacket(t *testing.T) {
 }
 
 func TestUDPMultiplePackets(t *testing.T) {
-	serverAuth := &auth.NoAuthServer{}
-	ln, err := NewListener("127.0.0.1:0", testMapper(serverAuth))
+	id, sPriv, sPub := newTestIdentity(t)
+	ln, err := NewListener("127.0.0.1:0", testMapper(sPriv, sPub, id.Pub))
 	if err != nil {
 		t.Fatalf("NewListener: %v", err)
 	}
 	defer ln.Close()
 
-	dialer := NewDialer(newTestCfg(protocol.CID_Ty{}), &auth.NoAuthClient{})
+	dialer := NewDialer(newTestCfg(), id)
 
 	var wg sync.WaitGroup
 	var sConn *Conn
@@ -194,16 +228,31 @@ func TestUDPMultiplePackets(t *testing.T) {
 }
 
 func TestUDPMultipleClients(t *testing.T) {
-	serverAuth := &auth.NoAuthServer{}
+	const numClients = 3
 
-	ln, err := NewListener("127.0.0.1:0", testMapper(serverAuth))
+	// Distinct client identities, all authorized on the same server key.
+	sPriv, sPub, err := noise.GenerateKey()
+	if err != nil {
+		t.Fatalf("server genkey: %v", err)
+	}
+	ids := make([]transport.ClientIdentity, numClients)
+	pubs := make([]noise.PublicKey, numClients)
+	for i := 0; i < numClients; i++ {
+		cPriv, cPub, err := noise.GenerateKey()
+		if err != nil {
+			t.Fatalf("client %d genkey: %v", i, err)
+		}
+		ids[i] = transport.ClientIdentity{Priv: cPriv, Pub: cPub, ServerPub: sPub}
+		pubs[i] = cPub
+	}
+
+	ln, err := NewListener("127.0.0.1:0", testMapper(sPriv, sPub, pubs...))
 	if err != nil {
 		t.Fatalf("NewListener: %v", err)
 	}
 	defer ln.Close()
 
 	addr := ln.Addr()
-	const numClients = 3
 
 	var wg sync.WaitGroup
 	serverConns := make([]interface{}, numClients)
@@ -223,8 +272,7 @@ func TestUDPMultipleClients(t *testing.T) {
 
 	clientConns := make([]interface{}, numClients)
 	for i := 0; i < numClients; i++ {
-		cid := protocol.CID_Ty{0x02, 0, 0, 0, 0, 0, 0, byte(i)}
-		d := NewDialer(newTestCfg(cid), &auth.NoAuthClient{})
+		d := NewDialer(newTestCfg(), ids[i])
 		c, _, err := d.Dial(addr)
 		if err != nil {
 			t.Fatalf("Dial %d: %v", i, err)

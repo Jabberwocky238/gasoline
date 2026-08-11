@@ -8,17 +8,10 @@ import (
 type HandshakeLabelKey uint64
 
 const (
-	LabelKey_ClientFingerprint HandshakeLabelKey = iota
-	LabelKey_Challenge
-	LabelKey_ClientTransportType
-)
-
-type LabelValue_ClientFingerprint [32]byte
-type LabelValue_ClientTransportType int
-
-const (
-	TransportType_L2 LabelValue_ClientTransportType = 0
-	TransportType_L3 LabelValue_ClientTransportType = 1
+	// LabelKey_NoiseInitiation carries the client's Noise_IK msg1 in ClientHello.
+	LabelKey_NoiseInitiation HandshakeLabelKey = iota
+	// LabelKey_NoiseResponse carries the server's Noise_IK msg2 in ServerHello.
+	LabelKey_NoiseResponse
 )
 
 type genericLabelMap struct {
@@ -28,6 +21,17 @@ type genericLabelMap struct {
 func (m *genericLabelMap) Get(key HandshakeLabelKey) (any, bool) {
 	val, ok := m.inner[key]
 	return val, ok
+}
+
+// GetBytes returns a label value as []byte, or (nil, false) if absent or
+// not byte-typed.
+func (m *genericLabelMap) GetBytes(key HandshakeLabelKey) ([]byte, bool) {
+	v, ok := m.inner[key]
+	if !ok {
+		return nil, false
+	}
+	b, ok := v.([]byte)
+	return b, ok
 }
 
 func (m *genericLabelMap) Set(key HandshakeLabelKey, value any) {

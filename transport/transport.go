@@ -7,9 +7,18 @@ import (
 	"time"
 
 	"github.com/jabberwocky238/gasoline/protocol"
-	"github.com/jabberwocky238/gasoline/protocol/auth"
 	"github.com/jabberwocky238/gasoline/protocol/handshake"
+	"github.com/jabberwocky238/gasoline/protocol/noise"
 )
+
+// ClientIdentity is the Noise key material a client dials with: its own static
+// key pair (its identity) plus the server's static public key (the "K" in
+// Noise_IK — known in advance, like WireGuard's PublicKey= config).
+type ClientIdentity struct {
+	Priv      noise.PrivateKey
+	Pub       noise.PublicKey
+	ServerPub noise.PublicKey
+}
 
 // Conn is a packet-oriented connection.
 // Each ReadPacket returns exactly one IP packet.
@@ -50,8 +59,8 @@ type Listener interface {
 // concrete package directly.
 
 // DialerFactory builds a Dialer for one outbound session. tlsConf may
-// be nil for transports that don't need it (tcp, udp).
-type DialerFactory func(cfg protocol.PresetSessionConfig, a auth.ClientAuthenticator, tlsConf *tls.Config) (Dialer, error)
+// be nil for transports that don't need it (udp).
+type DialerFactory func(cfg protocol.PresetSessionConfig, id ClientIdentity, tlsConf *tls.Config) (Dialer, error)
 
 // ListenerFactory binds a Listener on addr. tlsConf may be nil for
 // transports that don't need it.
@@ -89,7 +98,7 @@ func Names() []string {
 }
 
 // NewDialer dispatches to the registered DialerFactory for name.
-func NewDialer(name string, cfg protocol.PresetSessionConfig, a auth.ClientAuthenticator, tlsConf *tls.Config) (Dialer, error) {
+func NewDialer(name string, cfg protocol.PresetSessionConfig, id ClientIdentity, tlsConf *tls.Config) (Dialer, error) {
 	registryMu.RLock()
 	e, ok := registry[name]
 	registryMu.RUnlock()
@@ -99,7 +108,7 @@ func NewDialer(name string, cfg protocol.PresetSessionConfig, a auth.ClientAuthe
 	if e.dialer == nil {
 		return nil, fmt.Errorf("transport %q: no dialer registered", name)
 	}
-	return e.dialer(cfg, a, tlsConf)
+	return e.dialer(cfg, id, tlsConf)
 }
 
 // NewListener dispatches to the registered ListenerFactory for name.

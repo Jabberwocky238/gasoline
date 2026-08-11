@@ -1,6 +1,6 @@
-// Package dataframe defines the gasoline DATA-PLANE frame: the encrypted
-// envelope every IP packet travels in between a client (CE) and an operator
-// (PE). The wire layout is fixed (PRD §7.3):
+// dataframe.go — the gasoline DATA-PLANE frame: the encrypted envelope every
+// IP packet travels in between a client (CE) and an operator (PE). The wire
+// layout is fixed (PRD §7.3):
 //
 //	offset  size  field
 //	0       6     SessionTag  (first 6 bytes of the SessionID; PE uses it to
@@ -14,7 +14,7 @@
 // (PRD §5.4.1). SessionTag and Counter travel in the clear (a nonce needn't be
 // secret; the tag is just an index). Integrity of the whole payload rests on
 // the Poly1305 tag — a forged frame fails AEAD open and is dropped.
-package dataframe
+package datacom
 
 import (
 	"encoding/binary"
@@ -35,9 +35,9 @@ const (
 	ctOffset      = 14
 )
 
-// aad domain-separates data-plane frames from the auth and assign control
+// aadData domain-separates data-plane frames from the auth and assign control
 // planes, which seal under the same session keys with their own AADs.
-var aad = []byte("gasoline-data-v1")
+var aadData = []byte("gasoline-data-v1")
 
 // SessionTag is the 6-byte lookup key derived from a SessionID.
 type SessionTag [TagSize]byte
@@ -51,7 +51,7 @@ func TagOf(sid protocol.SessionID_Ty) SessionTag {
 // the session's next send counter. The returned slice is a fresh allocation
 // owning tag||counter||ciphertext.
 func Seal(sess *noise.Session, tag SessionTag, ipPkt []byte) ([]byte, error) {
-	counter, ct, err := sess.SealNext(ipPkt, aad)
+	counter, ct, err := sess.SealNext(ipPkt, aadData)
 	if err != nil {
 		return nil, err
 	}
@@ -78,5 +78,5 @@ func ParseHeader(frame []byte) (tag SessionTag, counter uint64, ct []byte, err e
 // enables the sliding replay window (UDP path); QUIC callers pass false since
 // the transport already guarantees ordering and dedup (PRD §7.5).
 func Open(sess *noise.Session, counter uint64, ct []byte, checkReplay bool) ([]byte, error) {
-	return sess.OpenAt(counter, ct, aad, checkReplay)
+	return sess.OpenAt(counter, ct, aadData, checkReplay)
 }

@@ -7,7 +7,7 @@ import (
 
 	"github.com/jabberwocky238/gasoline/cmd/operator/device/consensus"
 	"github.com/jabberwocky238/gasoline/protocol"
-	"github.com/jabberwocky238/gasoline/protocol/dataframe"
+	"github.com/jabberwocky238/gasoline/protocol/datacom"
 	"github.com/jabberwocky238/gasoline/protocol/noise"
 	"github.com/jabberwocky238/gasoline/transport"
 )
@@ -20,7 +20,7 @@ import (
 type hoppedConn struct {
 	ln   transport.HoppableListener
 	sess *noise.Session
-	tag  dataframe.SessionTag
+	tag  datacom.SessionTag
 
 	mu   sync.Mutex
 	dst  netip.AddrPort
@@ -28,7 +28,7 @@ type hoppedConn struct {
 }
 
 func (c *hoppedConn) WritePacket(pkt []byte) error {
-	frame, err := dataframe.Seal(c.sess, c.tag, pkt)
+	frame, err := datacom.Seal(c.sess, c.tag, pkt)
 	if err != nil {
 		return err
 	}
@@ -44,8 +44,8 @@ func (c *hoppedConn) WritePacket(pkt []byte) error {
 func (c *hoppedConn) ReadPacket([]byte) (int, error) {
 	return 0, errHoppedNoRead
 }
-func (c *hoppedConn) Close() error        { return nil }
-func (c *hoppedConn) RemoteAddr() string  { c.mu.Lock(); defer c.mu.Unlock(); return c.dst.String() }
+func (c *hoppedConn) Close() error       { return nil }
+func (c *hoppedConn) RemoteAddr() string { c.mu.Lock(); defer c.mu.Unlock(); return c.dst.String() }
 func (c *hoppedConn) LastActive() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -72,7 +72,7 @@ func (c *hoppedConn) setDst(dst netip.AddrPort) {
 // replicated), so it must be cached, not rebuilt per packet.
 type hopTable struct {
 	mu    sync.Mutex
-	byTag map[dataframe.SessionTag]*hoppedEntry
+	byTag map[datacom.SessionTag]*hoppedEntry
 }
 
 type hoppedEntry struct {
@@ -83,7 +83,7 @@ type hoppedEntry struct {
 }
 
 func newHopTable() *hopTable {
-	return &hopTable{byTag: make(map[dataframe.SessionTag]*hoppedEntry)}
+	return &hopTable{byTag: make(map[datacom.SessionTag]*hoppedEntry)}
 }
 
 // installHopDemux wires the operator's data demux into a hoppable listener, so a
@@ -107,7 +107,7 @@ func (o *Operator) demuxHopped(hl transport.HoppableListener, src netip.AddrPort
 	if node == nil {
 		return false // no consensus: no cross-PE session state to hop to
 	}
-	tag, counter, ct, err := dataframe.ParseHeader(datagram)
+	tag, counter, ct, err := datacom.ParseHeader(datagram)
 	if err != nil {
 		return false
 	}
@@ -121,7 +121,7 @@ func (o *Operator) demuxHopped(hl transport.HoppableListener, src netip.AddrPort
 
 	// Decrypt with the session's C2SKey (client->PE). A tag collision or forged
 	// frame fails here → decline so it can (harmlessly) fall through.
-	pt, err := dataframe.Open(entry.conn.sess, counter, ct, true)
+	pt, err := datacom.Open(entry.conn.sess, counter, ct, true)
 	if err != nil {
 		return false
 	}
@@ -151,7 +151,7 @@ func (o *Operator) demuxHopped(hl transport.HoppableListener, src netip.AddrPort
 // getOrCreate returns the hop entry for tag, building the reconstructed session
 // (seal=S2CKey, open=C2SKey) and its hopped conn on first sight. nextIndex mints
 // the local session index for the hopped client (avoids colliding on index 0).
-func (t *hopTable) getOrCreate(hl transport.HoppableListener, tag dataframe.SessionTag, keys consensus.SessionKeys, nextIndex func() uint32) *hoppedEntry {
+func (t *hopTable) getOrCreate(hl transport.HoppableListener, tag datacom.SessionTag, keys consensus.SessionKeys, nextIndex func() uint32) *hoppedEntry {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if e, ok := t.byTag[tag]; ok {
@@ -178,7 +178,7 @@ func (t *hopTable) getOrCreate(hl transport.HoppableListener, tag dataframe.Sess
 
 // markInstalled reports whether this call is the first to claim ownership of
 // tag's session on this PE (returns true once, false thereafter).
-func (t *hopTable) markInstalled(tag dataframe.SessionTag) bool {
+func (t *hopTable) markInstalled(tag datacom.SessionTag) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	e, ok := t.byTag[tag]

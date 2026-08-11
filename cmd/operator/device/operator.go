@@ -11,8 +11,7 @@ import (
 	"github.com/jabberwocky238/gasoline/cmd/operator/device/consensus"
 	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol"
-	"github.com/jabberwocky238/gasoline/protocol/assign"
-	"github.com/jabberwocky238/gasoline/protocol/dataframe"
+	"github.com/jabberwocky238/gasoline/protocol/datacom"
 	"github.com/jabberwocky238/gasoline/protocol/handshake"
 	"github.com/jabberwocky238/gasoline/protocol/noise"
 	"github.com/jabberwocky238/gasoline/transport"
@@ -45,7 +44,7 @@ type Operator struct {
 
 // vniResolver is the per-VNI handshake.VNIResolver implementation backed by an
 // operator's vniEntry. It is AUTH-ONLY: operator key pair + authorization
-// check. IP assignment is not here — see localAllocator / package assign.
+// check. IP assignment is not here — see localAllocator / package datacom.
 type vniResolver struct {
 	vn         *vniEntry
 	staticPriv noise.PrivateKey
@@ -162,7 +161,7 @@ func (o *Operator) StaticPub() noise.PublicKey { return o.state.staticPub }
 
 // allocator selects the assign backend: Raft-backed when a consensus node is
 // attached, else the pre-consensus preset allocator.
-func (o *Operator) allocator() assign.Allocator {
+func (o *Operator) allocator() datacom.Allocator {
 	if o.state.node != nil {
 		return &raftAllocator{
 			node:     o.state.node,
@@ -284,8 +283,8 @@ func (o *Operator) routineAcceptClients(tp string, ln transport.Listener) {
 		// SessionID. Use the Raft-backed allocator when consensus is running,
 		// otherwise the pre-consensus preset allocator.
 		alloc := o.allocator()
-		keys := assign.DataKeys{C2SKey: acc.C2SKey, S2CKey: acc.S2CKey}
-		sc, err := assign.ServerAssign(acc.Conn, acc.Session, acc.VNI, acc.ClientPub, o.state.nextSessionIndex(), keys, alloc)
+		keys := datacom.DataKeys{C2SKey: acc.C2SKey, S2CKey: acc.S2CKey}
+		sc, err := datacom.ServerAssign(acc.Conn, acc.Session, acc.VNI, acc.ClientPub, o.state.nextSessionIndex(), keys, alloc)
 		if err != nil {
 			logger.Errorf("assign on VNI %s: %v", acc.VNI, err)
 			_ = acc.Conn.Close()
@@ -338,12 +337,12 @@ func (o *Operator) routineReadFromClient(cp *PeerClient, vn *vniEntry) {
 		// Decrypt the data frame using this conn's session (the client handshook
 		// here). Forwarding then works on the plaintext IP packet and re-seals
 		// per destination.
-		_, ctr, ct, err := dataframe.ParseHeader(readBuf[:n])
+		_, ctr, ct, err := datacom.ParseHeader(readBuf[:n])
 		if err != nil {
 			logger.Debugf("parse frame from sessionindex %d: %v", cp.sc.SessionIndex, err)
 			continue
 		}
-		pt, err := dataframe.Open(cp.session, ctr, ct, true)
+		pt, err := datacom.Open(cp.session, ctr, ct, true)
 		if err != nil {
 			logger.Debugf("open frame from sessionindex %d: %v", cp.sc.SessionIndex, err)
 			continue

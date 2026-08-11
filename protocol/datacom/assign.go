@@ -1,4 +1,4 @@
-// Package assign is the client<->operator CONTROL plane that runs AFTER
+// assign.go — the client<->operator CONTROL plane that runs AFTER
 // authentication (package handshake). It assigns an overlay IP and session
 // using a two-phase commit so a claimed-but-unacknowledged address is never
 // leaked:
@@ -13,7 +13,7 @@
 // control plane inherits the handshake's confidentiality and the client's
 // identity. This package does NOT authenticate — the caller passes a Session
 // that handshake already produced.
-package assign
+package datacom
 
 import (
 	"bytes"
@@ -44,8 +44,8 @@ type Conn interface {
 // 1 in each direction (independent keys => independent sequences).
 const ctrlBase = 1
 
-// aad domain-separates the assign control plane from auth and data frames.
-var aad = []byte("gasoline-assign-v1")
+// aadAssign domain-separates the assign control plane from auth and data frames.
+var aadAssign = []byte("gasoline-assign-v1")
 
 // Code reports the outcome of an assignment.
 type Code uint8
@@ -364,7 +364,7 @@ func (a *clientAck) unmarshal(b []byte) error {
 const maxFrame = 512
 
 func writeSealed(conn Conn, sess *noise.Session, counter uint64, payload []byte) error {
-	ct, err := sess.SealAt(counter, payload, aad)
+	ct, err := sess.SealAt(counter, payload, aadAssign)
 	if err != nil {
 		return err
 	}
@@ -387,6 +387,6 @@ func readSealed(conn Conn, sess *noise.Session) ([]byte, uint64, error) {
 		return nil, 0, fmt.Errorf("assign: short frame %d", n)
 	}
 	counter := binary.BigEndian.Uint64(buf[:8])
-	pt, err := sess.OpenAt(counter, buf[8:n], aad, false)
+	pt, err := sess.OpenAt(counter, buf[8:n], aadAssign, false)
 	return pt, counter, err
 }

@@ -5,8 +5,7 @@ import (
 	"sync"
 
 	"github.com/jabberwocky238/gasoline/protocol"
-	"github.com/jabberwocky238/gasoline/protocol/dataframe"
-	"github.com/jabberwocky238/gasoline/protocol/message"
+	"github.com/jabberwocky238/gasoline/protocol/datacom"
 	"github.com/jabberwocky238/gasoline/protocol/noise"
 )
 
@@ -161,7 +160,7 @@ func (v *vniEntry) forwardFrame(pkt []byte, src *PeerClient) error {
 		}
 		// Ship the plaintext IP packet to the target PE over the underlay; it
 		// re-seals for its local client. Buffer rented from the pool.
-		m := message.New()
+		m := datacom.New()
 		if err := m.Seal(v.vni, target.SessionID, pkt); err != nil {
 			m.Release()
 			return err
@@ -181,7 +180,7 @@ func writeSealedTo(cp *PeerClient, pkt []byte) error {
 	if cp.session == nil {
 		return nil
 	}
-	frame, err := dataframe.Seal(cp.session, dataframe.TagOf(cp.sc.SessionID), pkt)
+	frame, err := datacom.Seal(cp.session, datacom.TagOf(cp.sc.SessionID), pkt)
 	if err != nil {
 		return err
 	}

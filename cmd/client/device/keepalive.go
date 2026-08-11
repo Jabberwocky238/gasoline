@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/jabberwocky238/gasoline/common"
-	"github.com/jabberwocky238/gasoline/protocol/dataframe"
+	"github.com/jabberwocky238/gasoline/protocol/datacom"
 	"github.com/jabberwocky238/gasoline/protocol/noise"
 	"github.com/jabberwocky238/gasoline/transport"
 )
@@ -23,7 +23,7 @@ import (
 type Keepalive struct {
 	conn    transport.Conn
 	session *noise.Session
-	tag     dataframe.SessionTag
+	tag     datacom.SessionTag
 
 	minInterval time.Duration
 	maxInterval time.Duration
@@ -39,7 +39,7 @@ type Keepalive struct {
 // parent is the Client's LogContext; a child scope is derived for Stop().
 // session/tag seal the keepalive as a data frame so the operator can decrypt it
 // like any other packet (the plaintext is a version-3 marker it then drops).
-func NewKeepalive(parent *common.LogContext, conn transport.Conn, session *noise.Session, tag dataframe.SessionTag) *Keepalive {
+func NewKeepalive(parent *common.LogContext, conn transport.Conn, session *noise.Session, tag datacom.SessionTag) *Keepalive {
 	return &Keepalive{
 		conn:        conn,
 		session:     session,
@@ -88,7 +88,7 @@ func buildKeepalivePacket() []byte {
 }
 
 func (k *Keepalive) sendOnce() error {
-	frame, err := dataframe.Seal(k.session, k.tag, buildKeepalivePacket())
+	frame, err := datacom.Seal(k.session, k.tag, buildKeepalivePacket())
 	if err != nil {
 		return err
 	}

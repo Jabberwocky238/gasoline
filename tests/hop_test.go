@@ -9,8 +9,7 @@ import (
 	operator "github.com/jabberwocky238/gasoline/cmd/operator/device"
 	"github.com/jabberwocky238/gasoline/cmd/operator/device/consensus"
 	"github.com/jabberwocky238/gasoline/protocol"
-	"github.com/jabberwocky238/gasoline/protocol/assign"
-	"github.com/jabberwocky238/gasoline/protocol/dataframe"
+	"github.com/jabberwocky238/gasoline/protocol/datacom"
 	"github.com/jabberwocky238/gasoline/protocol/noise"
 	"github.com/jabberwocky238/gasoline/transport"
 	"github.com/jabberwocky238/gasoline/transport/udp"
@@ -88,7 +87,7 @@ func TestG4_HopToAnotherOperator(t *testing.T) {
 		t.Fatalf("A dial: %v", err)
 	}
 	defer dialedA.Conn.Close()
-	scA, err := assign.ClientAssign(dialedA.Conn, dialedA.Session, vni)
+	scA, err := datacom.ClientAssign(dialedA.Conn, dialedA.Session, vni)
 	if err != nil {
 		t.Fatalf("A assign: %v", err)
 	}
@@ -100,7 +99,7 @@ func TestG4_HopToAnotherOperator(t *testing.T) {
 
 	// Wait until B's operator (node1) has A's session replicated in its FSM.
 	waitFor(t, 3*time.Second, func() bool {
-		_, ok := node1.SessionByTag(dataframe.TagOf(scA.SessionID))
+		_, ok := node1.SessionByTag(datacom.TagOf(scA.SessionID))
 		return ok
 	})
 
@@ -124,7 +123,7 @@ func TestG4_HopToAnotherOperator(t *testing.T) {
 
 	// Seal an A->B IP packet under A's session and fire it at opB.
 	ipPkt := makeIPv4Packet(scA.IP, scB.IP, []byte("hopped-hello"))
-	frame, err := dataframe.Seal(dialedA.Session, dataframe.TagOf(scA.SessionID), ipPkt)
+	frame, err := datacom.Seal(dialedA.Session, datacom.TagOf(scA.SessionID), ipPkt)
 	if err != nil {
 		t.Fatalf("seal: %v", err)
 	}
@@ -145,7 +144,7 @@ func TestG4_HopToAnotherOperator(t *testing.T) {
 
 	// The migration must have recorded opB as A's new access point.
 	waitFor(t, 3*time.Second, func() bool {
-		k, ok := node1.SessionByTag(dataframe.TagOf(scA.SessionID))
+		k, ok := node1.SessionByTag(datacom.TagOf(scA.SessionID))
 		return ok && k.LastOperator == uuidB
 	})
 	t.Log("SessionMigrate committed: A's access point is now opB")

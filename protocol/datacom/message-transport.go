@@ -1,4 +1,4 @@
-// Package message defines the on-wire envelope used between operators
+// message-transport.go — the on-wire envelope used between operators
 // (and between operators and clients on the data plane).
 //
 // MessageTransport carries one IP packet plus the (vni, sessionID) addressing
@@ -16,7 +16,7 @@
 // so seal/parse round-trips are zero-copy past the buffer itself. The
 // backing buffer is always rented from common.WaitPool and must be
 // returned via Release.
-package message
+package datacom
 
 import (
 	"encoding/binary"

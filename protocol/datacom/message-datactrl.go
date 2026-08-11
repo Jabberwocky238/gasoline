@@ -1,4 +1,4 @@
-package message
+package datacom
 
 // DataCtrl is the in-band operator <-> client control channel. It
 // shares the same transport.Conn as the IP data plane, multiplexed
@@ -207,7 +207,7 @@ type PrefixChanged struct {
 	bits *byte  // pointer into Buffer
 }
 
-func NewPrefixChanged() *PrefixChanged { return &PrefixChanged{Buffer: common.GetBuffer()} }
+func NewPrefixChanged() *PrefixChanged    { return &PrefixChanged{Buffer: common.GetBuffer()} }
 func (*PrefixChanged) Kind() DataCtrlKind { return DataCtrlPrefixChanged }
 func (m *PrefixChanged) Frame() []byte    { return *m.Buffer }
 func (m *PrefixChanged) Release()         { release(&m.Buffer); m.addr = nil; m.bits = nil }
@@ -340,10 +340,10 @@ type RoutePush struct {
 	Buffer *[]byte
 }
 
-func NewRoutePush() *RoutePush         { return &RoutePush{Buffer: common.GetBuffer()} }
-func (*RoutePush) Kind() DataCtrlKind  { return DataCtrlRoutePush }
-func (m *RoutePush) Frame() []byte     { return *m.Buffer }
-func (m *RoutePush) Release()          { release(&m.Buffer) }
+func NewRoutePush() *RoutePush        { return &RoutePush{Buffer: common.GetBuffer()} }
+func (*RoutePush) Kind() DataCtrlKind { return DataCtrlRoutePush }
+func (m *RoutePush) Frame() []byte    { return *m.Buffer }
+func (m *RoutePush) Release()         { release(&m.Buffer) }
 
 func (m *RoutePush) Seal(prefixes []netip.Prefix) error {
 	rentIfNil(&m.Buffer)
@@ -497,10 +497,10 @@ type Stats struct {
 	rtt *[4]byte // BE uint32 view
 }
 
-func NewStats() *Stats             { return &Stats{Buffer: common.GetBuffer()} }
-func (*Stats) Kind() DataCtrlKind  { return DataCtrlStats }
-func (m *Stats) Frame() []byte     { return *m.Buffer }
-func (m *Stats) Release()          { release(&m.Buffer); m.tx = nil; m.rx = nil; m.rtt = nil }
+func NewStats() *Stats            { return &Stats{Buffer: common.GetBuffer()} }
+func (*Stats) Kind() DataCtrlKind { return DataCtrlStats }
+func (m *Stats) Frame() []byte    { return *m.Buffer }
+func (m *Stats) Release()         { release(&m.Buffer); m.tx = nil; m.rx = nil; m.rtt = nil }
 
 func (m *Stats) Seal(tx, rx uint64, rttMicros uint32) error {
 	rentIfNil(&m.Buffer)

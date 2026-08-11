@@ -13,8 +13,7 @@ import (
 	"github.com/jabberwocky238/gasoline/cmd/operator/device"
 	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol"
-	"github.com/jabberwocky238/gasoline/protocol/assign"
-	"github.com/jabberwocky238/gasoline/protocol/dataframe"
+	"github.com/jabberwocky238/gasoline/protocol/datacom"
 	"github.com/jabberwocky238/gasoline/protocol/noise"
 	"github.com/jabberwocky238/gasoline/transport"
 	"github.com/sirupsen/logrus"
@@ -27,15 +26,15 @@ import (
 type dataConn struct {
 	transport.Conn
 	sess *noise.Session
-	tag  dataframe.SessionTag
+	tag  datacom.SessionTag
 }
 
 func newDataConn(inner transport.Conn, sess *noise.Session, sid protocol.SessionID_Ty) *dataConn {
-	return &dataConn{Conn: inner, sess: sess, tag: dataframe.TagOf(sid)}
+	return &dataConn{Conn: inner, sess: sess, tag: datacom.TagOf(sid)}
 }
 
 func (c *dataConn) WritePacket(pkt []byte) error {
-	frame, err := dataframe.Seal(c.sess, c.tag, pkt)
+	frame, err := datacom.Seal(c.sess, c.tag, pkt)
 	if err != nil {
 		return err
 	}
@@ -43,16 +42,16 @@ func (c *dataConn) WritePacket(pkt []byte) error {
 }
 
 func (c *dataConn) ReadPacket(buf []byte) (int, error) {
-	tmp := make([]byte, len(buf)+dataframe.HeaderSize+16)
+	tmp := make([]byte, len(buf)+datacom.HeaderSize+16)
 	n, err := c.Conn.ReadPacket(tmp)
 	if err != nil {
 		return 0, err
 	}
-	_, ctr, ct, err := dataframe.ParseHeader(tmp[:n])
+	_, ctr, ct, err := datacom.ParseHeader(tmp[:n])
 	if err != nil {
 		return 0, err
 	}
-	pt, err := dataframe.Open(c.sess, ctr, ct, true)
+	pt, err := datacom.Open(c.sess, ctr, ct, true)
 	if err != nil {
 		return 0, err
 	}
@@ -101,7 +100,7 @@ func dialAndAssign(t *testing.T, d transport.Dialer, endpoint string, id transpo
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
-	sc, err := assign.ClientAssign(dialed.Conn, dialed.Session, vni)
+	sc, err := datacom.ClientAssign(dialed.Conn, dialed.Session, vni)
 	if err != nil {
 		t.Fatalf("assign: %v", err)
 	}

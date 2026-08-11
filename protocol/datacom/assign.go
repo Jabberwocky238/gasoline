@@ -102,6 +102,44 @@ type DataKeys struct {
 	S2CKey [32]byte
 }
 
+// PortRange is an inclusive UDP port interval a server accepts hopping traffic
+// on (PRD §5/§6.2). Lo == Hi is a single port.
+type PortRange struct {
+	Lo uint16
+	Hi uint16
+}
+
+// ServerEndpoint is one operator a client may hop its data frames to: its host,
+// the port ranges it listens on, and its UUID. The client picks any (endpoint,
+// port-in-range) at random each hop interval (PRD §5.1 — hopping is random).
+type ServerEndpoint struct {
+	UUID  [16]byte
+	Host  netip.Addr
+	Ports []PortRange
+}
+
+// ServerList is the authoritative set of hop targets the operator hands the
+// client in the final assignment frame (PRD §5.3 / §6.2). It overrides whatever
+// the client had locally, which may be stale.
+type ServerList []ServerEndpoint
+
+// serverListToContext converts the wire ServerList into the protocol-level hop
+// targets stored on a SessionContext.
+func serverListToContext(list ServerList) []protocol.HopServer {
+	if len(list) == 0 {
+		return nil
+	}
+	out := make([]protocol.HopServer, 0, len(list))
+	for _, e := range list {
+		hs := protocol.HopServer{UUID: e.UUID, Host: e.Host}
+		for _, p := range e.Ports {
+			hs.Ports = append(hs.Ports, protocol.HopPortRange{Lo: p.Lo, Hi: p.Hi})
+		}
+		out = append(out, hs)
+	}
+	return out
+}
+
 // ErrIPConflict is returned by Confirm when the reserved IP was committed by
 // another node between Preclaim and Confirm. The assign server retries.
 var ErrIPConflict = errors.New("assign: ip conflict, retry")
@@ -119,6 +157,7 @@ func ServerAssign(
 	pubkey noise.PublicKey,
 	sessionIndex uint32,
 	keys DataKeys,
+	servers ServerList,
 	alloc Allocator,
 ) (*protocol.SessionContext, error) {
 	sendCtr := uint64(ctrlBase) // operator's monotonic send counter
@@ -164,7 +203,7 @@ func ServerAssign(
 		// knows this claim is final (and not a prelude to a retry).
 		err = alloc.Confirm(vni, pubkey, res)
 		if err == nil {
-			done := serverClaim{Kind: kindConfirm}
+			done := serverClaim{Kind: kindConfirm, Servers: servers}
 			if werr := writeSealed(conn, sess, sendCtr, done.marshal()); werr != nil {
 				return nil, fmt.Errorf("send Confirm: %w", werr)
 			}
@@ -204,17 +243,20 @@ func ClientAssign(conn Conn, sess *noise.Session, vni protocol.VNI_Ty) (*protoco
 
 		switch claim.Kind {
 		case kindConfirm:
-			// Committed. Finalize with the last claim we accepted.
+			// Committed. Finalize with the last claim we accepted. The confirm
+			// frame carries the authoritative hop-target list (PRD §5.3 / §6.2).
 			if last.SessionID == (protocol.SessionID_Ty{}) && !last.IP.IsValid() {
 				return nil, fmt.Errorf("assign: confirm before any claim")
 			}
-			return &protocol.SessionContext{
+			sc := &protocol.SessionContext{
 				SessionID:    last.SessionID,
 				VNI:          vni,
 				SessionIndex: last.SessionIndex,
 				IP:           last.IP,
 				IPRanges:     last.Ranges,
-			}, nil
+			}
+			sc.SetServers(serverListToContext(claim.Servers))
+			return sc, nil
 
 		case kindClaim:
 			if claim.Code != CodeOK {
@@ -238,7 +280,7 @@ func ClientAssign(conn Conn, sess *noise.Session, vni protocol.VNI_Ty) (*protoco
 
 // serverClaim: kind(1). For kindClaim also: code(1) + sessionID(16) +
 // sessionIndex(4) + ipLen(1) + ip + rangeLen(1) + range + rangeBits(1).
-// kindConfirm carries only the kind byte.
+// kindConfirm carries kind(1) + the marshalled ServerList (hop targets).
 type serverClaim struct {
 	Kind         frameKind
 	Code         Code
@@ -246,11 +288,12 @@ type serverClaim struct {
 	SessionIndex uint32
 	IP           netip.Addr
 	Ranges       netip.Prefix
+	Servers      ServerList // populated on kindConfirm only
 }
 
 func (c serverClaim) marshal() []byte {
 	if c.Kind == kindConfirm {
-		return []byte{byte(kindConfirm)}
+		return append([]byte{byte(kindConfirm)}, marshalServerList(c.Servers)...)
 	}
 	ip := c.IP.AsSlice()
 	rng := c.Ranges.Addr().AsSlice()
@@ -281,6 +324,12 @@ func (c *serverClaim) unmarshal(b []byte) error {
 	}
 	c.Kind = frameKind(kind)
 	if c.Kind == kindConfirm {
+		rest, _ := io.ReadAll(r)
+		servers, err := unmarshalServerList(rest)
+		if err != nil {
+			return err
+		}
+		c.Servers = servers
 		return nil
 	}
 	code, err := r.ReadByte()
@@ -331,6 +380,80 @@ func (c *serverClaim) unmarshal(b []byte) error {
 		c.Ranges = netip.PrefixFrom(rngAddr, int(bits))
 	}
 	return nil
+}
+
+// marshalServerList encodes a ServerList:
+//
+//	count(1) [ uuid(16) hostLen(1) host portCount(1) [lo(2) hi(2)]... ]...
+//
+// host is 4 or 16 raw address bytes. An empty list encodes as a single 0 byte.
+func marshalServerList(list ServerList) []byte {
+	var b bytes.Buffer
+	b.WriteByte(byte(len(list)))
+	for _, e := range list {
+		b.Write(e.UUID[:])
+		host := e.Host.AsSlice()
+		b.WriteByte(byte(len(host)))
+		b.Write(host)
+		b.WriteByte(byte(len(e.Ports)))
+		for _, p := range e.Ports {
+			var buf [4]byte
+			binary.BigEndian.PutUint16(buf[0:2], p.Lo)
+			binary.BigEndian.PutUint16(buf[2:4], p.Hi)
+			b.Write(buf[:])
+		}
+	}
+	return b.Bytes()
+}
+
+// unmarshalServerList decodes what marshalServerList produced. An empty input
+// (or a leading 0 count) yields a nil list, not an error.
+func unmarshalServerList(b []byte) (ServerList, error) {
+	if len(b) == 0 {
+		return nil, nil
+	}
+	r := bytes.NewReader(b)
+	count, err := r.ReadByte()
+	if err != nil {
+		return nil, err
+	}
+	if count == 0 {
+		return nil, nil
+	}
+	list := make(ServerList, 0, count)
+	for i := 0; i < int(count); i++ {
+		var e ServerEndpoint
+		if _, err := io.ReadFull(r, e.UUID[:]); err != nil {
+			return nil, err
+		}
+		hostLen, err := r.ReadByte()
+		if err != nil {
+			return nil, err
+		}
+		host := make([]byte, hostLen)
+		if _, err := io.ReadFull(r, host); err != nil {
+			return nil, err
+		}
+		if a, ok := netip.AddrFromSlice(host); ok {
+			e.Host = a
+		}
+		portCount, err := r.ReadByte()
+		if err != nil {
+			return nil, err
+		}
+		for j := 0; j < int(portCount); j++ {
+			var buf [4]byte
+			if _, err := io.ReadFull(r, buf[:]); err != nil {
+				return nil, err
+			}
+			e.Ports = append(e.Ports, PortRange{
+				Lo: binary.BigEndian.Uint16(buf[0:2]),
+				Hi: binary.BigEndian.Uint16(buf[2:4]),
+			})
+		}
+		list = append(list, e)
+	}
+	return list, nil
 }
 
 // clientAck: accepted(1)

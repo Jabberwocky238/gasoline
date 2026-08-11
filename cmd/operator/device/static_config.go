@@ -42,6 +42,20 @@ type StaticOperatorConfig struct {
 
 	Network  map[protocol.VNI_Ty]StaticOperatorVNetConfig
 	LogLevel logrus.Level
+
+	// HopEndpoints is the authoritative list of hop targets advertised to
+	// clients at assignment (PRD §6.2). Each entry is one operator's host + the
+	// UDP port ranges it accepts data frames on. Empty means "no hopping
+	// advertised" — the client stays on its handshake endpoint.
+	HopEndpoints []HopEndpoint
+}
+
+// HopEndpoint describes one advertisable hop target: an operator's UUID, host,
+// and the inclusive UDP port ranges it listens on.
+type HopEndpoint struct {
+	UUID  [16]byte
+	Host  string      // IP literal
+	Ports [][2]uint16 // inclusive [lo, hi] ranges
 }
 
 // RaftConfig is the parsed --raft-* configuration for the consensus layer.

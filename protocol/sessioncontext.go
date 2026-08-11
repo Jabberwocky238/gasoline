@@ -45,6 +45,22 @@ func NewSessionID() SessionID_Ty {
 	return s
 }
 
+// HopPortRange is an inclusive UDP port interval a hop target accepts traffic on.
+type HopPortRange struct {
+	Lo uint16
+	Hi uint16
+}
+
+// HopServer is one operator a client may send data frames to after the
+// handshake (PRD §6.2). The client picks a random (server, port-in-range) each
+// hop interval. Populated from the authoritative list in the assignment's
+// confirm frame.
+type HopServer struct {
+	UUID  [16]byte
+	Host  netip.Addr
+	Ports []HopPortRange
+}
+
 type SessionContext struct {
 	mu sync.RWMutex
 
@@ -53,6 +69,21 @@ type SessionContext struct {
 	SessionIndex uint32       // local session index for logging / packet headers
 	IP           netip.Addr   // Client's assigned IP (e.g. 10.0.0.2)
 	IPRanges     netip.Prefix // Internal network ranges routable via VPN (e.g. 10.0.0.0/24)
+	servers      []HopServer  // hop targets from the assignment (guarded by mu)
+}
+
+// SetServers replaces the hop-target list (called once at assignment).
+func (sc *SessionContext) SetServers(s []HopServer) {
+	sc.mu.Lock()
+	sc.servers = s
+	sc.mu.Unlock()
+}
+
+// Servers returns a copy of the hop-target list.
+func (sc *SessionContext) Servers() []HopServer {
+	sc.mu.RLock()
+	defer sc.mu.RUnlock()
+	return append([]HopServer(nil), sc.servers...)
 }
 
 func (sc *SessionContext) Copy() SessionContext {
@@ -64,6 +95,7 @@ func (sc *SessionContext) Copy() SessionContext {
 		SessionIndex: sc.SessionIndex,
 		IP:           sc.IP,
 		IPRanges:     sc.IPRanges,
+		servers:      append([]HopServer(nil), sc.servers...),
 	}
 }
 

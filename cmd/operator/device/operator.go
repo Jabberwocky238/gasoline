@@ -174,6 +174,29 @@ func (o *Operator) allocator() datacom.Allocator {
 	return &localAllocator{state: o.state}
 }
 
+// hopServerList builds the authoritative hop-target list advertised to clients
+// at assignment (PRD §6.2), from the operator's configured HopEndpoints. A
+// malformed host entry is skipped rather than failing the assignment.
+func (o *Operator) hopServerList() datacom.ServerList {
+	if len(o.cfg.HopEndpoints) == 0 {
+		return nil
+	}
+	list := make(datacom.ServerList, 0, len(o.cfg.HopEndpoints))
+	for _, ep := range o.cfg.HopEndpoints {
+		host, err := netip.ParseAddr(ep.Host)
+		if err != nil {
+			o.lctx.Log().Warnf("hop endpoint host %q: %v (skipped)", ep.Host, err)
+			continue
+		}
+		se := datacom.ServerEndpoint{UUID: ep.UUID, Host: host}
+		for _, r := range ep.Ports {
+			se.Ports = append(se.Ports, datacom.PortRange{Lo: r[0], Hi: r[1]})
+		}
+		list = append(list, se)
+	}
+	return list
+}
+
 // AttachConsensus wires a running consensus node so IP/SessionID allocation
 // commits through Raft. Call before Start.
 func (o *Operator) AttachConsensus(node *consensus.Node) { o.state.node = node }
@@ -284,7 +307,7 @@ func (o *Operator) routineAcceptClients(tp string, ln transport.Listener) {
 		// otherwise the pre-consensus preset allocator.
 		alloc := o.allocator()
 		keys := datacom.DataKeys{C2SKey: acc.C2SKey, S2CKey: acc.S2CKey}
-		sc, err := datacom.ServerAssign(acc.Conn, acc.Session, acc.VNI, acc.ClientPub, o.state.nextSessionIndex(), keys, alloc)
+		sc, err := datacom.ServerAssign(acc.Conn, acc.Session, acc.VNI, acc.ClientPub, o.state.nextSessionIndex(), keys, o.hopServerList(), alloc)
 		if err != nil {
 			logger.Errorf("assign on VNI %s: %v", acc.VNI, err)
 			_ = acc.Conn.Close()

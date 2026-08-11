@@ -35,8 +35,8 @@ ClientHello(vni, cid) → ServerHello(challenge) → ClientAnswer(response) → 
 | G0 | operator 强一致共识 | Raft | 全 mesh 对 session / vnet / 子网 / 密钥表 / 接入点位置有单一一致视图；leader 故障自动选举 |
 | G1 | 身份绑定密钥 | WireGuard | 客户端身份 = 其静态公钥。CID 由公钥推导，不可自选；冒用他人 CID 必然握手失败 |
 | G2 | 动态 IP 下发 | OpenVPN | 地址池按需分配、带租约、断线回收；**IP 与 session 号在一次握手内完成分配**，零额外往返 |
-| G3 | 端口跳跃 | Hysteria2 | 服务端监听端口区间，客户端按共享密钥推导的时间序列跳跃；跳跃对上层数据面透明 |
-| G4 | 多 server 跳跃 | — | 握手绑定单一 host:port；握手成功后可在**任意 server 的任意区间**发送，全部可行 |
+| G3 | 端口跳跃 | Hysteria2 | 服务端监听端口区间，客户端按共享密钥推导的时间序列跳跃；**UDP 与 QUIC 均支持**，对上层数据面透明 |
+| G4 | 多 IP 跳跃 | — | 握手绑定单一 host:port；握手成功后可在**任意 server IP 的任意端口区间**发送，全部可行；UDP 完全对等，QUIC 非 owner 多一跳 |
 | G5 | 数据面加密 | WireGuard | Noise_IK 握手协商密钥，ChaCha20-Poly1305 加密每个 IP 包；含重放窗口与 rekey |
 
 ### 非目标（本次明确不做）
@@ -378,9 +378,65 @@ UDP listener 现以 `netip.AddrPort` 为键索引 `virtualPeer`（`udp/listener.
 - `ServerAssign` 通过 **label** 下发 `hop_secret(32B)` + 区间参数 + **全量 server 列表**。`ServerAssign` 目前**没有** labels 字段，需补上 label 段（照抄 `ClientHello`）——这是本项唯一的线格式变更。
 - 此后客户端从当前 epoch 起跳，不再走引导端口。
 
-### 5.4 QUIC 的限制
+### 5.4 QUIC 上的端口跳跃
 
-QUIC 有自身的连接迁移与路径验证，叠加我们的跳跃会冲突。**G3/G4 仅在 UDP 传输实现**；QUIC 保持单端口，依赖其原生迁移。CLI 在 `--transport quic` + 跳跃参数时**报错而非静默忽略**。
+**订正**：上一版 PRD 判定"QUIC 无法跳跃、只能单端口"，这个结论过于保守，现予推翻。QUIC 恰恰是**最适合**做端口跳跃的传输——因为它本来就不用四元组标识连接。
+
+#### 5.4.1 原理：QUIC 不在乎四元组
+
+QUIC 连接由包头里的 **Connection ID（DCID）** 标识，而非 `(srcIP, srcPort, dstIP, dstPort)`。这正是 QUIC 连接迁移（手机 WiFi↔蜂窝切换）的基础。因此：
+
+- 客户端换目的端口发包 → 只要 DCID 不变，服务端就知道是同一条连接；
+- **传输层可以"谁都能接入"**：任意端口收到的包，按 DCID 归并到既有连接即可。
+
+**但"谁都可以接入"必须分两层理解，否则会引入漏洞**：
+
+| 层 | 是否放开 | 说明 |
+|---|---|---|
+| 传输层（端口/四元组） | ✅ **完全放开** | 任意端口收包，按 DCID 路由，不校验来源地址 |
+| 密码学层 | ❌ **绝不放开** | QUIC 包受 TLS 1.3 AEAD 保护，伪造者无密钥则解密失败即丢弃 |
+
+**正因为有 AEAD 兜底，传输层才敢放开**——这不是牺牲安全换灵活，而是把认证职责放在它该在的层。这与 §7 的 Noise 加密是同一个思路。
+
+#### 5.4.2 实现约束（关键）
+
+quic-go 的 `quic.Transport` 文档明确写着：
+
+> A single net.PacketConn can only be handled by one Transport.
+
+所以监听 N 个端口 = N 个 `quic.Transport` 实例，而**每个 Transport 维护自己独立的连接表**。客户端在端口 A 建立的连接，端口 B 上的 Transport 并不认识——包会被当作未知连接丢弃或触发 stateless reset。
+
+这是 QUIC 跳跃真正要解决的问题（不是路径验证）。方案：
+
+**统一 DCID 路由层**。在 N 个 `quic.Transport` 之上加一层分发器：
+
+```
+                  ┌─ UDPConn :20000 ─┐
+客户端跳跃发包 ──►├─ UDPConn :20001 ─┤──► DCID 路由表 ──► 归属的 quic.Transport
+                  └─ UDPConn :200NN ─┘     (DCID → owner)
+```
+
+- 利用 `quic.Transport.ConnectionIDGenerator`（该字段存在，注释明确说 "allows routing / load balancing based on connection IDs"）为每条连接生成**带路由前缀的 DCID**；
+- 各端口的 socket 读到包后先解析 DCID 前缀 → 投递给对应的 Transport；
+- 连接迁移由 quic-go 自己完成（它会做 PATH_CHALLENGE 验证新路径，这是**加分项**不是障碍——它顺带验证了跳跃后的路径确实可用）。
+
+#### 5.4.3 与 UDP 传输的差异
+
+| | UDP 传输 | QUIC 传输 |
+|---|---|---|
+| 会话标识 | 自研 `SessionTag(6)` | QUIC 原生 DCID |
+| 跳跃后归并 | 查 SessionTag → 更新 remoteAddr | 查 DCID → quic-go 内部迁移 |
+| 路径验证 | 无（靠 AEAD） | QUIC 原生 PATH_CHALLENGE |
+| 端口序列推导 | 共用 §5.1 的 `hop_secret` 算法 | 同左 |
+
+**端口跳跃的推导算法两者完全一致**，差异只在服务端如何把包归并回连接。
+
+#### 5.4.4 代价
+
+- N 个 `quic.Transport` 实例，每个持有独立的连接表与定时器 → 内存开销高于 UDP 方案（后者只是 N 个 socket 共享一张 peers 表）。区间上限仍为 64。
+- 需要自定义 `ConnectionIDGenerator`，属于 quic-go 的公开 API，不涉及 fork。
+
+**结论：G3 在 UDP 与 QUIC 上都实现**，取消上一版"QUIC 报错"的设计。
 
 ---
 
@@ -436,6 +492,50 @@ servers:
 - `ServerAssign` 下发**服务端权威的** server 列表（各 host + 区间 + UUID），覆盖客户端本地配置（本地配置可能过期）；
 - 此后客户端可向列表中**任意 (server, 区间)** 组合发包，全部可行。
 
+### 6.2bis QUIC 上的跨 IP 跳跃
+
+**要求**：QUIC 也要能跳 IP，即多个 server IP × 多个端口区间任意组合。
+
+这比 §5.4 的端口跳跃难一档：换端口只是同一进程的另一个 socket，换 **IP 则是另一台物理机上的另一个 operator 进程**——它的 `quic.Transport` 里没有这条连接的任何状态（TLS 密钥、包号空间、流状态全在原机器上）。
+
+QUIC 的原生连接迁移**解决不了这个问题**：迁移的前提是同一个服务端实例在新路径上继续服务，而这里换的是服务端本身。
+
+#### 方案：DCID 内嵌 owner 路由 + 跨机转发
+
+复用 §5.4.2 已经要做的 `ConnectionIDGenerator`，把 **owner operator 的标识编进 DCID**：
+
+```
+DCID (16 字节) = ownerTag(4) || 本地连接标识(12)
+                 └─ operator UUID 的哈希前缀，全集群唯一
+```
+
+任意 operator 在任意端口收到 QUIC 包后：
+
+1. 解析 DCID 前 4 字节 → 查本地 Raft 副本的 `ownerTag → operator UUID` 映射（该映射随 operator 加入集群写入 Raft，低频、天然强一致）；
+2. **是自己** → 交给本地对应的 `quic.Transport` 处理；
+3. **是别人** → 用既有的 operator↔operator UDP underlay（`PeerOperator.WritePacket`）把**整个 UDP 数据报原样转发**给 owner，并记录来源地址；owner 处理后的回包沿反向路径送回。
+
+这本质是一个 **QUIC-aware 的四层负载均衡器**，与 CDN 前置 QUIC LB 的做法一致（DCID 路由正是 quic-go 那句 "allows routing / load balancing based on connection IDs" 的设计意图）。
+
+#### 与 UDP 传输的本质差异
+
+| | UDP 传输 | QUIC 传输 |
+|---|---|---|
+| 跨 IP 后谁处理 | **任意 operator 本地处理**（会话状态在 Raft，人人都有） | **必须回到 owner**（TLS/包号状态是本地的，Raft 复制不了） |
+| 额外跳数 | 0 | 非 owner 接入时 +1 跳 |
+| owner 故障 | 无此概念 | 连接失效，需重握手（IP/租约由 Raft 保住） |
+
+**这个差异无法消除**，因为 QUIC 的连接状态（TLS 会话密钥、包号空间、拥塞控制、流状态）是密码学状态机的一部分，不可能像 session 元数据那样复制到全集群——复制它等于复制密钥，既不安全也不现实。
+
+**因此必须诚实标注**：QUIC 的多 IP 跳跃是"**可用但非对称**"——能跳，但跳到非 owner 会多一跳延迟；UDP 传输才是真正的对等跳跃。
+
+#### 取舍建议
+
+- 追求极致抗封锁与对等性 → **用 UDP 传输**；
+- 需要 QUIC 的可靠有序、拥塞控制、0-RTT → **用 QUIC**，接受非 owner 多一跳。
+
+两者的**端口/IP 跳跃序列推导算法完全相同**（§5.1），客户端行为一致，差异只在服务端如何归并。
+
 ### 6.3 接入点位置追踪
 
 你要求记录"哪个密钥在哪个接入点最近接入"。实现为 `sessionEntry.LastOperator` + `LastSeen`：
@@ -462,8 +562,11 @@ frame = SessionTag(6) || DstTag(6) || Counter(8) || AEAD密文   ← 见 §7.3
 
 ### 6.5 落点
 
-- `transport/udp/listener.go`：多端口监听 + SessionID 索引 + MAC 校验。
-- `transport/udp/dialer.go`：跳跃 ticker（端口 + server 双维度）。
+- `transport/udp/listener.go`：多端口监听 + SessionTag 索引。
+- `transport/udp/dialer.go`：跳跃 ticker（IP + 端口双维度）。
+- `transport/quic/listener.go`：N 个 `quic.Transport` + 自定义 `ConnectionIDGenerator`（DCID 内嵌 ownerTag）+ DCID 分发层（§5.4.2、§6.2bis）。
+- `transport/quic/dialer.go`：跳跃 ticker；换目的地址时复用同一 QUIC 连接（不重新 Dial）。
+- `cmd/operator/device/quic_router.go`（新增）：非 owner 的 QUIC 包按 DCID 转发给 owner。
 - 客户端配置从 flag 迁到**配置文件**（多 server 多区间无法用扁平 flag 表达）：新增 `--config <path>`。
 
 ---
@@ -615,16 +718,18 @@ lease  list    <vni>
 | G0 共识 | — | — | operator 之间的事，与客户端传输无关；Raft 自身固定用 QUIC |
 | G1 Noise 身份 | ✅ | ✅ | 握手在 `transport.Conn` 之上，与传输无关 |
 | G2 动态 IP | ✅ | ✅ | 同上 |
-| G3 端口跳跃 | ✅ | ❌ **报错** | QUIC 有自身连接迁移与路径验证，叠加会冲突 |
-| G4 多 server | ✅ | ⚠️ **重握手** | QUIC 换 server 需新建连接；会话状态在 Raft 中，故能续租同一 IP，但 TCP 长连接会断 |
+| G3 端口跳跃 | ✅ 查 SessionTag | ✅ 查 DCID（§5.4） | 推导算法相同，归并方式不同 |
+| G4 多 IP 跳跃 | ✅ 任意 operator 本地处理 | ⚠️ 可用但非对称：非 owner 需转发一跳（§6.2bis） | QUIC 连接状态无法跨机复制 |
 | G5 加密 | ✅ 含重放窗口 | ✅ 无重放窗口 | QUIC 已保序去重，仅需 AEAD |
 
-**设计原则**：能力差异必须**显式报错或显式降级**，绝不静默忽略。
+**设计原则**：能力差异必须**显式且可预期**，绝不静默忽略。两种传输都支持完整的 IP+端口跳跃，客户端行为完全一致；差异仅在服务端如何把包归并回会话：
 
-- `--transport quic` + 跳跃参数 → 启动即报错，提示改用 udp。
-- QUIC 下的多 server：客户端仍可切换 server，但走完整重握手路径（新 QUIC 连接 + 新 Noise 握手），**IP 与租约不变**（Raft 保证），仅传输密钥更新。这是"可用"而非"透明"，文档需明示。
+- **UDP**：会话状态（IP/租约/HopSecret）全在 Raft 中，人人都有 → 任意 operator 直接本地处理，**零额外跳数，完全对等**。
+- **QUIC**：连接状态含 TLS 会话密钥、包号空间、拥塞控制、流状态，属于密码学状态机，**不可能复制到全集群**（复制它等于复制密钥）→ 非 owner 收到包时按 DCID 转发给 owner，**+1 跳**。
 
-**为什么不给 QUIC 也做透明跳跃**：QUIC 的连接由其自身的 Connection ID 标识并有路径验证机制，若我们在外层再套一个会话标签并任意更换四元组，会与 QUIC 的迁移逻辑打架（它会认为路径变更需要重新验证，或直接丢弃）。强行绕开等于重写 QUIC 的连接管理。**UDP 传输就是为这个场景准备的**——需要跳跃就用 UDP，需要 QUIC 的可靠有序就接受单端口。
+**选型建议**：追求对等跳跃与极致抗封锁用 UDP；需要可靠有序/拥塞控制/0-RTT 用 QUIC 并接受非 owner 多一跳。
+
+**"谁都可以接入"的正确含义**（贯穿两种传输）：**传输层完全放开**（任意 IP、任意端口都收包，不校验来源四元组），**密码学层绝不放开**（UDP 侧靠 Noise AEAD，QUIC 侧靠 TLS 1.3 AEAD，伪造者无密钥则解密失败即丢弃）。正因为有 AEAD 兜底，传输层才敢放开——认证职责放在它该在的层，而不是靠"记住对方的 IP 和端口"。
 
 ---
 
@@ -663,11 +768,11 @@ G0 共识层 ──┬──► G1 身份绑定 ──► G2 动态 IP（分配�
 | P0 | Raft 骨架：FSM + QUIC Transport + 集群 bootstrap | 3 节点集群启动、选主成功、日志复制一致 |
 | P1 | **Raft 容错测试**（你的明确要求） | leader 主动下线后 < 5s 选出新 leader；网络分区下少数派拒绝写入；分区恢复后状态收敛；滚动重启不丢数据 |
 | P2 | 握手 v2 骨架：`ServerAssign` 补 label 段、`AuthContext` 改造 | 既有测试全绿（noauth 不回归） |
-| P3 | G1 Ed25519 + CID 推导 + 密钥表进 Raft | 冒用 CID 必失败；未授权公钥必失败；错误码一致 |
+| P3 | G1 Noise_IK + X25519 + CID 推导 + 密钥表进 Raft | 冒用 CID 必失败；未授权公钥必失败；错误码一致；重放的 msg1 被时间戳拒绝 |
 | P4 | G2 vnet/网段/池 + 一次握手内分配 | `Pool ⊆ CIDR` 校验生效；并发 100 握手无重复 IP；**跨 operator 重连拿回同一 IP**；池满返回 NoRoute |
 | P5 | G3 SessionID 会话标识（不含跳跃） | 客户端源端口人为变更后会话不中断（同时验证 NAT 重绑定修复） |
-| P6 | G3 端口跳跃（单 server） | 端口按 interval 轮换；跨跳跃点 TCP 长连接不断；时钟偏移 ±1 片仍可连 |
-| P7 | G4 多 server + 配置文件 | 握手于 A，改向 B/C 发包会话不中断；伪造 MAC 的包被丢弃 |
+| P6 | G3 端口跳跃（UDP + QUIC，单 IP） | 两种传输均：端口按 interval 轮换、跨跳跃点 TCP 长连接不断、时钟偏移 ±1 片仍可连；QUIC 侧验证 DCID 归并生效 |
+| P7 | G4 多 IP 跳跃 + 配置文件 | 握手于 A，改向 B/C 发包会话不中断（UDP 本地处理 / QUIC 转发至 owner）；伪造包被 AEAD 丢弃；两种传输都验证 |
 | P8 | 下线与踢人（§8） | 四条路径各自生效且全集群同步：kick 后可重连且保住固定 IP；revoke 后重连必失败；60s 无帧自动下线；**跳到别的 operator 不被误判为掉线** |
 | P9 | G5 数据面加密 | 抓包确认 payload 不可读；篡改一字节必被 AEAD 拒绝；重放旧包被窗口丢弃；rekey 后会话与 IP 不变；**UDP 与 QUIC 两条路径都验证** |
 
@@ -687,6 +792,9 @@ P1 单独成阶段，因为共识层的正确性无法靠"跑通一次"证明—
 | lock 文件与 Raft 不一致 | 运维误读 | 权威副本在 Raft，磁盘文件仅为镜像；重启从快照恢复而非读文件（§4.5） |
 | 加密与标签增加每包开销 | 有效 MTU 下降 36 字节 | SessionTag 6B + DstTag 6B + Counter 8B + tag 16B；`DEFAULT_MTU` 1400→1364（§7.6） |
 | 全区间监听占用 fd | 区间过大时耗尽 | 区间上限硬编码 64 |
+| QUIC 需 N 个 Transport 实例 | 内存开销高于 UDP（各持独立连接表与定时器） | 同样受 64 上限约束；QUIC 场景下建议区间取小 |
+| QUIC 非 owner 转发多一跳 | 时延增加，owner 成为热点 | 客户端优先选 owner；跳到非 owner 是抗封锁手段而非常态（§6.2bis） |
+| QUIC owner 崩溃 | 该连接失效（TLS 状态不可复制） | 客户端重握手，**IP 与租约由 Raft 保住**；UDP 传输无此问题 |
 | `AuthContext` 破坏既有接口 | 三个 authenticator 需改签名 | 改动机械，noauth 路径有测试覆盖 |
 | 引入 hashicorp/raft 依赖 | 依赖体积增加 | 成熟度换正确性，已确认接受 |
 

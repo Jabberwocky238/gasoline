@@ -12,6 +12,7 @@ import (
 	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/assign"
+	"github.com/jabberwocky238/gasoline/protocol/dataframe"
 	"github.com/jabberwocky238/gasoline/protocol/handshake"
 	"github.com/jabberwocky238/gasoline/protocol/noise"
 	"github.com/jabberwocky238/gasoline/transport"
@@ -288,7 +289,7 @@ func (o *Operator) routineAcceptClients(tp string, ln transport.Listener) {
 			continue
 		}
 
-		cp := newPeerClient(acc.Conn, sc)
+		cp := newPeerClient(acc.Conn, sc, acc.Session)
 		vn, err := o.state.addClient(cp)
 		if err != nil {
 			logger.Errorf("attach cid %s sessionindex %d to VNI %s: %v", cp.sc.SessionID, cp.sc.SessionIndex, cp.sc.VNI, err)
@@ -331,7 +332,21 @@ func (o *Operator) routineReadFromClient(cp *PeerClient, vn *vniEntry) {
 			continue
 		}
 
-		if err := vn.forwardFrame(readBuf[:n], cp); err != nil {
+		// Decrypt the data frame using this conn's session (the client handshook
+		// here). Forwarding then works on the plaintext IP packet and re-seals
+		// per destination.
+		_, ctr, ct, err := dataframe.ParseHeader(readBuf[:n])
+		if err != nil {
+			logger.Debugf("parse frame from sessionindex %d: %v", cp.sc.SessionIndex, err)
+			continue
+		}
+		pt, err := dataframe.Open(cp.session, ctr, ct, true)
+		if err != nil {
+			logger.Debugf("open frame from sessionindex %d: %v", cp.sc.SessionIndex, err)
+			continue
+		}
+
+		if err := vn.forwardFrame(pt, cp); err != nil {
 			logger.Debugf("Forward from cid %s sessionindex %d: %v", cp.sc.SessionID, cp.sc.SessionIndex, err)
 		}
 	}

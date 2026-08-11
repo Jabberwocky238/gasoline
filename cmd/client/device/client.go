@@ -19,6 +19,7 @@ import (
 	"github.com/jabberwocky238/gasoline/common"
 	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/assign"
+	"github.com/jabberwocky238/gasoline/protocol/dataframe"
 	"github.com/jabberwocky238/gasoline/protocol/noise"
 	"github.com/jabberwocky238/gasoline/transport"
 	transportQuic "github.com/jabberwocky238/gasoline/transport/quic"
@@ -38,7 +39,8 @@ type Client struct {
 	// non-nil between Start and Close
 	sessionCtx *protocol.SessionContext
 	conn       transport.Conn
-	session    *noise.Session // data-plane keys from the handshake
+	session    *noise.Session      // data-plane keys from the handshake
+	tag        dataframe.SessionTag // cached tag for outbound frames
 	keepalive  *Keepalive
 	tun        *tun.Tun
 
@@ -125,6 +127,7 @@ func (c *Client) dialLocked() (protocol.SessionContext, error) {
 	c.conn = dialed.Conn
 	c.session = dialed.Session
 	c.sessionCtx = sc
+	c.tag = dataframe.TagOf(sc.SessionID)
 	c.lctx.Log().Infof("connected to %s; assigned %s in %s",
 		c.cfg.Endpoint, sc.IP, sc.IPRanges)
 	return sc.Copy(), nil
@@ -167,7 +170,7 @@ func (c *Client) Start() error {
 		c.lctx.Log().Infof("tun %s up at %s", c.cfg.TUNName, hostPfx)
 	}
 
-	c.keepalive = NewKeepalive(c.lctx, conn)
+	c.keepalive = NewKeepalive(c.lctx, conn, c.session, c.tag)
 	c.keepalive.Start()
 
 	go c.rxLoop()
@@ -230,14 +233,25 @@ func (c *Client) rxLoop() {
 		if n == 0 {
 			continue
 		}
+		// Decrypt the data frame: SessionTag||Counter||AEAD -> IP packet.
+		_, ctr, ct, err := dataframe.ParseHeader(buf[:n])
+		if err != nil {
+			logger.Debugf("parse frame: %v", err)
+			continue
+		}
+		pt, err := dataframe.Open(c.session, ctr, ct, true)
+		if err != nil {
+			logger.Debugf("open frame: %v", err)
+			continue
+		}
 		// Drop the operator's keepalive reply (IP version 3).
-		if buf[0]>>4 == 3 {
+		if len(pt) == 0 || pt[0]>>4 == 3 {
 			continue
 		}
 		if c.tun == nil {
 			continue
 		}
-		if _, err := c.tun.Write(buf[:n]); err != nil {
+		if _, err := c.tun.Write(pt); err != nil {
 			logger.Debugf("tun write: %v", err)
 		}
 	}
@@ -264,7 +278,12 @@ func (c *Client) tunReadLoop() {
 		if n == 0 {
 			continue
 		}
-		if err := c.conn.WritePacket(buf[:n]); err != nil {
+		frame, err := dataframe.Seal(c.session, c.tag, buf[:n])
+		if err != nil {
+			logger.Debugf("seal frame: %v", err)
+			continue
+		}
+		if err := c.conn.WritePacket(frame); err != nil {
 			logger.Debugf("conn write: %v", err)
 		}
 	}

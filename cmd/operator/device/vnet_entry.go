@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/jabberwocky238/gasoline/protocol"
+	"github.com/jabberwocky238/gasoline/protocol/dataframe"
 	"github.com/jabberwocky238/gasoline/protocol/message"
 	"github.com/jabberwocky238/gasoline/protocol/noise"
 )
@@ -93,22 +94,22 @@ func (v *vniEntry) Clients() []*PeerClient {
 	return out
 }
 
-// forwardFrame routes one IP packet read from src.
+// forwardFrame routes one DECRYPTED IP packet read from src (PRD §5.4.1: the PE
+// decrypts, then routes on the plaintext dst IP).
 //
-//   - Version 3 (keepalive): reflect a v3 packet back to src and stop.
+//   - Version 3 (keepalive): reflect a sealed v3 packet back to src and stop.
 //   - Version 4/6: LPM dst → RouteTarget.
-//   - RouteTargetClient: O(1) SessionID lookup, write raw IP to that client.
-//   - RouteTargetOperator: wrap as MessageTransport(vni, dst-sessionID, ip)
-//     and ship to the peer's UDP underlay.
+//   - RouteTargetClient: O(1) SessionID lookup, RE-SEAL the IP packet under the
+//     destination's session and write it (each CE↔PE leg has its own keys).
+//   - RouteTargetOperator: ship the plaintext IP packet over the PE↔PE underlay
+//     (underlay is unencrypted by design, PRD §7.5); the target PE re-seals for
+//     its local client.
 //   - Other versions: silently drop.
-//
-// The hot path (Client target) avoids any allocation: the same buffer
-// the read loop owns is forwarded straight to the destination conn.
-func (v *vniEntry) forwardFrame(frame []byte, src *PeerClient) error {
-	if len(frame) < 1 {
+func (v *vniEntry) forwardFrame(pkt []byte, src *PeerClient) error {
+	if len(pkt) < 1 {
 		return nil
 	}
-	version := frame[0] >> 4
+	version := pkt[0] >> 4
 
 	var dst netip.Addr
 	switch version {
@@ -116,20 +117,20 @@ func (v *vniEntry) forwardFrame(frame []byte, src *PeerClient) error {
 		if src == nil || src.closed.Load() {
 			return nil
 		}
-		return src.Conn.WritePacket(buildKeepaliveReply())
+		return writeSealedTo(src, buildKeepaliveReply())
 	case 4:
-		if len(frame) < 20 {
+		if len(pkt) < 20 {
 			return nil
 		}
 		var b [4]byte
-		copy(b[:], frame[16:20])
+		copy(b[:], pkt[16:20])
 		dst = netip.AddrFrom4(b)
 	case 6:
-		if len(frame) < 40 {
+		if len(pkt) < 40 {
 			return nil
 		}
 		var b [16]byte
-		copy(b[:], frame[24:40])
+		copy(b[:], pkt[24:40])
 		dst = netip.AddrFrom16(b)
 	default:
 		return nil
@@ -148,7 +149,7 @@ func (v *vniEntry) forwardFrame(frame []byte, src *PeerClient) error {
 		if cp == nil || cp.closed.Load() || cp == src {
 			return nil
 		}
-		return cp.Conn.WritePacket(frame)
+		return writeSealedTo(cp, pkt)
 
 	case RouteTargetOperator:
 		if v.peers == nil {
@@ -158,10 +159,10 @@ func (v *vniEntry) forwardFrame(frame []byte, src *PeerClient) error {
 		if !ok {
 			return nil
 		}
-		// Wrap and ship. Buffer is rented from the pool, returned on
-		// the way out.
+		// Ship the plaintext IP packet to the target PE over the underlay; it
+		// re-seals for its local client. Buffer rented from the pool.
 		m := message.New()
-		if err := m.Seal(v.vni, target.SessionID, frame); err != nil {
+		if err := m.Seal(v.vni, target.SessionID, pkt); err != nil {
 			m.Release()
 			return err
 		}
@@ -170,6 +171,21 @@ func (v *vniEntry) forwardFrame(frame []byte, src *PeerClient) error {
 		return err
 	}
 	return nil
+}
+
+// writeSealedTo seals plaintext under cp's data-plane session and writes it.
+// cp.session is the session the client handshook with on this PE. A client that
+// hopped in from another PE is served by the shared-socket path (PRD §6.4), not
+// this per-conn write.
+func writeSealedTo(cp *PeerClient, pkt []byte) error {
+	if cp.session == nil {
+		return nil
+	}
+	frame, err := dataframe.Seal(cp.session, dataframe.TagOf(cp.sc.SessionID), pkt)
+	if err != nil {
+		return err
+	}
+	return cp.Conn.WritePacket(frame)
 }
 
 // deliverFromPeer is called when this operator receives a
@@ -212,7 +228,9 @@ func (v *vniEntry) deliverFromPeer(payload []byte) error {
 	if cp == nil || cp.closed.Load() {
 		return nil
 	}
-	return cp.Conn.WritePacket(payload)
+	// payload is a plaintext IP packet off the underlay; re-seal for the local
+	// client under its session.
+	return writeSealedTo(cp, payload)
 }
 
 // buildKeepaliveReply mirrors the client's keepalive shape: a 20-byte

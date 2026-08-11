@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/jabberwocky238/gasoline/common"
+	"github.com/jabberwocky238/gasoline/protocol/dataframe"
+	"github.com/jabberwocky238/gasoline/protocol/noise"
 	"github.com/jabberwocky238/gasoline/transport"
 )
 
@@ -19,7 +21,9 @@ import (
 // Since the operator drops these silently, we expect no reply — the
 // keepalive is fire-and-forget.
 type Keepalive struct {
-	conn transport.Conn
+	conn    transport.Conn
+	session *noise.Session
+	tag     dataframe.SessionTag
 
 	minInterval time.Duration
 	maxInterval time.Duration
@@ -33,9 +37,13 @@ type Keepalive struct {
 
 // NewKeepalive constructs a keepalive loop for conn. Default cadence is 10–15s.
 // parent is the Client's LogContext; a child scope is derived for Stop().
-func NewKeepalive(parent *common.LogContext, conn transport.Conn) *Keepalive {
+// session/tag seal the keepalive as a data frame so the operator can decrypt it
+// like any other packet (the plaintext is a version-3 marker it then drops).
+func NewKeepalive(parent *common.LogContext, conn transport.Conn, session *noise.Session, tag dataframe.SessionTag) *Keepalive {
 	return &Keepalive{
 		conn:        conn,
+		session:     session,
+		tag:         tag,
 		minInterval: 10 * time.Second,
 		maxInterval: 15 * time.Second,
 		lctx:        parent.WithField("component", "keepalive"),
@@ -80,7 +88,11 @@ func buildKeepalivePacket() []byte {
 }
 
 func (k *Keepalive) sendOnce() error {
-	if err := k.conn.WritePacket(buildKeepalivePacket()); err != nil {
+	frame, err := dataframe.Seal(k.session, k.tag, buildKeepalivePacket())
+	if err != nil {
+		return err
+	}
+	if err := k.conn.WritePacket(frame); err != nil {
 		return err
 	}
 	k.mu.Lock()

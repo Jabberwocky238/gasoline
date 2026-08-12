@@ -1,24 +1,19 @@
 // assign.go — the client<->operator CONTROL plane that runs AFTER
-// authentication (package handshake). It assigns an overlay IP and session
-// using a two-phase commit so a claimed-but-unacknowledged address is never
-// leaked:
+// authentication (package handshake). It assigns an overlay IP and session in a
+// SINGLE frame (PRD §2.3, post-2PC): the operator commits the session through
+// Raft — the leader's Apply allocates a free IP deterministically, so there is
+// no pre-selection, no ack, no rollback, no collision-retry — and sends the
+// result to the client in one AEAD-sealed frame.
 //
-//	preclaim : operator reserves a free IP (pending) — after auth, so an
-//	           unauthenticated peer can never touch the pool
-//	claim    : operator sends the reserved IP to the client (ServerClaim)
-//	ack      : client accepts (ClientAck)
-//	confirm  : operator commits the reservation; on ack timeout it rolls back
-//
-// All frames are AEAD-sealed under the authenticated noise.Session, so the
-// control plane inherits the handshake's confidentiality and the client's
-// identity. This package does NOT authenticate — the caller passes a Session
-// that handshake already produced.
+// The frame is sealed under the authenticated noise.Session, so the control
+// plane inherits the handshake's confidentiality and the client's identity.
+// This package does NOT authenticate — the caller passes a Session that
+// handshake already produced.
 package datacom
 
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"net/netip"
@@ -37,11 +32,8 @@ type Conn interface {
 	ReadPacket(buf []byte) (int, error)
 }
 
-// Control frames carry an explicit 8-byte counter prefix so each side can seal
-// with a monotonically increasing nonce. This matters for the collision-retry
-// loop: a rejected claim is re-sent under a fresh counter, never reusing a
-// nonce. The auth key-confirmation used counter 0; the control plane starts at
-// 1 in each direction (independent keys => independent sequences).
+// The single assign frame seals at counter 1 (the auth key-confirmation used
+// counter 0 on the same keys).
 const ctrlBase = 1
 
 // aadAssign domain-separates the assign control plane from auth and data frames.
@@ -56,41 +48,12 @@ const (
 	CodeConflict Code = 0x02 // identity already has a live session (PRD §8)
 )
 
-// frameKind is the first byte of every control payload, letting the client
-// distinguish a (re)claim from the terminal commit.
-type frameKind uint8
-
-const (
-	kindClaim   frameKind = 0x01 // operator -> client: here is a proposed IP
-	kindConfirm frameKind = 0x02 // operator -> client: committed, assignment final
-)
-
-// Reservation is what a successful Preclaim yields: the reserved IP, the VNI's
-// range, and the cluster-unique SessionID minted for this session. IP and
-// SessionID are allocated together (one Raft log entry in the consensus path).
-type Reservation struct {
-	IP        netip.Addr
-	Ranges    netip.Prefix
-	SessionID protocol.SessionID_Ty
-	Keys      DataKeys // data-plane keys to persist at Confirm (PRD §7.2)
-}
-
-// Allocator is the operator-side policy the assign server drives, a two-phase
-// commit backend:
-//
-//   - Preclaim optimistically picks a free IP + mints a SessionID by reading
-//     local state. It does NOT commit — a claimed-but-unacknowledged address
-//     never enters the durable store, so it can't leak.
-//   - Confirm (after the client acks) durably commits the reservation. In the
-//     Raft-backed allocator this proposes SessionCreate; if another node
-//     committed the same IP first, Confirm returns ErrIPConflict and the assign
-//     server retries with a fresh Preclaim.
-//   - Rollback releases an unacknowledged Preclaim (no-op when Preclaim held no
-//     durable state).
+// Allocator is the operator-side backend the assign server drives. Assign
+// commits the session through Raft in one shot and returns the address the
+// leader's Apply allocated (deterministic first-free — no pre-selection). It
+// returns CodeNoRoute when the pool is exhausted or the key is not granted.
 type Allocator interface {
-	Preclaim(vni protocol.VNI_Ty, pubkey noise.PublicKey) (Reservation, Code)
-	Confirm(vni protocol.VNI_Ty, pubkey noise.PublicKey, r Reservation) error
-	Rollback(vni protocol.VNI_Ty, r Reservation)
+	Assign(vni protocol.VNI_Ty, pubkey noise.PublicKey, sessionID protocol.SessionID_Ty, keys DataKeys) (ip netip.Addr, ranges netip.Prefix, code Code)
 }
 
 // DataKeys are the raw directional data-plane transport keys the handshake
@@ -140,16 +103,11 @@ func serverListToContext(list ServerList) []protocol.HopServer {
 	return out
 }
 
-// ErrIPConflict is returned by Confirm when the reserved IP was committed by
-// another node between Preclaim and Confirm. The assign server retries.
-var ErrIPConflict = errors.New("assign: ip conflict, retry")
-
-// maxAllocRetries bounds the optimistic-concurrency retry loop.
-const maxAllocRetries = 3
-
-// ServerAssign runs the operator side of the two-phase assignment over conn,
-// sealing with sess. pubkey/vni come from the completed handshake. On success
-// it returns the committed SessionContext (IP + SessionID).
+// ServerAssign runs the operator side of the single-frame assignment over conn,
+// sealing with sess. pubkey/vni come from the completed handshake. It commits
+// the session (Allocator.Assign → Raft), then sends one result frame carrying
+// the allocated IP / SessionID / hop-server list. On success it returns the
+// SessionContext.
 func ServerAssign(
 	conn Conn,
 	sess *noise.Session,
@@ -160,141 +118,70 @@ func ServerAssign(
 	servers ServerList,
 	alloc Allocator,
 ) (*protocol.SessionContext, error) {
-	sendCtr := uint64(ctrlBase) // operator's monotonic send counter
-	for attempt := 0; attempt < maxAllocRetries; attempt++ {
-		// Preclaim: optimistically pick IP + SessionID (no durable write yet).
-		res, code := alloc.Preclaim(vni, pubkey)
-		res.Keys = keys // carry data-plane keys into Confirm (PRD §7.2)
+	sessionID := protocol.NewSessionID()
+	ip, ranges, code := alloc.Assign(vni, pubkey, sessionID, keys)
 
-		claim := serverClaim{Kind: kindClaim, Code: code, IP: res.IP, Ranges: res.Ranges, SessionID: res.SessionID}
-		if code == CodeOK {
-			claim.SessionIndex = sessionIndex
-		}
-		if err := writeSealed(conn, sess, sendCtr, claim.marshal()); err != nil {
-			if code == CodeOK {
-				alloc.Rollback(vni, res)
-			}
-			return nil, fmt.Errorf("send ServerClaim: %w", err)
-		}
-		sendCtr++
-		if code != CodeOK {
-			return nil, fmt.Errorf("assign rejected: code=%d", code)
-		}
-
-		// Wait for the client to accept.
-		ackBytes, _, err := readSealed(conn, sess)
-		if err != nil {
-			alloc.Rollback(vni, res)
-			return nil, fmt.Errorf("recv ClientAck: %w", err)
-		}
-		var ack clientAck
-		if err := ack.unmarshal(ackBytes); err != nil {
-			alloc.Rollback(vni, res)
-			return nil, fmt.Errorf("parse ClientAck: %w", err)
-		}
-		if !ack.Accepted {
-			alloc.Rollback(vni, res)
-			return nil, fmt.Errorf("client rejected assignment")
-		}
-
-		// Confirm: durably commit. On IP conflict (another node took this
-		// address between Preclaim and Confirm) retry the whole claim/ack with a
-		// fresh pick. On success send a terminal Confirm frame so the client
-		// knows this claim is final (and not a prelude to a retry).
-		err = alloc.Confirm(vni, pubkey, res)
-		if err == nil {
-			done := serverClaim{Kind: kindConfirm, Servers: servers}
-			if werr := writeSealed(conn, sess, sendCtr, done.marshal()); werr != nil {
-				return nil, fmt.Errorf("send Confirm: %w", werr)
-			}
-			return &protocol.SessionContext{
-				SessionID:    res.SessionID,
-				VNI:          vni,
-				SessionIndex: sessionIndex,
-				IP:           res.IP,
-				IPRanges:     res.Ranges,
-			}, nil
-		}
-		alloc.Rollback(vni, res)
-		if !errors.Is(err, ErrIPConflict) {
-			return nil, fmt.Errorf("confirm: %w", err)
-		}
-		// conflict: loop and re-pick (next claim uses the next sendCtr).
+	res := assignResult{Code: code, SessionID: sessionID, SessionIndex: sessionIndex, IP: ip, Ranges: ranges}
+	if code == CodeOK {
+		res.Servers = servers
 	}
-	return nil, fmt.Errorf("assign: exhausted %d allocation retries", maxAllocRetries)
+	if err := writeSealed(conn, sess, ctrlBase, res.marshal()); err != nil {
+		return nil, fmt.Errorf("send assign result: %w", err)
+	}
+	if code != CodeOK {
+		return nil, fmt.Errorf("assign rejected: code=%d", code)
+	}
+	return &protocol.SessionContext{
+		SessionID:    sessionID,
+		VNI:          vni,
+		SessionIndex: sessionIndex,
+		IP:           ip,
+		IPRanges:     ranges,
+	}, nil
 }
 
-// ClientAssign runs the client side: receive a claimed IP + SessionID, accept
-// it, and return the resulting SessionContext. If the operator hit an IP
-// collision it re-claims a fresh address, so the client loops until it gets a
-// claim the operator can commit (bounded by the operator's retry budget).
+// ClientAssign runs the client side: receive the single result frame and return
+// the resulting SessionContext (with its hop-server list).
 func ClientAssign(conn Conn, sess *noise.Session, vni protocol.VNI_Ty) (*protocol.SessionContext, error) {
-	sendCtr := uint64(ctrlBase) // client's monotonic send counter
-	var last serverClaim        // the most recent claim we accepted
-	for attempt := 0; attempt < maxAllocRetries+2; attempt++ {
-		frame, _, err := readSealed(conn, sess)
-		if err != nil {
-			return nil, fmt.Errorf("recv ServerClaim: %w", err)
-		}
-		var claim serverClaim
-		if err := claim.unmarshal(frame); err != nil {
-			return nil, fmt.Errorf("parse ServerClaim: %w", err)
-		}
-
-		switch claim.Kind {
-		case kindConfirm:
-			// Committed. Finalize with the last claim we accepted. The confirm
-			// frame carries the authoritative hop-target list (PRD §5.3 / §6.2).
-			if last.SessionID == (protocol.SessionID_Ty{}) && !last.IP.IsValid() {
-				return nil, fmt.Errorf("assign: confirm before any claim")
-			}
-			sc := &protocol.SessionContext{
-				SessionID:    last.SessionID,
-				VNI:          vni,
-				SessionIndex: last.SessionIndex,
-				IP:           last.IP,
-				IPRanges:     last.Ranges,
-			}
-			sc.SetServers(serverListToContext(claim.Servers))
-			return sc, nil
-
-		case kindClaim:
-			if claim.Code != CodeOK {
-				return nil, fmt.Errorf("assign rejected: code=%d", claim.Code)
-			}
-			last = claim
-			ack := clientAck{Accepted: true}
-			if err := writeSealed(conn, sess, sendCtr, ack.marshal()); err != nil {
-				return nil, fmt.Errorf("send ClientAck: %w", err)
-			}
-			sendCtr++
-
-		default:
-			return nil, fmt.Errorf("assign: unknown frame kind %#x", byte(claim.Kind))
-		}
+	frame, _, err := readSealed(conn, sess)
+	if err != nil {
+		return nil, fmt.Errorf("recv assign result: %w", err)
 	}
-	return nil, fmt.Errorf("assign: exhausted retries")
+	var res assignResult
+	if err := res.unmarshal(frame); err != nil {
+		return nil, fmt.Errorf("parse assign result: %w", err)
+	}
+	if res.Code != CodeOK {
+		return nil, fmt.Errorf("assign rejected: code=%d", res.Code)
+	}
+	sc := &protocol.SessionContext{
+		SessionID:    res.SessionID,
+		VNI:          vni,
+		SessionIndex: res.SessionIndex,
+		IP:           res.IP,
+		IPRanges:     res.Ranges,
+	}
+	sc.SetServers(serverListToContext(res.Servers))
+	return sc, nil
 }
 
-// --------------- frames ---------------
+// --------------- frame ---------------
 
-// serverClaim: kind(1). For kindClaim also: code(1) + sessionID(16) +
-// sessionIndex(4) + ipLen(1) + ip + rangeLen(1) + range + rangeBits(1).
-// kindConfirm carries kind(1) + the marshalled ServerList (hop targets).
-type serverClaim struct {
-	Kind         frameKind
+// assignResult is the single operator -> client frame:
+//
+//	code(1) sessionID(16) sessionIndex(4)
+//	ipLen(1) ip rangeLen(1) range rangeBits(1)
+//	serverList(...)
+type assignResult struct {
 	Code         Code
 	SessionID    protocol.SessionID_Ty
 	SessionIndex uint32
 	IP           netip.Addr
 	Ranges       netip.Prefix
-	Servers      ServerList // populated on kindConfirm only
+	Servers      ServerList
 }
 
-func (c serverClaim) marshal() []byte {
-	if c.Kind == kindConfirm {
-		return append([]byte{byte(kindConfirm)}, marshalServerList(c.Servers)...)
-	}
+func (c assignResult) marshal() []byte {
 	ip := c.IP.AsSlice()
 	rng := c.Ranges.Addr().AsSlice()
 	bits := byte(c.Ranges.Bits())
@@ -302,7 +189,6 @@ func (c serverClaim) marshal() []byte {
 		rng, bits = nil, 0
 	}
 	var b bytes.Buffer
-	b.WriteByte(byte(kindClaim))
 	b.WriteByte(byte(c.Code))
 	b.Write(c.SessionID[:])
 	var idx [4]byte
@@ -313,25 +199,12 @@ func (c serverClaim) marshal() []byte {
 	b.WriteByte(byte(len(rng)))
 	b.Write(rng)
 	b.WriteByte(bits)
+	b.Write(marshalServerList(c.Servers))
 	return b.Bytes()
 }
 
-func (c *serverClaim) unmarshal(b []byte) error {
+func (c *assignResult) unmarshal(b []byte) error {
 	r := bytes.NewReader(b)
-	kind, err := r.ReadByte()
-	if err != nil {
-		return err
-	}
-	c.Kind = frameKind(kind)
-	if c.Kind == kindConfirm {
-		rest, _ := io.ReadAll(r)
-		servers, err := unmarshalServerList(rest)
-		if err != nil {
-			return err
-		}
-		c.Servers = servers
-		return nil
-	}
 	code, err := r.ReadByte()
 	if err != nil {
 		return err
@@ -379,6 +252,12 @@ func (c *serverClaim) unmarshal(b []byte) error {
 	if rngAddr.IsValid() {
 		c.Ranges = netip.PrefixFrom(rngAddr, int(bits))
 	}
+	rest, _ := io.ReadAll(r)
+	servers, err := unmarshalServerList(rest)
+	if err != nil {
+		return err
+	}
+	c.Servers = servers
 	return nil
 }
 
@@ -456,35 +335,16 @@ func unmarshalServerList(b []byte) (ServerList, error) {
 	return list, nil
 }
 
-// clientAck: accepted(1)
-type clientAck struct {
-	Accepted bool
-}
-
-func (a clientAck) marshal() []byte {
-	if a.Accepted {
-		return []byte{1}
-	}
-	return []byte{0}
-}
-
-func (a *clientAck) unmarshal(b []byte) error {
-	if len(b) < 1 {
-		return fmt.Errorf("assign: short ClientAck %d", len(b))
-	}
-	a.Accepted = b[0] == 1
-	return nil
-}
-
 // --------------- sealed framing ---------------
 //
 // Wire: counter(8, big-endian) || AEAD(session, counter, payload). The counter
 // travels in the clear (a nonce needn't be secret) so the peer reconstructs the
-// nonce and the sequence survives retries. The transport delimits frames.
+// nonce. The transport delimits frames.
 
-// maxFrame bounds a control ciphertext read. Control payloads are tiny
-// (< 64 bytes) plus 8-byte counter + 16-byte tag; 512 is generous.
-const maxFrame = 512
+// maxFrame bounds a control ciphertext read. The assign result carries the hop
+// server list, so it can be larger than the old tiny control frames; 8 KiB is
+// generous for a mesh of many operators.
+const maxFrame = 8192
 
 func writeSealed(conn Conn, sess *noise.Session, counter uint64, payload []byte) error {
 	ct, err := sess.SealAt(counter, payload, aadAssign)

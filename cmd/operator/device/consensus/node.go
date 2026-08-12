@@ -58,7 +58,7 @@ type Node struct {
 	fsm       *meshState
 	layer     *quicStreamLayer
 	id        string
-	clientTLS *tls.Config    // reused by forwardToLeader
+	clientTLS *tls.Config    // reused by requestLeader
 	fwd       *forwardServer // accepts forwarded commands when this node is leader
 }
 
@@ -182,16 +182,24 @@ func resolveTLS(server, client *tls.Config) (*tls.Config, *tls.Config, error) {
 
 // --------------- mutation / query API ---------------
 
-// Propose commits a command through Raft. On the leader it applies directly; on
-// a follower it forwards the command to the leader (PRD §2.3), so any operator
-// can serve a handshake — the follower pays one extra hop, the leader none.
-// Blocks until commit or timeout. The FSM's per-command error (e.g. IP
-// collision) is surfaced back either way.
+// Propose commits a command through Raft, discarding the ApplyResult payload.
+// See proposeResult for the shape and forwarding semantics.
 func (n *Node) Propose(cmd *Command, timeout time.Duration) error {
+	_, err := n.proposeResult(cmd, timeout)
+	return err
+}
+
+// proposeResult commits a command through Raft and returns the ApplyResult. On
+// the leader it applies directly; on a follower it forwards to the leader (PRD
+// §2.3) — so any operator can serve a handshake, the follower paying one extra
+// hop, the leader none. Blocks until commit or timeout. The FSM's per-command
+// error is surfaced back either way, and a SessionCreate's allocated IP rides
+// back in the result.
+func (n *Node) proposeResult(cmd *Command, timeout time.Duration) (ApplyResult, error) {
 	if n.raft.State() == raft.Leader {
 		return n.applyLocalLeader(cmd, timeout)
 	}
-	return n.forwardToLeader(cmd, timeout)
+	return n.requestLeader(cmd, timeout)
 }
 
 // State exposes the local FSM replica for reads (no consensus round-trip).
@@ -206,11 +214,12 @@ func (n *Node) PickIP(vni protocol.VNI_Ty, pubkey [32]byte) (netip.Addr, netip.P
 	return n.fsm.PickIP(vni, pubkey)
 }
 
-// CommitSession proposes a SessionCreate through Raft (the durable commit of an
-// IP + SessionID allocation). Returns consensus.ErrIPTaken if the IP was taken
-// by a concurrent commit — the caller retries with a fresh pick.
-func (n *Node) CommitSession(c *SessionCreate, timeout time.Duration) error {
-	return n.Propose(&Command{Kind: CmdSessionCreate, SessionCreate: c}, timeout)
+// CommitSession proposes a SessionCreate and returns the IP the leader's Apply
+// allocated for it (deterministic first-free, no pre-selection or 2PC — PRD
+// §2.3). Returns consensus.ErrNoAddress if the pool is exhausted.
+func (n *Node) CommitSession(c *SessionCreate, timeout time.Duration) (netip.Addr, netip.Prefix, error) {
+	res, err := n.proposeResult(&Command{Kind: CmdSessionCreate, SessionCreate: c}, timeout)
+	return res.IP, res.Ranges, err
 }
 
 // SessionByTag resolves data-plane keys for a 6-byte SessionTag against the

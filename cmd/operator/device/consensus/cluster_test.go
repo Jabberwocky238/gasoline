@@ -99,16 +99,29 @@ func (tc *testCluster) aliveNodes() []*Node {
 	return out
 }
 
-// proposeSession commits one session through the leader.
-func proposeSession(t *testing.T, leader *Node, id byte, ip string) error {
+// proposeSession commits one session through node (leader or follower). The IP
+// is allocated in Apply (deterministic first-free), so it seeds a vnet + pool +
+// key grant for this pubkey first. The pool /24 gives plenty of addresses so
+// concurrent sessions never exhaust it.
+func proposeSession(t *testing.T, node *Node, id byte, _ string) error {
 	t.Helper()
-	return leader.Propose(&Command{
+	p := pub(id)
+	// Seed vnet 200 with a pool (idempotent: version 1 upsert; re-applying with
+	// the same version is a no-op) and grant this key.
+	_ = node.Propose(&Command{Kind: CmdVNetUpsert, VNetUpsert: &VNetUpsert{
+		VNI: 200, Version: 1,
+		Segments: []Segment{{
+			CIDR: netip.MustParsePrefix("10.0.1.0/24"),
+			Pool: netip.MustParsePrefix("10.0.1.0/24"),
+		}},
+	}}, 2*time.Second)
+	_ = node.Propose(&Command{Kind: CmdKeyGrant, KeyGrant: &KeyGrant{VNI: 200, PubKey: p}}, 2*time.Second)
+	return node.Propose(&Command{
 		Kind: CmdSessionCreate,
 		SessionCreate: &SessionCreate{
 			SessionID: sid(id),
-			PubKey:    pub(id),
+			PubKey:    p,
 			VNI:       200,
-			IP:        netip.MustParseAddr(ip),
 			LeaseTTL:  time.Hour,
 			Now:       time.Now().UnixNano(),
 		},

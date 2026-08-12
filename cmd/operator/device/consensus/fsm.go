@@ -69,11 +69,15 @@ func NewMeshState() *meshState {
 
 // --------------- raft.FSM ---------------
 
-// ApplyResult is returned through raft.ApplyFuture.Response(). A nil Err
-// means success; callers (e.g. handshake) inspect it to know whether the
-// IP pre-selection collided.
+// ApplyResult is returned through raft.ApplyFuture.Response() on the LEADER
+// (followers' Apply return values are discarded by raft). A nil Err means
+// success. For a SessionCreate, IP/Ranges carry the address the leader's Apply
+// deterministically allocated — the proposer learns its client's IP from here,
+// there is no pre-selection (PRD §2.3, post-2PC).
 type ApplyResult struct {
-	Err error
+	Err    error
+	IP     netip.Addr
+	Ranges netip.Prefix
 }
 
 // Apply runs one committed log entry against the state. It must be
@@ -86,6 +90,12 @@ func (m *meshState) Apply(l *raft.Log) interface{} {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// SessionCreate allocates the IP inside Apply (deterministic first-free), so
+	// its result carries the address back to the leader's proposer.
+	if cmd.Kind == CmdSessionCreate {
+		ip, ranges, err := m.applySessionCreate(cmd.SessionCreate)
+		return ApplyResult{Err: err, IP: ip, Ranges: ranges}
+	}
 	return ApplyResult{Err: m.applyLocked(cmd)}
 }
 
@@ -107,7 +117,8 @@ func (m *meshState) applyLocked(cmd *Command) error {
 	case CmdKeyRevoke:
 		return m.applyKeyRevoke(cmd.KeyRevoke)
 	case CmdSessionCreate:
-		return m.applySessionCreate(cmd.SessionCreate)
+		_, _, err := m.applySessionCreate(cmd.SessionCreate)
+		return err
 	case CmdSessionRenew:
 		return m.applySessionRenew(cmd.SessionRenew)
 	case CmdSessionMigrate:
@@ -189,22 +200,25 @@ func (m *meshState) applyKeyRevoke(c *KeyRevoke) error {
 	return nil
 }
 
-// ErrIPTaken is returned by an apply that would double-assign an IP. The assign
-// server maps it to a retry (optimistic concurrency, PRD §2.3).
-var ErrIPTaken = errors.New("consensus: ip already assigned")
+// ErrNoAddress is returned when Apply cannot allocate an IP for a session
+// (pool exhausted, or the key is not granted / not allowed a segment).
+var ErrNoAddress = errors.New("consensus: no address available")
 
-func (m *meshState) applySessionCreate(c *SessionCreate) error {
-	// IP-collision check: the pre-selected IP must be free (PRD §2.3).
-	for _, s := range m.Sessions {
-		if s.VNI == c.VNI && s.IP == c.IP {
-			return ErrIPTaken
-		}
+// applySessionCreate allocates a free IP deterministically INSIDE Apply and
+// creates the session (PRD §2.3, post-2PC). Because every node applies the same
+// committed log against the same FSM state with the same first-free scan, they
+// all pick the same IP — no cross-operator collision, no pre-selection, no
+// retry. Returns the chosen IP + its segment range (for the leader's proposer).
+func (m *meshState) applySessionCreate(c *SessionCreate) (netip.Addr, netip.Prefix, error) {
+	ip, ranges, ok := m.pickFreeIPLocked(c.VNI, c.PubKey)
+	if !ok {
+		return netip.Addr{}, netip.Prefix{}, ErrNoAddress
 	}
 	e := &sessionEntry{
 		SessionID:    c.SessionID,
 		PubKey:       c.PubKey,
 		VNI:          c.VNI,
-		IP:           c.IP,
+		IP:           ip,
 		C2SKey:       c.C2SKey,
 		S2CKey:       c.S2CKey,
 		LastOperator: c.Operator,
@@ -213,7 +227,7 @@ func (m *meshState) applySessionCreate(c *SessionCreate) error {
 	}
 	m.Sessions[c.SessionID] = e
 	m.pubKeyToSession[c.PubKey] = c.SessionID
-	return nil
+	return ip, ranges, nil
 }
 
 func (m *meshState) applySessionRenew(c *SessionRenew) error {
@@ -253,11 +267,14 @@ func (m *meshState) applySessionDrop(c *SessionDrop) error {
 }
 
 func (m *meshState) applySessionReplace(c *SessionReplace) error {
-	// Atomic: remove any existing session for this pubkey, then create.
+	// Atomic: remove any existing session for this pubkey, then create. Removing
+	// first frees the old IP, so a non-pinned key deterministically re-picks the
+	// same first-free address; a pinned key always keeps its StaticIP.
 	if sid, ok := m.pubKeyToSession[c.New.PubKey]; ok {
 		m.removeSessionLocked(sid)
 	}
-	return m.applySessionCreate(&c.New)
+	_, _, err := m.applySessionCreate(&c.New)
+	return err
 }
 
 // removeSessionLocked deletes a session and its reverse-index entry.
@@ -491,7 +508,14 @@ func (m *meshState) VNetVersion(vni protocol.VNI_Ty) (uint64, bool) {
 func (m *meshState) PickIP(vni protocol.VNI_Ty, pub [32]byte) (ip netip.Addr, ranges netip.Prefix, ok bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	return m.pickFreeIPLocked(vni, pub)
+}
 
+// pickFreeIPLocked resolves an address for pub on vni against the current state
+// (caller holds the lock). Priority: pinned StaticIP, else the first free pool
+// address in an allowed segment. Deterministic — the same state yields the same
+// pick, which is what lets Apply allocate without cross-node divergence.
+func (m *meshState) pickFreeIPLocked(vni protocol.VNI_Ty, pub [32]byte) (netip.Addr, netip.Prefix, bool) {
 	vn, exists := m.VNets[vni]
 	if !exists {
 		return netip.Addr{}, netip.Prefix{}, false

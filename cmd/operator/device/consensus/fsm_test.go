@@ -37,6 +37,37 @@ func pub(b byte) [32]byte {
 	return p
 }
 
+// seedVNet installs vnet 200 with a pool and grants the given pubkeys, so
+// SessionCreate can allocate an address in Apply.
+func seedVNet(t *testing.T, m *meshState, pubs ...byte) {
+	t.Helper()
+	if err := applyCmd(t, m, &Command{Kind: CmdVNetUpsert, VNetUpsert: &VNetUpsert{
+		VNI: 200, Version: 1,
+		Segments: []Segment{{
+			CIDR: netip.MustParsePrefix("10.0.1.0/24"),
+			Pool: netip.MustParsePrefix("10.0.1.16/28"),
+		}},
+	}}); err != nil {
+		t.Fatalf("seed vnet: %v", err)
+	}
+	for _, b := range pubs {
+		if err := applyCmd(t, m, &Command{Kind: CmdKeyGrant, KeyGrant: &KeyGrant{VNI: 200, PubKey: pub(b)}}); err != nil {
+			t.Fatalf("grant key %d: %v", b, err)
+		}
+	}
+}
+
+// applyCreate runs a SessionCreate and returns the allocated IP + error.
+func applyCreate(t *testing.T, m *meshState, c *SessionCreate) (netip.Addr, error) {
+	t.Helper()
+	data, err := (&Command{Kind: CmdSessionCreate, SessionCreate: c}).Encode()
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	ar := m.Apply(&raft.Log{Data: data}).(ApplyResult)
+	return ar.IP, ar.Err
+}
+
 func TestVNetUpsertEnforcesPoolWithinCIDR(t *testing.T) {
 	m := NewMeshState()
 
@@ -71,49 +102,74 @@ func TestVNetUpsertEnforcesPoolWithinCIDR(t *testing.T) {
 	}
 }
 
-func TestSessionCreateRejectsDuplicateIP(t *testing.T) {
+// TestSessionCreateAssignsDistinctIPs verifies the post-2PC invariant: Apply
+// allocates a free IP deterministically, so two sessions never share one — by
+// construction, without any pre-selection or collision check.
+func TestSessionCreateAssignsDistinctIPs(t *testing.T) {
 	m := NewMeshState()
+	seedVNet(t, m, 1, 2)
 	now := time.Now().UnixNano()
-	base := SessionCreate{
-		VNI:      200,
-		IP:       netip.MustParseAddr("10.0.1.17"),
-		LeaseTTL: time.Hour,
-		Now:      now,
-	}
 
-	a := base
-	a.SessionID, a.PubKey = sid(1), pub(1)
-	if err := applyCmd(t, m, &Command{Kind: CmdSessionCreate, SessionCreate: &a}); err != nil {
-		t.Fatalf("first create: %v", err)
+	ipA, err := applyCreate(t, m, &SessionCreate{SessionID: sid(1), PubKey: pub(1), VNI: 200, LeaseTTL: time.Hour, Now: now})
+	if err != nil {
+		t.Fatalf("create A: %v", err)
 	}
+	ipB, err := applyCreate(t, m, &SessionCreate{SessionID: sid(2), PubKey: pub(2), VNI: 200, LeaseTTL: time.Hour, Now: now})
+	if err != nil {
+		t.Fatalf("create B: %v", err)
+	}
+	if !ipA.IsValid() || !ipB.IsValid() {
+		t.Fatalf("invalid IPs: A=%s B=%s", ipA, ipB)
+	}
+	if ipA == ipB {
+		t.Fatalf("two sessions got the same IP %s", ipA)
+	}
+	if m.SessionCount() != 2 {
+		t.Fatalf("session count = %d, want 2", m.SessionCount())
+	}
+}
 
-	// Same IP, different session — must collide.
-	b := base
-	b.SessionID, b.PubKey = sid(2), pub(2)
-	if err := applyCmd(t, m, &Command{Kind: CmdSessionCreate, SessionCreate: &b}); err == nil {
-		t.Fatal("expected duplicate-IP rejection, got nil")
+// TestSessionCreatePoolExhausted verifies ErrNoAddress when the pool has no
+// free address left.
+func TestSessionCreatePoolExhausted(t *testing.T) {
+	m := NewMeshState()
+	// Tiny pool: 10.0.1.16/30 = .16-.19, .16 is the network addr → 3 usable.
+	if err := applyCmd(t, m, &Command{Kind: CmdVNetUpsert, VNetUpsert: &VNetUpsert{
+		VNI: 200, Version: 1,
+		Segments: []Segment{{
+			CIDR:     netip.MustParsePrefix("10.0.1.0/24"),
+			Pool:     netip.MustParsePrefix("10.0.1.16/30"),
+			Reserved: []netip.Addr{netip.MustParseAddr("10.0.1.16")},
+		}},
+	}}); err != nil {
+		t.Fatalf("seed: %v", err)
 	}
-	if m.SessionCount() != 1 {
-		t.Fatalf("session count = %d, want 1", m.SessionCount())
+	// /30 = .16-.19; .16 reserved → .17, .18, .19 usable (3 free).
+	now := time.Now().UnixNano()
+	for i := byte(1); i <= 4; i++ {
+		applyCmd(t, m, &Command{Kind: CmdKeyGrant, KeyGrant: &KeyGrant{VNI: 200, PubKey: pub(i)}})
+		_, err := applyCreate(t, m, &SessionCreate{SessionID: sid(i), PubKey: pub(i), VNI: 200, LeaseTTL: time.Hour, Now: now})
+		if i <= 3 && err != nil {
+			t.Fatalf("create %d unexpectedly failed: %v", i, err)
+		}
+		if i == 4 && err == nil { // 4th exhausts the 3-address pool
+			t.Fatal("expected ErrNoAddress on exhausted pool, got nil")
+		}
 	}
 }
 
 func TestSessionReplaceKeepsOneSessionPerPubKey(t *testing.T) {
 	m := NewMeshState()
+	seedVNet(t, m, 9)
 	now := time.Now().UnixNano()
 
-	first := SessionCreate{
-		SessionID: sid(1), PubKey: pub(9), VNI: 200,
-		IP: netip.MustParseAddr("10.0.1.17"), LeaseTTL: time.Hour, Now: now,
-	}
-	if err := applyCmd(t, m, &Command{Kind: CmdSessionCreate, SessionCreate: &first}); err != nil {
+	if _, err := applyCreate(t, m, &SessionCreate{SessionID: sid(1), PubKey: pub(9), VNI: 200, LeaseTTL: time.Hour, Now: now}); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
-	// Replace with a new session for the same pubkey at a different IP.
+	// Replace with a new session for the same pubkey (IP allocated in Apply).
 	repl := SessionReplace{New: SessionCreate{
-		SessionID: sid(2), PubKey: pub(9), VNI: 200,
-		IP: netip.MustParseAddr("10.0.1.18"), LeaseTTL: time.Hour, Now: now,
+		SessionID: sid(2), PubKey: pub(9), VNI: 200, LeaseTTL: time.Hour, Now: now,
 	}}
 	if err := applyCmd(t, m, &Command{Kind: CmdSessionReplace, SessionReplace: &repl}); err != nil {
 		t.Fatalf("replace: %v", err)
@@ -152,7 +208,7 @@ func TestKeyRevokeCascadesSessionDrop(t *testing.T) {
 	}
 	create := SessionCreate{
 		SessionID: sid(1), PubKey: pub(5), VNI: 200,
-		IP: netip.MustParseAddr("10.0.1.17"), LeaseTTL: time.Hour, Now: now,
+		LeaseTTL: time.Hour, Now: now,
 	}
 	if err := applyCmd(t, m, &Command{Kind: CmdSessionCreate, SessionCreate: &create}); err != nil {
 		t.Fatalf("create: %v", err)
@@ -174,16 +230,15 @@ func TestKeyRevokeCascadesSessionDrop(t *testing.T) {
 
 func TestBatchAppliesAllSubCommands(t *testing.T) {
 	m := NewMeshState()
+	seedVNet(t, m, 1, 2)
 	now := time.Now().UnixNano()
 
 	batch := []Command{
 		{Kind: CmdSessionCreate, SessionCreate: &SessionCreate{
-			SessionID: sid(1), PubKey: pub(1), VNI: 200,
-			IP: netip.MustParseAddr("10.0.1.17"), LeaseTTL: time.Hour, Now: now,
+			SessionID: sid(1), PubKey: pub(1), VNI: 200, LeaseTTL: time.Hour, Now: now,
 		}},
 		{Kind: CmdSessionCreate, SessionCreate: &SessionCreate{
-			SessionID: sid(2), PubKey: pub(2), VNI: 200,
-			IP: netip.MustParseAddr("10.0.1.18"), LeaseTTL: time.Hour, Now: now,
+			SessionID: sid(2), PubKey: pub(2), VNI: 200, LeaseTTL: time.Hour, Now: now,
 		}},
 	}
 	if err := applyCmd(t, m, &Command{Kind: CmdBatch, Batch: batch}); err != nil {
@@ -196,10 +251,10 @@ func TestBatchAppliesAllSubCommands(t *testing.T) {
 
 func TestSnapshotRestoreRoundTrip(t *testing.T) {
 	m := NewMeshState()
+	seedVNet(t, m, 7)
 	now := time.Now().UnixNano()
 	create := SessionCreate{
-		SessionID: sid(7), PubKey: pub(7), VNI: 200,
-		IP: netip.MustParseAddr("10.0.1.17"), LeaseTTL: time.Hour, Now: now,
+		SessionID: sid(7), PubKey: pub(7), VNI: 200, LeaseTTL: time.Hour, Now: now,
 	}
 	if err := applyCmd(t, m, &Command{Kind: CmdSessionCreate, SessionCreate: &create}); err != nil {
 		t.Fatalf("create: %v", err)

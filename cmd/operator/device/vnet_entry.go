@@ -22,7 +22,7 @@ type vniEntry struct {
 	authorizedKeys map[noise.PublicKey]struct{}
 
 	// presetIP pins a pubkey to a fixed IP (PRD §4.5). Consulted by the
-	// allocator's Preclaim.
+	// pre-Raft localAllocator.Assign.
 	presetIP map[noise.PublicKey]netip.Prefix
 
 	clients            map[uint32]*PeerClient                // keyed by SessionIndex

@@ -91,11 +91,12 @@ type KeyRevoke struct {
 }
 
 // SessionCreate is the single Raft write a handshake performs (PRD §2.3).
+// It carries NO IP: the leader's Apply allocates the address deterministically
+// (first-free) and returns it via ApplyResult — no pre-selection, no 2PC.
 type SessionCreate struct {
 	SessionID protocol.SessionID_Ty
 	PubKey    [32]byte
 	VNI       protocol.VNI_Ty
-	IP        netip.Addr // pre-selected by the admitting operator
 	// C2SKey/S2CKey are the Noise-derived data-plane transport keys (PRD §7.2).
 	// They enter Raft so any PE a client hops to can decrypt its frames — the
 	// prerequisite for multi-server hopping (G4). C2SKey decrypts client->PE

@@ -1,12 +1,15 @@
 package consensus
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/binary"
+	"encoding/gob"
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"strconv"
 	"time"
 
@@ -76,21 +79,47 @@ func (fs *forwardServer) serveConn(conn *quic.Conn) {
 }
 
 // serveStream reads one length-prefixed Command, applies it locally (this node
-// is the leader), and writes back a length-prefixed error string ("" = ok).
+// is the leader), and writes back a length-prefixed forwardReply carrying any
+// error plus the allocated IP (for a SessionCreate).
 func (fs *forwardServer) serveStream(stream *quic.Stream) {
 	defer stream.Close()
 	data, err := readFrame(stream)
 	if err != nil {
 		return
 	}
-	cmd, err := DecodeCommand(data)
-	var replyErr string
-	if err != nil {
-		replyErr = err.Error()
-	} else if applyErr := fs.node.applyLocalLeader(cmd, 5*time.Second); applyErr != nil {
-		replyErr = applyErr.Error()
+	var reply forwardReply
+	cmd, derr := DecodeCommand(data)
+	if derr != nil {
+		reply.ErrStr = derr.Error()
+	} else {
+		res, applyErr := fs.node.applyLocalLeader(cmd, 5*time.Second)
+		if applyErr != nil {
+			reply.ErrStr = applyErr.Error()
+		}
+		reply.IP = res.IP
+		reply.Ranges = res.Ranges
 	}
-	_ = writeFrame(stream, []byte(replyErr))
+	_ = writeFrame(stream, reply.encode())
+}
+
+// forwardReply is the leader's response to a forwarded command: an error string
+// ("" = ok) plus the allocated IP/Ranges (zero when not a SessionCreate).
+type forwardReply struct {
+	ErrStr string
+	IP     netip.Addr
+	Ranges netip.Prefix
+}
+
+func (r forwardReply) encode() []byte {
+	var buf bytes.Buffer
+	_ = gob.NewEncoder(&buf).Encode(r)
+	return buf.Bytes()
+}
+
+func decodeForwardReply(b []byte) (forwardReply, error) {
+	var r forwardReply
+	err := gob.NewDecoder(bytes.NewReader(b)).Decode(&r)
+	return r, err
 }
 
 func (fs *forwardServer) close() {
@@ -99,38 +128,38 @@ func (fs *forwardServer) close() {
 	}
 }
 
-// applyLocalLeader applies a command directly through Raft on the leader. It is
-// the non-forwarding half of Propose, called both by a leader's own Propose and
-// by the forward server on behalf of a follower.
-func (n *Node) applyLocalLeader(cmd *Command, timeout time.Duration) error {
+// applyLocalLeader applies a command directly through Raft on the leader and
+// returns the ApplyResult (carrying any allocated IP for a SessionCreate). It
+// is the non-forwarding half of Propose, called both by a leader's own Propose
+// and by the forward server on behalf of a follower.
+func (n *Node) applyLocalLeader(cmd *Command, timeout time.Duration) (ApplyResult, error) {
 	data, err := cmd.Encode()
 	if err != nil {
-		return err
+		return ApplyResult{}, err
 	}
 	f := n.raft.Apply(data, timeout)
 	if err := f.Error(); err != nil {
-		return err
+		return ApplyResult{}, err
 	}
-	if res, ok := f.Response().(ApplyResult); ok {
-		return res.Err
-	}
-	return nil
+	res, _ := f.Response().(ApplyResult)
+	return res, res.Err
 }
 
-// forwardToLeader dials the current leader's forward listener and submits cmd,
-// returning the leader's apply result. Used by Propose on a follower.
-func (n *Node) forwardToLeader(cmd *Command, timeout time.Duration) error {
+// requestLeader dials the current leader's forward listener and submits cmd,
+// returning the leader's ApplyResult (incl. any allocated IP). Used by Propose
+// on a follower.
+func (n *Node) requestLeader(cmd *Command, timeout time.Duration) (ApplyResult, error) {
 	raftAddr, _ := n.raft.LeaderWithID()
 	if raftAddr == "" {
-		return raft.ErrLeader // no known leader yet; caller retries
+		return ApplyResult{}, raft.ErrLeader // no known leader yet; caller retries
 	}
 	fwdAddr, err := forwardAddr(string(raftAddr))
 	if err != nil {
-		return err
+		return ApplyResult{}, err
 	}
 	data, err := cmd.Encode()
 	if err != nil {
-		return err
+		return ApplyResult{}, err
 	}
 
 	tc := n.clientTLS.Clone()
@@ -139,25 +168,31 @@ func (n *Node) forwardToLeader(cmd *Command, timeout time.Duration) error {
 	defer cancel()
 	conn, err := quic.DialAddr(ctx, fwdAddr, tc, nil)
 	if err != nil {
-		return fmt.Errorf("consensus: dial leader %q: %w", fwdAddr, err)
+		return ApplyResult{}, fmt.Errorf("consensus: dial leader %q: %w", fwdAddr, err)
 	}
 	defer conn.CloseWithError(0, "")
 	stream, err := conn.OpenStreamSync(ctx)
 	if err != nil {
-		return err
+		return ApplyResult{}, err
 	}
 	defer stream.Close()
 	if err := writeFrame(stream, data); err != nil {
-		return err
+		return ApplyResult{}, err
 	}
-	replyErr, err := readFrame(stream)
+	raw, err := readFrame(stream)
 	if err != nil {
-		return err
+		return ApplyResult{}, err
 	}
-	if len(replyErr) > 0 {
-		return fmt.Errorf("%s", string(replyErr))
+	reply, err := decodeForwardReply(raw)
+	if err != nil {
+		return ApplyResult{}, err
 	}
-	return nil
+	res := ApplyResult{IP: reply.IP, Ranges: reply.Ranges}
+	if reply.ErrStr != "" {
+		res.Err = fmt.Errorf("%s", reply.ErrStr)
+		return res, res.Err
+	}
+	return res, nil
 }
 
 // forwardAddr maps a Raft bind/leader address to its forward listener address:

@@ -351,7 +351,14 @@ func (n *Node) proposeResult(cmd *Command, timeout time.Duration) (ApplyResult, 
 	if err != nil {
 		return ApplyResult{}, err
 	}
-	reqID := n.reqSeq.Add(1)
+	// reqID must be GLOBALLY unique: every node applies every committed entry,
+	// so two nodes proposing concurrently must not mint the same reqID (or a
+	// node would signal the wrong waiter with the wrong entry's result — the IP
+	// duplication bug). Partition the space by node: high 32 bits = a hash of
+	// the node id (its own id's bits are in the HIGH end, so we fold them down),
+	// low 32 bits = per-node sequence.
+	nodeTag := (n.id ^ (n.id >> 32)) & 0xffffffff
+	reqID := (nodeTag << 32) | (n.reqSeq.Add(1) & 0xffffffff)
 	ch := make(chan ApplyResult, 1)
 	n.waiters.Store(reqID, ch)
 	defer n.waiters.Delete(reqID)

@@ -54,10 +54,12 @@ type Config struct {
 // Node wraps a raft.Raft plus its FSM and transport, exposing the operator's
 // view of the mesh state and a Propose path for mutations.
 type Node struct {
-	raft  *raft.Raft
-	fsm   *meshState
-	layer *quicStreamLayer
-	id    string
+	raft      *raft.Raft
+	fsm       *meshState
+	layer     *quicStreamLayer
+	id        string
+	clientTLS *tls.Config    // reused by forwardToLeader
+	fwd       *forwardServer // accepts forwarded commands when this node is leader
 }
 
 // NewNode constructs and starts a consensus node. It binds the QUIC transport,
@@ -133,7 +135,18 @@ func NewNode(cfg Config) (*Node, error) {
 		}
 	}
 
-	return &Node{raft: r, fsm: fsm, layer: layer, id: cfg.LocalID}, nil
+	node := &Node{raft: r, fsm: fsm, layer: layer, id: cfg.LocalID, clientTLS: clientTLS}
+
+	// Forward listener: lets a follower ship commands here to be committed when
+	// this node is the leader (PRD §2.3). Bound at the Raft port + offset.
+	fwd, err := startForwardServer(node, cfg.BindAddr, serverTLS)
+	if err != nil {
+		_ = r.Shutdown().Error()
+		_ = layer.Close()
+		return nil, err
+	}
+	node.fwd = fwd
+	return node, nil
 }
 
 // applyTiming copies non-zero timing overrides onto the raft config.
@@ -169,23 +182,16 @@ func resolveTLS(server, client *tls.Config) (*tls.Config, *tls.Config, error) {
 
 // --------------- mutation / query API ---------------
 
-// Propose applies a command through Raft. On a follower it is forwarded to the
-// leader by the caller (this returns ErrNotLeader). Blocks until the command
-// commits or times out. The FSM's per-command error (e.g. IP collision) is
-// surfaced via the ApplyResult.
+// Propose commits a command through Raft. On the leader it applies directly; on
+// a follower it forwards the command to the leader (PRD §2.3), so any operator
+// can serve a handshake — the follower pays one extra hop, the leader none.
+// Blocks until commit or timeout. The FSM's per-command error (e.g. IP
+// collision) is surfaced back either way.
 func (n *Node) Propose(cmd *Command, timeout time.Duration) error {
-	data, err := cmd.Encode()
-	if err != nil {
-		return err
+	if n.raft.State() == raft.Leader {
+		return n.applyLocalLeader(cmd, timeout)
 	}
-	f := n.raft.Apply(data, timeout)
-	if err := f.Error(); err != nil {
-		return err
-	}
-	if res, ok := f.Response().(ApplyResult); ok {
-		return res.Err
-	}
-	return nil
+	return n.forwardToLeader(cmd, timeout)
 }
 
 // State exposes the local FSM replica for reads (no consensus round-trip).
@@ -272,6 +278,7 @@ func (n *Node) Barrier(timeout time.Duration) error {
 // Shutdown stops Raft and closes the transport.
 func (n *Node) Shutdown() error {
 	err := n.raft.Shutdown().Error()
+	n.fwd.close()
 	_ = n.layer.Close()
 	return err
 }

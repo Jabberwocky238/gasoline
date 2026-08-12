@@ -169,7 +169,11 @@ func TestP0_LogReplicatesToAllNodes(t *testing.T) {
 	waitReplicated(t, tc.nodes, 1, 3*time.Second)
 }
 
-func TestP0_FollowerProposeIsRejected(t *testing.T) {
+// TestP0_FollowerProposeForwardsToLeader verifies the follower->leader forward
+// path (PRD §2.3): a Propose issued on a follower is shipped to the leader,
+// committed, and replicated back to every node — so any operator can serve a
+// handshake, not just the leader.
+func TestP0_FollowerProposeForwardsToLeader(t *testing.T) {
 	tc := newTestCluster(t, 3)
 	tc.waitLeader(5 * time.Second)
 
@@ -183,9 +187,10 @@ func TestP0_FollowerProposeIsRejected(t *testing.T) {
 	if follower == nil {
 		t.Fatal("no follower")
 	}
-	// A follower cannot apply; the caller is expected to forward to leader.
-	err := proposeSession(t, follower, 2, "10.0.1.18")
-	if err == nil {
-		t.Fatal("follower Propose succeeded, want ErrNotLeader")
+	// Proposing on the follower must succeed via forwarding, and the committed
+	// session must replicate to all nodes.
+	if err := proposeSession(t, follower, 2, "10.0.1.18"); err != nil {
+		t.Fatalf("follower Propose (forwarded) failed: %v", err)
 	}
+	waitReplicated(t, tc.nodes, 1, 3*time.Second)
 }

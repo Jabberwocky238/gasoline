@@ -26,6 +26,7 @@ func main() {
 	}
 	collect(ParamOpListen, "VXLAN UDP data-plane bind address (default 0.0.0.0:6677)")
 	collect(ParamLogLevel, "log level: trace, debug, info, warn, error (default info)")
+	collect(ParamUUID, "operator UUID (32 hex chars); random if unset. Also the Raft LocalID")
 	collect(ParamKey, "operator static private key, base64 (generated if unset)")
 	collect(ParamListen, "client listener '<schema>://<addr>' (repeatable; default quic://:8443)")
 	collect(ParamRoot, "config dir: one YAML per vnet, fsnotify-watched (PRD §4.4)")

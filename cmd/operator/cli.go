@@ -26,7 +26,8 @@ import (
 const (
 	ParamOpListen      = "op-listen"
 	ParamLogLevel      = "log-level"
-	ParamKey           = "key" // operator static private key (base64); generated if empty
+	ParamUUID          = "uuid" // operator UUID (32 hex chars); random if empty. Also the Raft LocalID.
+	ParamKey           = "key"  // operator static private key (base64); generated if empty
 	ParamListen        = "listen"
 	ParamRoot          = "root"         // config dir: one YAML per vnet, fsnotify-watched (PRD §4.4)
 	ParamHopEndpoint   = "hop-endpoint" // advertisable hop target 'uuid@host:lo-hi[,lo-hi]' (repeatable)
@@ -42,7 +43,7 @@ const (
 func RegisterOperatorCLIParam(params map[string][]string) (*operator.StaticOperatorConfig, error) {
 	for k := range params {
 		switch k {
-		case ParamOpListen, ParamLogLevel, ParamKey, ParamListen, ParamRoot, ParamHopEndpoint,
+		case ParamOpListen, ParamLogLevel, ParamUUID, ParamKey, ParamListen, ParamRoot, ParamHopEndpoint,
 			ParamRaftBind, ParamRaftPeers, ParamRaftBootstrap:
 		default:
 			return nil, fmt.Errorf("unknown parameter %q", k)
@@ -75,6 +76,16 @@ func RegisterOperatorCLIParam(params map[string][]string) (*operator.StaticOpera
 	cfg := &operator.StaticOperatorConfig{
 		StaticPriv: staticPriv,
 		RootDir:    strings.TrimSpace(lastOr(params[ParamRoot], "")),
+	}
+
+	if s := strings.TrimSpace(lastOr(params[ParamUUID], "")); s != "" {
+		b, err := hex.DecodeString(s)
+		if err != nil || len(b) != 16 {
+			return nil, fmt.Errorf("uuid: must be 32 hex chars, got %q", s)
+		}
+		var u [16]byte
+		copy(u[:], b)
+		cfg.UUID = &u
 	}
 
 	for _, raw := range listens {

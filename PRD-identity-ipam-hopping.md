@@ -282,13 +282,29 @@ VNI 200  (一个虚拟网络组)
 - 过期回收由 leader 侧定时任务批量提交 `SessionExpire`，复用既有 `routineReaper` 节奏（30s）。
 - `DataCtrlPrefixChanged`（`message-datactrl.go:53`，已实现编解码但从未有人发送）本次启用：IP 变更时主动下发，客户端重配 TUN。
 
-### 4.4 配置形态：一个 vnet 一个文件
+### 4.4 配置形态：一个 vnet 一个文件，`--root` 目录 + fsnotify
 
-vnet 定义以文件为单位，作为**集群的种子数据**：
+**订正（2026-08-12）：Raft + 文件内 `version` 字段，简单可控。** operator 用 `--root <dir>` 指向一个配置目录，**一个 YAML = 一个 vnet**，含该 vnet 所需的一切（segments/pool/reserved/密钥授权），外加一个单调递增的 `version` 字段。
+
+**同步模型（version 定序）**：
+
+- 每个 vnet YAML 顶部写一行 `version: N`（单调递增，改配置时递增，由人/工具维护）。
+- Raft FSM 为每个 vnet 存其 `version`。
+- operator 用 **fsnotify 监听 `--root`**：某 YAML 增/改 → 读出其 `version` → 与 Raft 里该 vnet 的 version 比对：
+  - 文件 version > Raft version（或 Raft 中尚无此 vnet）→ 提交 `VNetUpsert{version, ...}`，全集群同步；
+  - 文件 version ≤ Raft version → 忽略（不用旧配置覆盖新的）；
+  - YAML 删除 → 提交对应删除。
+- **全集群唯一权威是 Raft**：每个 operator 只从本地 FSM 副本读 vnet 定义，**从不读别的 operator 的文件**。不做内容哈希、不做 Merkle、不做 operator 间点对点同步。
+- **多 operator 文件不一致**：version 大者胜，全集群收敛到最高 version 的定义。冲突靠 version 定序，不靠时钟、不靠文件比对。
+
+`--network` 命令行入口**已删除**，`--vnet` 单文件入口**不存在**。operator 自身信息（静态密钥、listen、raft、hop-endpoints）在初始化时以命令行参数写死，后续不变；只有 vnet 走 `--root` 动态。
+
+vnet 文件格式：
 
 ```yaml
 # vnet-200.yaml
 vni: 200
+version: 1                    # 单调递增；改配置时 +1，version 大者胜（§4.4 同步模型）
 
 segments:
   - cidr: 10.0.1.0/24
@@ -304,7 +320,7 @@ keys:
     allowed_segments: [10.0.1.0/24, 10.0.2.0/24]
 ```
 
-**加载语义**：`operator --vnet ./vnet-200.yaml`。仅 bootstrap 节点在集群初始化时读取并写入 Raft；此后一切变更走 gasoctl（文件不再是权威）。重复加载已存在的 vni 会被拒绝，除非显式 `--vnet-force`。
+**加载语义**：`operator --root ./vnets/`。operator 扫描目录、fsnotify 监听、按上面的哈希/序号模型把变更推进 Raft；权威在 Raft，文件仅触发。（旧的 `--vnet <file>` 单文件入口、`--vnet-force` 均不存在。）
 
 ### 4.5 固定 IP 与 lock 文件
 

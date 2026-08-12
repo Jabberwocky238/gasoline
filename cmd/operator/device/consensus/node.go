@@ -220,6 +220,18 @@ func (n *Node) RouteSnapshotByVNI(vni protocol.VNI_Ty) []SessionRoute {
 	return n.fsm.RouteSnapshotByVNI(vni)
 }
 
+// VNetVersion returns the stored config version for a vnet (see
+// meshState.VNetVersion). fsnotify compares it against a --root file's version.
+func (n *Node) VNetVersion(vni protocol.VNI_Ty) (uint64, bool) {
+	return n.fsm.VNetVersion(vni)
+}
+
+// UpsertVNet proposes a VNetUpsert through Raft (used by the --root loader when
+// a file's version is newer than the FSM's).
+func (n *Node) UpsertVNet(c *VNetUpsert, timeout time.Duration) error {
+	return n.Propose(&Command{Kind: CmdVNetUpsert, VNetUpsert: c}, timeout)
+}
+
 // MigrateSession records a new access point for a session (batched by the
 // caller in the hop path). See PRD §6.3.
 func (n *Node) MigrateSession(c *SessionMigrate, timeout time.Duration) error {

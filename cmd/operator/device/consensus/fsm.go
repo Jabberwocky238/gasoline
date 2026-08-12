@@ -13,9 +13,13 @@ import (
 	"github.com/jabberwocky238/gasoline/protocol"
 )
 
-// vnetDef is the replicated definition of one virtual network (PRD §2.2).
+// vnetDef is the replicated definition of one virtual network (PRD §2.2). It
+// carries the config Version (PRD §4.4): an upsert with a version not greater
+// than the stored one is ignored, so a stale --root file can never overwrite a
+// newer definition. version-greatest wins across the cluster.
 type vnetDef struct {
 	VNI      protocol.VNI_Ty
+	Version  uint64
 	Segments []Segment
 	AuthKeys map[[32]byte]*keyGrant
 }
@@ -128,11 +132,33 @@ func (m *meshState) applyVNetUpsert(c *VNetUpsert) error {
 		}
 	}
 	vn, ok := m.VNets[c.VNI]
+	if ok && c.Version <= vn.Version {
+		// A stale or equal-version upsert must not overwrite a newer definition
+		// (PRD §4.4 — version-greatest wins). Silently ignore; this keeps the
+		// operation idempotent so fsnotify re-firing the same file is a no-op.
+		return nil
+	}
 	if !ok {
 		vn = &vnetDef{VNI: c.VNI, AuthKeys: make(map[[32]byte]*keyGrant)}
 		m.VNets[c.VNI] = vn
 	}
+	vn.Version = c.Version
 	vn.Segments = c.Segments
+	// The --root file is authoritative for this vnet's key table: replace it
+	// wholesale so a key removed from the file is deauthorized on upsert.
+	if c.AuthKeys != nil {
+		next := make(map[[32]byte]*keyGrant, len(c.AuthKeys))
+		for i := range c.AuthKeys {
+			g := c.AuthKeys[i]
+			next[g.PubKey] = &keyGrant{
+				PubKey:     g.PubKey,
+				VNI:        c.VNI,
+				AllowedSeg: g.AllowedSeg,
+				StaticIP:   g.StaticIP,
+			}
+		}
+		vn.AuthKeys = next
+	}
 	return nil
 }
 
@@ -421,6 +447,19 @@ func (m *meshState) VNetCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return len(m.VNets)
+}
+
+// VNetVersion returns the stored config version for a vnet, and whether the
+// vnet exists. fsnotify uses it to decide whether a --root file is newer than
+// what Raft holds (PRD §4.4).
+func (m *meshState) VNetVersion(vni protocol.VNI_Ty) (uint64, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	vn, ok := m.VNets[vni]
+	if !ok {
+		return 0, false
+	}
+	return vn.Version, true
 }
 
 // PickIP resolves an address for pubkey on vni against the current local

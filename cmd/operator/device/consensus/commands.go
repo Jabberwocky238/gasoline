@@ -58,11 +58,15 @@ type Command struct {
 
 // --------------- command payloads ---------------
 
-// VNetUpsert adds or replaces a vnet definition. Pool ⊆ CIDR is validated
-// at apply time (PRD §2.2); a violation rejects the whole command.
+// VNetUpsert adds or replaces a vnet definition. Pool ⊆ CIDR is validated at
+// apply time (PRD §2.2); a violation rejects the whole command. Version orders
+// competing upserts (PRD §4.4): an upsert whose Version is not greater than the
+// stored one is ignored, so a stale --root file cannot overwrite a newer def.
 type VNetUpsert struct {
 	VNI      protocol.VNI_Ty
+	Version  uint64
 	Segments []Segment
+	AuthKeys []KeyGrant // authorized keys for this vnet (from the --root file)
 }
 
 // Segment is one subnet within a vnet plus its allocatable pool.

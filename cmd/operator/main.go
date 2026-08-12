@@ -29,6 +29,7 @@ func main() {
 	collect(ParamKey, "operator static private key, base64 (generated if unset)")
 	collect(ParamListen, "client listener '<schema>://<addr>' (repeatable; default quic://:8443)")
 	collect(ParamRoot, "config dir: one YAML per vnet, fsnotify-watched (PRD §4.4)")
+	collect(ParamHopEndpoint, "advertisable hop target 'uuid@host:lo-hi[,lo-hi]' (repeatable)")
 	collect(ParamRaftBind, "this node's Raft QUIC listen address (enables consensus)")
 	collect(ParamRaftPeers, "Raft cluster members 'id@host:port;id2@host:port2'")
 	collect(ParamRaftBootstrap, "'true' on exactly one node to seed a fresh cluster")

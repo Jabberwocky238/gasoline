@@ -2,7 +2,10 @@ package main
 
 import (
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
+	"net/netip"
+	"strconv"
 	"strings"
 
 	"github.com/jabberwocky238/gasoline/cmd/operator/device"
@@ -25,7 +28,8 @@ const (
 	ParamLogLevel      = "log-level"
 	ParamKey           = "key" // operator static private key (base64); generated if empty
 	ParamListen        = "listen"
-	ParamRoot          = "root" // config dir: one YAML per vnet, fsnotify-watched (PRD §4.4)
+	ParamRoot          = "root"         // config dir: one YAML per vnet, fsnotify-watched (PRD §4.4)
+	ParamHopEndpoint   = "hop-endpoint" // advertisable hop target 'uuid@host:lo-hi[,lo-hi]' (repeatable)
 	ParamRaftBind      = "raft-bind"
 	ParamRaftPeers     = "raft-peers"
 	ParamRaftBootstrap = "raft-bootstrap"
@@ -38,7 +42,7 @@ const (
 func RegisterOperatorCLIParam(params map[string][]string) (*operator.StaticOperatorConfig, error) {
 	for k := range params {
 		switch k {
-		case ParamOpListen, ParamLogLevel, ParamKey, ParamListen, ParamRoot,
+		case ParamOpListen, ParamLogLevel, ParamKey, ParamListen, ParamRoot, ParamHopEndpoint,
 			ParamRaftBind, ParamRaftPeers, ParamRaftBootstrap:
 		default:
 			return nil, fmt.Errorf("unknown parameter %q", k)
@@ -82,6 +86,14 @@ func RegisterOperatorCLIParam(params map[string][]string) (*operator.StaticOpera
 	}
 
 	cfg.OpListenAddr = strings.TrimSpace(opListen)
+
+	for _, raw := range params[ParamHopEndpoint] {
+		ep, err := parseHopEndpoint(raw)
+		if err != nil {
+			return nil, err
+		}
+		cfg.HopEndpoints = append(cfg.HopEndpoints, ep)
+	}
 
 	// vnet definitions (segments/pool/keys, incl. fixed-IP bindings) come from
 	// the --root config dir (PRD §4.4), loaded + fsnotify-watched at runtime —
@@ -138,6 +150,55 @@ func lastOr(vs []string, fallback string) string {
 		return fallback
 	}
 	return vs[len(vs)-1]
+}
+
+// parseHopEndpoint parses an advertisable hop target (PRD §6.2):
+//
+//	<uuid_hex>@<host>:<lo>-<hi>[,<lo>-<hi>...]
+//
+// e.g. "a0000000000000000000000000000000@10.0.0.1:20000-20063,30000-30015".
+// uuid is 32 hex chars (16 bytes). host is an IP literal. Each range is an
+// inclusive UDP port interval; a single port may be written "<p>-<p>".
+func parseHopEndpoint(raw string) (operator.HopEndpoint, error) {
+	raw = strings.TrimSpace(raw)
+	uuidStr, rest, ok := strings.Cut(raw, "@")
+	if !ok {
+		return operator.HopEndpoint{}, fmt.Errorf("hop-endpoint %q: expected 'uuid@host:lo-hi[,lo-hi]'", raw)
+	}
+	uuidBytes, err := hex.DecodeString(strings.TrimSpace(uuidStr))
+	if err != nil || len(uuidBytes) != 16 {
+		return operator.HopEndpoint{}, fmt.Errorf("hop-endpoint %q: uuid must be 32 hex chars", raw)
+	}
+	host, portsStr, ok := strings.Cut(rest, ":")
+	if !ok {
+		return operator.HopEndpoint{}, fmt.Errorf("hop-endpoint %q: missing ':' before ports", raw)
+	}
+	host = strings.TrimSpace(host)
+	if _, err := netip.ParseAddr(host); err != nil {
+		return operator.HopEndpoint{}, fmt.Errorf("hop-endpoint %q: bad host %q: %w", raw, host, err)
+	}
+	ep := operator.HopEndpoint{Host: host}
+	copy(ep.UUID[:], uuidBytes)
+	for _, r := range strings.Split(portsStr, ",") {
+		r = strings.TrimSpace(r)
+		if r == "" {
+			continue
+		}
+		loStr, hiStr, ok := strings.Cut(r, "-")
+		if !ok {
+			return operator.HopEndpoint{}, fmt.Errorf("hop-endpoint %q: bad range %q (want lo-hi)", raw, r)
+		}
+		lo, err1 := strconv.ParseUint(strings.TrimSpace(loStr), 10, 16)
+		hi, err2 := strconv.ParseUint(strings.TrimSpace(hiStr), 10, 16)
+		if err1 != nil || err2 != nil || lo > hi {
+			return operator.HopEndpoint{}, fmt.Errorf("hop-endpoint %q: bad range %q", raw, r)
+		}
+		ep.Ports = append(ep.Ports, [2]uint16{uint16(lo), uint16(hi)})
+	}
+	if len(ep.Ports) == 0 {
+		return operator.HopEndpoint{}, fmt.Errorf("hop-endpoint %q: no port ranges", raw)
+	}
+	return ep, nil
 }
 
 // parseListenerSpec parses '<schema>://<addr>', e.g. 'quic://:8443'.

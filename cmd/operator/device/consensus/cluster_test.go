@@ -45,15 +45,11 @@ func newTestCluster(t *testing.T, n int) *testCluster {
 	tc := &testCluster{t: t}
 	for i := 0; i < n; i++ {
 		node, err := NewNode(Config{
-			LocalID:            peers[i].ID,
-			BindAddr:           addrs[i],
-			Peers:              peers,
-			Bootstrap:          i == 0, // only node 0 seeds the cluster
-			HeartbeatTimeout:   100 * time.Millisecond,
-			ElectionTimeout:    100 * time.Millisecond,
-			LeaderLeaseTimeout: 80 * time.Millisecond,
-			CommitTimeout:      20 * time.Millisecond,
-			LogOutput:          io.Discard,
+			LocalID:   peers[i].ID,
+			BindAddr:  addrs[i],
+			Peers:     peers,
+			Bootstrap: i == 0, // only node 0 seeds the cluster
+			LogOutput: io.Discard,
 		})
 		if err != nil {
 			t.Fatalf("node %d: %v", i, err)

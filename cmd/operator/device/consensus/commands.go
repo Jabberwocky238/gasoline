@@ -1,5 +1,5 @@
 // Package consensus provides the operator-side strong-consistency layer:
-// a hashicorp/raft state machine (meshState / FSM) replicated over a QUIC
+// an etcd-raft state machine (meshState / FSM) replicated over a QUIC
 // transport. Every operator holds a full replica of the mesh control state
 // (vnets, segments, IP pools, key grants, sessions, access-point location),
 // so a client that hops to any operator is served identically.

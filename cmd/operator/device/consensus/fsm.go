@@ -5,11 +5,9 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
-	"io"
 	"net/netip"
 	"sync"
 
-	"github.com/hashicorp/raft"
 	"github.com/jabberwocky238/gasoline/protocol"
 )
 
@@ -67,31 +65,27 @@ func NewMeshState() *meshState {
 	}
 }
 
-// --------------- raft.FSM ---------------
+// --------------- state machine ---------------
 
-// ApplyResult is returned through raft.ApplyFuture.Response() on the LEADER
-// (followers' Apply return values are discarded by raft). A nil Err means
-// success. For a SessionCreate, IP/Ranges carry the address the leader's Apply
-// deterministically allocated — the proposer learns its client's IP from here,
-// there is no pre-selection (PRD §2.3, post-2PC).
+// ApplyResult is what a committed command yields to its proposer. A nil Err
+// means success. For a SessionCreate, IP/Ranges carry the address Apply
+// deterministically allocated (first-free) — the proposer learns its client's
+// IP from here, there is no pre-selection (PRD §2.3, post-2PC).
 type ApplyResult struct {
 	Err    error
 	IP     netip.Addr
 	Ranges netip.Prefix
 }
 
-// Apply runs one committed log entry against the state. It must be
-// deterministic: identical logs produce identical state on every node,
-// so it never reads wall-clock time — proposers stamp Now into commands.
-func (m *meshState) Apply(l *raft.Log) interface{} {
-	cmd, err := DecodeCommand(l.Data)
-	if err != nil {
-		return ApplyResult{Err: err}
-	}
+// ApplyCommand applies one committed command against the state. It must be
+// deterministic: identical commands produce identical state on every node, so
+// it never reads wall-clock time — proposers stamp Now into commands. Called by
+// the raft driver loop for each committed entry.
+func (m *meshState) ApplyCommand(cmd *Command) ApplyResult {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	// SessionCreate allocates the IP inside Apply (deterministic first-free), so
-	// its result carries the address back to the leader's proposer.
+	// its result carries the address back to the proposer.
 	if cmd.Kind == CmdSessionCreate {
 		ip, ranges, err := m.applySessionCreate(cmd.SessionCreate)
 		return ApplyResult{Err: err, IP: ip, Ranges: ranges}
@@ -297,9 +291,9 @@ type snapshotData struct {
 	Sessions map[protocol.SessionID_Ty]*sessionEntry
 }
 
-// Snapshot captures the state for log compaction. Called with FSM otherwise
-// quiescent by raft; we still copy under lock to be safe.
-func (m *meshState) Snapshot() (raft.FSMSnapshot, error) {
+// SnapshotBytes serializes the full state (gob) for a raft snapshot. Called by
+// the raft driver loop when compacting the log.
+func (m *meshState) SnapshotBytes() ([]byte, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	data := snapshotData{
@@ -316,14 +310,13 @@ func (m *meshState) Snapshot() (raft.FSMSnapshot, error) {
 	if err := gob.NewEncoder(&buf).Encode(data); err != nil {
 		return nil, err
 	}
-	return &fsmSnapshot{blob: buf.Bytes()}, nil
+	return buf.Bytes(), nil
 }
 
-// Restore replaces the entire state from a snapshot stream.
-func (m *meshState) Restore(rc io.ReadCloser) error {
-	defer rc.Close()
+// RestoreBytes replaces the entire state from a snapshot blob.
+func (m *meshState) RestoreBytes(blob []byte) error {
 	var data snapshotData
-	if err := gob.NewDecoder(rc).Decode(&data); err != nil {
+	if err := gob.NewDecoder(bytes.NewReader(blob)).Decode(&data); err != nil {
 		return err
 	}
 	m.mu.Lock()
@@ -343,18 +336,6 @@ func (m *meshState) Restore(rc io.ReadCloser) error {
 	}
 	return nil
 }
-
-type fsmSnapshot struct{ blob []byte }
-
-func (s *fsmSnapshot) Persist(sink raft.SnapshotSink) error {
-	if _, err := sink.Write(s.blob); err != nil {
-		_ = sink.Cancel()
-		return err
-	}
-	return sink.Close()
-}
-
-func (s *fsmSnapshot) Release() {}
 
 // --------------- read-side accessors (local, no consensus) ---------------
 //

@@ -3,184 +3,192 @@ package consensus
 import (
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"fmt"
-	"net"
+	"io"
 	"sync"
 	"time"
 
-	"github.com/hashicorp/raft"
 	"github.com/quic-go/quic-go"
+	"go.etcd.io/raft/v3/raftpb"
+	"google.golang.org/protobuf/proto"
 )
 
-// raftALPN is the QUIC ALPN token for the Raft control channel. Keeping it
-// distinct from the client data plane prevents cross-wiring.
+// raftALPN is the QUIC ALPN token for the raft control channel.
 const raftALPN = "gasoline-raft-v1"
 
-// quicStreamLayer implements raft.StreamLayer (net.Listener + Dial) over QUIC.
-// Each Raft RPC rides one bidirectional QUIC stream; connections to peers are
-// dialed lazily and cached.
-type quicStreamLayer struct {
+// msgTransport ships etcd-raft messages between peers over QUIC. Each raft
+// message is one length-prefixed frame on a short-lived stream. Peer addresses
+// are resolved from the id->addr map; connections are dialed lazily and cached.
+type msgTransport struct {
 	ln       *quic.Listener
 	tlsConf  *tls.Config
 	quicConf *quic.Config
+	addrs    map[uint64]string // raft id -> QUIC addr
 
-	acceptCh chan net.Conn
-	closeCh  chan struct{}
-	closeOne sync.Once
+	onRecv func([]byte) // set by Node before use; called per received message
 
-	mu    sync.Mutex
-	dials map[string]*quic.Conn // remote addr -> established connection
+	mu      sync.Mutex
+	dials   map[uint64]*quic.Conn
+	closeCh chan struct{}
+	closed  sync.Once
 }
 
-// newQUICStreamLayer binds a QUIC listener on bindAddr and returns a
-// StreamLayer ready to hand to raft.NewNetworkTransport.
-func newQUICStreamLayer(bindAddr string, serverTLS, clientTLS *tls.Config) (*quicStreamLayer, error) {
+func newMsgTransport(bindAddr string, serverTLS, clientTLS *tls.Config, addrs map[uint64]string) (*msgTransport, error) {
 	sTLS := serverTLS.Clone()
 	sTLS.NextProtos = []string{raftALPN}
 	cTLS := clientTLS.Clone()
 	cTLS.NextProtos = []string{raftALPN}
+	qConf := &quic.Config{MaxIdleTimeout: 30 * time.Second, KeepAlivePeriod: 10 * time.Second}
 
-	qConf := &quic.Config{
-		MaxIdleTimeout:  30 * time.Second,
-		KeepAlivePeriod: 10 * time.Second,
-	}
 	ln, err := quic.ListenAddr(bindAddr, sTLS, qConf)
 	if err != nil {
 		return nil, fmt.Errorf("consensus: quic listen %s: %w", bindAddr, err)
 	}
-	sl := &quicStreamLayer{
+	t := &msgTransport{
 		ln:       ln,
 		tlsConf:  cTLS,
 		quicConf: qConf,
-		acceptCh: make(chan net.Conn, 16),
+		addrs:    addrs,
+		dials:    make(map[uint64]*quic.Conn),
 		closeCh:  make(chan struct{}),
-		dials:    make(map[string]*quic.Conn),
 	}
-	go sl.acceptLoop()
-	return sl, nil
+	go t.acceptLoop()
+	return t, nil
 }
 
-// acceptLoop pulls incoming QUIC connections and their first stream, feeding
-// them to Accept(). raft's NetworkTransport opens one stream per RPC, so we
-// accept every stream on every connection.
-func (s *quicStreamLayer) acceptLoop() {
+func (t *msgTransport) acceptLoop() {
 	for {
-		conn, err := s.ln.Accept(context.Background())
+		conn, err := t.ln.Accept(context.Background())
 		if err != nil {
-			select {
-			case <-s.closeCh:
-				return
-			default:
-				return
-			}
+			return
 		}
-		go s.serveConn(conn)
+		go t.serveConn(conn)
 	}
 }
 
-func (s *quicStreamLayer) serveConn(conn *quic.Conn) {
+func (t *msgTransport) serveConn(conn *quic.Conn) {
 	for {
 		stream, err := conn.AcceptStream(context.Background())
 		if err != nil {
 			return
 		}
-		wrapped := &quicConn{stream: stream, local: conn.LocalAddr(), remote: conn.RemoteAddr()}
-		select {
-		case s.acceptCh <- wrapped:
-		case <-s.closeCh:
-			_ = stream.Close()
-			return
-		}
+		go t.serveStream(stream)
 	}
 }
 
-// Accept implements net.Listener.
-func (s *quicStreamLayer) Accept() (net.Conn, error) {
-	select {
-	case c := <-s.acceptCh:
-		return c, nil
-	case <-s.closeCh:
-		return nil, fmt.Errorf("consensus: stream layer closed")
+func (t *msgTransport) serveStream(stream *quic.Stream) {
+	defer stream.Close()
+	data, err := readMsgFrame(stream)
+	if err != nil {
+		return
+	}
+	if t.onRecv != nil {
+		t.onRecv(data)
 	}
 }
 
-// Close implements net.Listener.
-func (s *quicStreamLayer) Close() error {
-	s.closeOne.Do(func() { close(s.closeCh) })
-	s.mu.Lock()
-	for _, c := range s.dials {
-		_ = c.CloseWithError(0, "closing")
-	}
-	s.dials = map[string]*quic.Conn{}
-	s.mu.Unlock()
-	return s.ln.Close()
-}
-
-// Addr implements net.Listener.
-func (s *quicStreamLayer) Addr() net.Addr { return s.ln.Addr() }
-
-// Dial implements raft.StreamLayer: open a new stream to address, reusing a
-// cached QUIC connection when one exists.
-func (s *quicStreamLayer) Dial(address raft.ServerAddress, timeout time.Duration) (net.Conn, error) {
-	addr := string(address)
-
-	s.mu.Lock()
-	conn := s.dials[addr]
-	s.mu.Unlock()
-
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-
-	if conn == nil {
-		var err error
-		conn, err = quic.DialAddr(ctx, addr, s.tlsConf, s.quicConf)
+// send delivers each raft message to its target peer. Failures are dropped —
+// raft retries on its own cadence, so a transient send error is not fatal.
+func (t *msgTransport) send(msgs []*raftpb.Message) {
+	for _, m := range msgs {
+		data, err := proto.Marshal(m)
 		if err != nil {
-			return nil, fmt.Errorf("consensus: quic dial %s: %w", addr, err)
+			continue
 		}
-		s.mu.Lock()
-		// Another goroutine may have raced us; keep one.
-		if existing := s.dials[addr]; existing != nil {
-			_ = conn.CloseWithError(0, "dup")
-			conn = existing
-		} else {
-			s.dials[addr] = conn
-		}
-		s.mu.Unlock()
+		go t.sendTo(m.GetTo(), data)
 	}
+}
 
+func (t *msgTransport) sendTo(to uint64, data []byte) {
+	addr, ok := t.addrs[to]
+	if !ok {
+		return
+	}
+	conn, err := t.conn(to, addr)
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	stream, err := conn.OpenStreamSync(ctx)
 	if err != nil {
-		// Cached connection may be dead; drop it so the next Dial reconnects.
-		s.mu.Lock()
-		if s.dials[addr] == conn {
-			delete(s.dials, addr)
-		}
-		s.mu.Unlock()
-		_ = conn.CloseWithError(0, "stream open failed")
-		return nil, fmt.Errorf("consensus: quic open stream %s: %w", addr, err)
+		t.drop(to, conn)
+		return
 	}
-	return &quicConn{stream: stream, local: conn.LocalAddr(), remote: conn.RemoteAddr()}, nil
+	defer stream.Close()
+	_ = writeMsgFrame(stream, data)
 }
 
-// quicConn adapts a *quic.Stream to net.Conn. The stream carries Read/Write/
-// Close/deadlines; the addresses come from the parent QUIC connection.
-type quicConn struct {
-	stream *quic.Stream
-	local  net.Addr
-	remote net.Addr
+// conn returns a cached connection to peer, dialing if necessary.
+func (t *msgTransport) conn(to uint64, addr string) (*quic.Conn, error) {
+	t.mu.Lock()
+	c := t.dials[to]
+	t.mu.Unlock()
+	if c != nil {
+		return c, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, err := quic.DialAddr(ctx, addr, t.tlsConf, t.quicConf)
+	if err != nil {
+		return nil, err
+	}
+	t.mu.Lock()
+	if existing := t.dials[to]; existing != nil {
+		_ = c.CloseWithError(0, "dup")
+		c = existing
+	} else {
+		t.dials[to] = c
+	}
+	t.mu.Unlock()
+	return c, nil
 }
 
-func (c *quicConn) Read(b []byte) (int, error)  { return c.stream.Read(b) }
-func (c *quicConn) Write(b []byte) (int, error) { return c.stream.Write(b) }
-func (c *quicConn) Close() error                { return c.stream.Close() }
-func (c *quicConn) LocalAddr() net.Addr         { return c.local }
-func (c *quicConn) RemoteAddr() net.Addr        { return c.remote }
-func (c *quicConn) SetDeadline(t time.Time) error {
-	return c.stream.SetDeadline(t)
+func (t *msgTransport) drop(to uint64, conn *quic.Conn) {
+	t.mu.Lock()
+	if t.dials[to] == conn {
+		delete(t.dials, to)
+	}
+	t.mu.Unlock()
+	_ = conn.CloseWithError(0, "send failed")
 }
-func (c *quicConn) SetReadDeadline(t time.Time) error {
-	return c.stream.SetReadDeadline(t)
+
+func (t *msgTransport) close() error {
+	t.closed.Do(func() { close(t.closeCh) })
+	t.mu.Lock()
+	for _, c := range t.dials {
+		_ = c.CloseWithError(0, "closing")
+	}
+	t.dials = map[uint64]*quic.Conn{}
+	t.mu.Unlock()
+	return t.ln.Close()
 }
-func (c *quicConn) SetWriteDeadline(t time.Time) error {
-	return c.stream.SetWriteDeadline(t)
+
+// --------------- length-prefixed framing ---------------
+
+func writeMsgFrame(w io.Writer, data []byte) error {
+	var hdr [4]byte
+	binary.BigEndian.PutUint32(hdr[:], uint32(len(data)))
+	if _, err := w.Write(hdr[:]); err != nil {
+		return err
+	}
+	_, err := w.Write(data)
+	return err
+}
+
+func readMsgFrame(r io.Reader) ([]byte, error) {
+	var hdr [4]byte
+	if _, err := io.ReadFull(r, hdr[:]); err != nil {
+		return nil, err
+	}
+	n := binary.BigEndian.Uint32(hdr[:])
+	if n > (1 << 24) { // 16 MiB cap
+		return nil, fmt.Errorf("consensus: raft msg too large: %d", n)
+	}
+	buf := make([]byte, n)
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return nil, err
+	}
+	return buf, nil
 }

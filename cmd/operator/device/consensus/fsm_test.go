@@ -5,24 +5,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hashicorp/raft"
 	"github.com/jabberwocky238/gasoline/protocol"
 )
 
 // applyCmd runs a command straight through the FSM (no raft), returning the
-// per-command error. Mirrors what raft.Apply would deliver.
+// per-command error. Mirrors what the raft driver loop delivers.
 func applyCmd(t *testing.T, m *meshState, cmd *Command) error {
 	t.Helper()
-	data, err := cmd.Encode()
-	if err != nil {
-		t.Fatalf("encode: %v", err)
-	}
-	res := m.Apply(&raft.Log{Data: data})
-	ar, ok := res.(ApplyResult)
-	if !ok {
-		t.Fatalf("Apply returned %T, want ApplyResult", res)
-	}
-	return ar.Err
+	return m.ApplyCommand(cmd).Err
 }
 
 func sid(b byte) protocol.SessionID_Ty {
@@ -60,11 +50,7 @@ func seedVNet(t *testing.T, m *meshState, pubs ...byte) {
 // applyCreate runs a SessionCreate and returns the allocated IP + error.
 func applyCreate(t *testing.T, m *meshState, c *SessionCreate) (netip.Addr, error) {
 	t.Helper()
-	data, err := (&Command{Kind: CmdSessionCreate, SessionCreate: c}).Encode()
-	if err != nil {
-		t.Fatalf("encode: %v", err)
-	}
-	ar := m.Apply(&raft.Log{Data: data}).(ApplyResult)
+	ar := m.ApplyCommand(&Command{Kind: CmdSessionCreate, SessionCreate: c})
 	return ar.IP, ar.Err
 }
 
@@ -260,17 +246,13 @@ func TestSnapshotRestoreRoundTrip(t *testing.T) {
 		t.Fatalf("create: %v", err)
 	}
 
-	snap, err := m.Snapshot()
+	blob, err := m.SnapshotBytes()
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
-	sink := &memSink{}
-	if err := snap.Persist(sink); err != nil {
-		t.Fatalf("persist: %v", err)
-	}
 
 	restored := NewMeshState()
-	if err := restored.Restore(newReadCloser(sink.data)); err != nil {
+	if err := restored.RestoreBytes(blob); err != nil {
 		t.Fatalf("restore: %v", err)
 	}
 	if restored.SessionCount() != 1 {

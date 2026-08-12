@@ -35,8 +35,6 @@ func TestG4_HopToAnotherOperator(t *testing.T) {
 	raftAddr := freeUDPAddr(t)
 	node, err := consensus.NewNode(consensus.Config{
 		LocalID: "op-0", BindAddr: raftAddr, Peers: []consensus.Peer{{ID: "op-0", Addr: raftAddr}}, Bootstrap: true,
-		HeartbeatTimeout: 100 * time.Millisecond, ElectionTimeout: 100 * time.Millisecond,
-		LeaderLeaseTimeout: 80 * time.Millisecond, CommitTimeout: 20 * time.Millisecond,
 	})
 	if err != nil {
 		t.Fatalf("node: %v", err)

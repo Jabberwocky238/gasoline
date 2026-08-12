@@ -33,6 +33,7 @@ const (
 	CmdSessionDrop    CmdKind = 0x23 // remove a session (timeout / kick / revoke)
 	CmdSessionReplace CmdKind = 0x24 // atomic drop-old + create-new for one pubkey
 	CmdSessionRekey   CmdKind = 0x25 // overwrite transport keys after re-handshake
+	CmdOperatorReg    CmdKind = 0x30 // register an operator's underlay address
 	CmdBatch          CmdKind = 0xF0 // envelope carrying N commands, applied in order
 )
 
@@ -53,7 +54,15 @@ type Command struct {
 	SessionDrop    *SessionDrop
 	SessionReplace *SessionReplace
 	SessionRekey   *SessionRekey
+	OperatorReg    *OperatorReg
 	Batch          []Command
+}
+
+// OperatorReg registers (or refreshes) an operator's underlay data-plane
+// address in the FSM so peers can forward frames to it (PRD §11).
+type OperatorReg struct {
+	UUID         [16]byte
+	UnderlayAddr string // "host:port" of the operator's PeerOperator UDP underlay
 }
 
 // --------------- command payloads ---------------

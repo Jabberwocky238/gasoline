@@ -421,6 +421,17 @@ func (n *Node) MigrateSession(c *SessionMigrate, timeout time.Duration) error {
 	return n.Propose(&Command{Kind: CmdSessionMigrate, SessionMigrate: c}, timeout)
 }
 
+// RegisterOperator publishes this operator's underlay data-plane address into
+// Raft so peers can forward frames to it (PRD §11).
+func (n *Node) RegisterOperator(uuid [16]byte, underlayAddr string, timeout time.Duration) error {
+	return n.Propose(&Command{Kind: CmdOperatorReg, OperatorReg: &OperatorReg{UUID: uuid, UnderlayAddr: underlayAddr}}, timeout)
+}
+
+// OperatorAddr returns the underlay address registered for uuid (local read).
+func (n *Node) OperatorAddr(uuid [16]byte) (string, bool) {
+	return n.fsm.OperatorAddr(uuid)
+}
+
 // LeaderID returns the current leader's ID hex ("" if unknown).
 func (n *Node) LeaderID() string {
 	l := n.leaderID.Load()

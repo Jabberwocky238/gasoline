@@ -45,11 +45,18 @@ type sessionEntry struct {
 }
 
 // meshState is the Raft state machine. Every operator holds a full replica.
-// It is the single source of truth for vnets, key grants and sessions.
+// It is the single source of truth for vnets, key grants, sessions and the
+// operator registry (UUID -> underlay data-plane address).
 type meshState struct {
 	mu       sync.RWMutex
 	VNets    map[protocol.VNI_Ty]*vnetDef
 	Sessions map[protocol.SessionID_Ty]*sessionEntry
+
+	// Operators maps an operator UUID to its underlay data-plane address
+	// ("host:port"). Each operator registers itself on startup (PRD §11 — all
+	// state in Raft); peers read it to forward frames to a session's current
+	// access operator without any out-of-band peer config.
+	Operators map[[16]byte]string
 
 	// pubKeyToSession is the reverse index for the uniqueness check
 	// (PRD §8.0.4): O(1) "does this key already have a live session?".
@@ -61,6 +68,7 @@ func NewMeshState() *meshState {
 	return &meshState{
 		VNets:           make(map[protocol.VNI_Ty]*vnetDef),
 		Sessions:        make(map[protocol.SessionID_Ty]*sessionEntry),
+		Operators:       make(map[[16]byte]string),
 		pubKeyToSession: make(map[[32]byte]protocol.SessionID_Ty),
 	}
 }
@@ -123,6 +131,9 @@ func (m *meshState) applyLocked(cmd *Command) error {
 		return m.applySessionReplace(cmd.SessionReplace)
 	case CmdSessionRekey:
 		return m.applySessionRekey(cmd.SessionRekey)
+	case CmdOperatorReg:
+		m.Operators[cmd.OperatorReg.UUID] = cmd.OperatorReg.UnderlayAddr
+		return nil
 	default:
 		return fmt.Errorf("consensus: unknown command kind %#x", byte(cmd.Kind))
 	}
@@ -287,8 +298,9 @@ func (m *meshState) removeSessionLocked(sid protocol.SessionID_Ty) {
 
 // snapshotData is the gob-serializable projection of meshState.
 type snapshotData struct {
-	VNets    map[protocol.VNI_Ty]*vnetDef
-	Sessions map[protocol.SessionID_Ty]*sessionEntry
+	VNets     map[protocol.VNI_Ty]*vnetDef
+	Sessions  map[protocol.SessionID_Ty]*sessionEntry
+	Operators map[[16]byte]string
 }
 
 // SnapshotBytes serializes the full state (gob) for a raft snapshot. Called by
@@ -297,14 +309,18 @@ func (m *meshState) SnapshotBytes() ([]byte, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	data := snapshotData{
-		VNets:    make(map[protocol.VNI_Ty]*vnetDef, len(m.VNets)),
-		Sessions: make(map[protocol.SessionID_Ty]*sessionEntry, len(m.Sessions)),
+		VNets:     make(map[protocol.VNI_Ty]*vnetDef, len(m.VNets)),
+		Sessions:  make(map[protocol.SessionID_Ty]*sessionEntry, len(m.Sessions)),
+		Operators: make(map[[16]byte]string, len(m.Operators)),
 	}
 	for k, v := range m.VNets {
 		data.VNets[k] = v
 	}
 	for k, v := range m.Sessions {
 		data.Sessions[k] = v
+	}
+	for k, v := range m.Operators {
+		data.Operators[k] = v
 	}
 	var buf bytes.Buffer
 	if err := gob.NewEncoder(&buf).Encode(data); err != nil {
@@ -328,6 +344,10 @@ func (m *meshState) RestoreBytes(blob []byte) error {
 	m.Sessions = data.Sessions
 	if m.Sessions == nil {
 		m.Sessions = make(map[protocol.SessionID_Ty]*sessionEntry)
+	}
+	m.Operators = data.Operators
+	if m.Operators == nil {
+		m.Operators = make(map[[16]byte]string)
 	}
 	// Rebuild the reverse index; it is not persisted.
 	m.pubKeyToSession = make(map[[32]byte]protocol.SessionID_Ty, len(m.Sessions))
@@ -460,6 +480,15 @@ func (m *meshState) KeyAuthorized(vni protocol.VNI_Ty, pubkey [32]byte) bool {
 	}
 	_, ok = vn.AuthKeys[pubkey]
 	return ok
+}
+
+// OperatorAddr returns the underlay data-plane address registered for an
+// operator UUID, and whether it is known.
+func (m *meshState) OperatorAddr(uuid [16]byte) (string, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	addr, ok := m.Operators[uuid]
+	return addr, ok
 }
 
 // VNetVersion returns the stored config version for a vnet, and whether the

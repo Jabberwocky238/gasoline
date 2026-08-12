@@ -284,6 +284,7 @@ func (o *Operator) Start() error {
 	go o.routineReaper()
 	if o.state.node != nil {
 		go o.routineRouteSync()
+		go o.routineRegisterSelf()
 	}
 	// Load vnets from --root and keep them synced to Raft (PRD §4.4).
 	if w, err := o.startVNetWatcher(o.cfg.RootDir); err != nil {
@@ -324,10 +325,61 @@ func (o *Operator) routineRouteSync() {
 					// remote route left over from before a hop-back.
 					vn.routingMap.SetClient(r.SessionID, pfx)
 				} else {
+					// Remote: ensure we know the peer's underlay address (from
+					// the Raft operator registry) so forwardFrame can reach it,
+					// then install the route.
+					o.ensurePeer(r.LastOperator)
 					vn.routingMap.SetOperator(r.LastOperator, pfx)
 				}
 			}
 		}
+	}
+}
+
+// ensurePeer makes sure the PeerTable has an underlay entry for uuid, resolving
+// its address from the Raft operator registry (PRD §11). Idempotent.
+func (o *Operator) ensurePeer(uuid [16]byte) {
+	if uuid == o.uuid {
+		return
+	}
+	if _, ok := o.state.Peers.Get(uuid); ok {
+		return // already known
+	}
+	addr, ok := o.state.node.OperatorAddr(uuid)
+	if !ok || addr == "" {
+		return // not registered yet; a later tick retries
+	}
+	ap, err := netip.ParseAddrPort(addr)
+	if err != nil {
+		o.lctx.Log().Warnf("peer %x bad underlay addr %q: %v", uuid, addr, err)
+		return
+	}
+	o.AddPeer(uuid, ap)
+	o.lctx.Log().Infof("discovered peer %x underlay %s (from Raft)", uuid, addr)
+}
+
+// routineRegisterSelf publishes this operator's underlay address into Raft,
+// retrying until it commits (the first attempts race leader election). Once
+// registered it stops; a re-register on address change would re-run this.
+func (o *Operator) routineRegisterSelf() {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-o.lctx.Done():
+			return
+		case <-ticker.C:
+		}
+		addr := o.state.Peers.Addr()
+		if addr == "" {
+			continue // underlay not bound
+		}
+		if err := o.state.node.RegisterOperator(o.uuid, addr, 5*time.Second); err != nil {
+			o.lctx.Log().Debugf("register self: %v", err)
+			continue
+		}
+		o.lctx.Log().Infof("registered underlay %s in Raft", addr)
+		return
 	}
 }
 

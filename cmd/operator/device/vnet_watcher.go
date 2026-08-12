@@ -38,7 +38,10 @@ func (o *Operator) startVNetWatcher(dir string) (*vnetWatcher, error) {
 		return nil, err
 	}
 	w := &vnetWatcher{op: o, dir: dir, fsw: fsw, stop: make(chan struct{})}
-	w.scanAll()
+	// The initial scan runs in the reconcile loop, not here: at Start() the Raft
+	// cluster may not have a leader yet, so a synchronous upsert would fail and
+	// never retry (the file won't change to re-trigger fsnotify). The reconcile
+	// loop re-scans until every file's version is reflected in the FSM.
 	go w.loop()
 	return w, nil
 }
@@ -72,10 +75,22 @@ func (w *vnetWatcher) loop() {
 	pending := make(map[string]time.Time)
 	tick := time.NewTicker(200 * time.Millisecond)
 	defer tick.Stop()
+
+	// Reconcile: periodically re-scan and upsert anything whose file version is
+	// ahead of the FSM. This drives the INITIAL load (deferred from Start until
+	// a leader exists) and heals transient leader loss — an upsert that failed
+	// with "not the leader" is retried on the next tick. Fast at first, then
+	// backs off to a slow heartbeat once everything is synced.
+	w.scanAll()
+	reconcile := time.NewTicker(1 * time.Second)
+	defer reconcile.Stop()
+
 	for {
 		select {
 		case <-w.stop:
 			return
+		case <-reconcile.C:
+			w.scanAll()
 		case ev, ok := <-w.fsw.Events:
 			if !ok {
 				return

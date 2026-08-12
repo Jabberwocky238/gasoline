@@ -40,6 +40,11 @@ type StaticOperatorConfig struct {
 	// nil leaves the operator on the pre-consensus preset allocator.
 	Raft *RaftConfig
 
+	// RootDir is the --root config directory (PRD §4.4): one YAML per vnet,
+	// watched with fsnotify. Empty disables the loader (tests / pure static
+	// setups pass vnets in-process).
+	RootDir string
+
 	Network  map[protocol.VNI_Ty]StaticOperatorVNetConfig
 	LogLevel logrus.Level
 

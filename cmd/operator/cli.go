@@ -3,11 +3,9 @@ package main
 import (
 	"encoding/base64"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/jabberwocky238/gasoline/cmd/operator/device"
-	"github.com/jabberwocky238/gasoline/protocol"
 	"github.com/jabberwocky238/gasoline/protocol/noise"
 	"github.com/sirupsen/logrus"
 )
@@ -27,7 +25,7 @@ const (
 	ParamLogLevel      = "log-level"
 	ParamKey           = "key" // operator static private key (base64); generated if empty
 	ParamListen        = "listen"
-	ParamNetwork       = "network"
+	ParamRoot          = "root" // config dir: one YAML per vnet, fsnotify-watched (PRD §4.4)
 	ParamRaftBind      = "raft-bind"
 	ParamRaftPeers     = "raft-peers"
 	ParamRaftBootstrap = "raft-bootstrap"
@@ -40,7 +38,7 @@ const (
 func RegisterOperatorCLIParam(params map[string][]string) (*operator.StaticOperatorConfig, error) {
 	for k := range params {
 		switch k {
-		case ParamOpListen, ParamLogLevel, ParamKey, ParamListen, ParamNetwork,
+		case ParamOpListen, ParamLogLevel, ParamKey, ParamListen, ParamRoot,
 			ParamRaftBind, ParamRaftPeers, ParamRaftBootstrap:
 		default:
 			return nil, fmt.Errorf("unknown parameter %q", k)
@@ -69,14 +67,10 @@ func RegisterOperatorCLIParam(params map[string][]string) (*operator.StaticOpera
 	if len(listens) == 0 {
 		listens = []string{"quic://:8443"}
 	}
-	nets := params[ParamNetwork]
-	if len(nets) == 0 {
-		nets = []string{"0:10.0.0.0/24"}
-	}
 
 	cfg := &operator.StaticOperatorConfig{
-		Network:    make(map[protocol.VNI_Ty]operator.StaticOperatorVNetConfig),
 		StaticPriv: staticPriv,
+		RootDir:    strings.TrimSpace(lastOr(params[ParamRoot], "")),
 	}
 
 	for _, raw := range listens {
@@ -89,19 +83,9 @@ func RegisterOperatorCLIParam(params map[string][]string) (*operator.StaticOpera
 
 	cfg.OpListenAddr = strings.TrimSpace(opListen)
 
-	for _, raw := range nets {
-		entry, err := parseNetworkEntry(raw)
-		if err != nil {
-			return nil, err
-		}
-		if _, dup := cfg.Network[entry.VNI]; dup {
-			return nil, fmt.Errorf("network: duplicate vni %s", entry.VNI)
-		}
-		cfg.Network[entry.VNI] = entry
-	}
-
-	// Fixed-IP bindings (pubkey -> IP) come from per-vnet config files loaded
-	// via --root (PRD §4.4), not from the command line.
+	// vnet definitions (segments/pool/keys, incl. fixed-IP bindings) come from
+	// the --root config dir (PRD §4.4), loaded + fsnotify-watched at runtime —
+	// not from the command line.
 
 	// Consensus (Raft) — enabled iff --raft-bind is given.
 	if bind := strings.TrimSpace(lastOr(params[ParamRaftBind], "")); bind != "" {
@@ -154,56 +138,6 @@ func lastOr(vs []string, fallback string) string {
 		return fallback
 	}
 	return vs[len(vs)-1]
-}
-
-// parseNetworkEntry parses '<vni>:<cidr>[:<pubkey_b64>,<pubkey_b64>...]'.
-//
-// The optional third segment is a comma-separated list of authorized client
-// static public keys (standard base64, 32 bytes each). An empty or absent list
-// means the VNI is open (no key check) — convenient for tests/benches; a
-// populated list locks the VNI to those identities.
-func parseNetworkEntry(raw string) (operator.StaticOperatorVNetConfig, error) {
-	raw = strings.TrimSpace(raw)
-	parts := strings.SplitN(raw, ":", 3)
-	if len(parts) < 2 {
-		return operator.StaticOperatorVNetConfig{}, fmt.Errorf("network entry %q: expected '<vni>:<cidr>[:<pubkey_b64>,...]'", raw)
-	}
-	vniU, err := strconv.ParseUint(strings.TrimSpace(parts[0]), 10, 32)
-	if err != nil {
-		return operator.StaticOperatorVNetConfig{}, fmt.Errorf("network entry %q: invalid vni: %w", raw, err)
-	}
-	cidr := strings.TrimSpace(parts[1])
-	if cidr == "" {
-		return operator.StaticOperatorVNetConfig{}, fmt.Errorf("network entry %q: empty cidr", raw)
-	}
-
-	var keys map[noise.PublicKey]struct{}
-	if len(parts) == 3 {
-		if list := strings.TrimSpace(parts[2]); list != "" {
-			keys = make(map[noise.PublicKey]struct{})
-			for _, k := range strings.Split(list, ",") {
-				k = strings.TrimSpace(k)
-				if k == "" {
-					continue
-				}
-				b, err := base64.StdEncoding.DecodeString(k)
-				if err != nil {
-					return operator.StaticOperatorVNetConfig{}, fmt.Errorf("network entry %q: bad pubkey %q: %w", raw, k, err)
-				}
-				pub, err := noise.PublicKeyFromSlice(b)
-				if err != nil {
-					return operator.StaticOperatorVNetConfig{}, fmt.Errorf("network entry %q: pubkey %q: %w", raw, k, err)
-				}
-				keys[pub] = struct{}{}
-			}
-		}
-	}
-
-	return operator.StaticOperatorVNetConfig{
-		VNI:            protocol.VNI_Ty(vniU),
-		CIDR:           cidr,
-		AuthorizedKeys: keys,
-	}, nil
 }
 
 // parseListenerSpec parses '<schema>://<addr>', e.g. 'quic://:8443'.

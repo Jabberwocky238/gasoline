@@ -226,6 +226,13 @@ func (n *Node) VNetVersion(vni protocol.VNI_Ty) (uint64, bool) {
 	return n.fsm.VNetVersion(vni)
 }
 
+// KeyAuthorized reports whether pubkey is granted on vni in the replicated key
+// table. Authoritative auth check when Raft is attached (see
+// meshState.KeyAuthorized).
+func (n *Node) KeyAuthorized(vni protocol.VNI_Ty, pubkey [32]byte) bool {
+	return n.fsm.KeyAuthorized(vni, pubkey)
+}
+
 // UpsertVNet proposes a VNetUpsert through Raft (used by the --root loader when
 // a file's version is newer than the FSM's).
 func (n *Node) UpsertVNet(c *VNetUpsert, timeout time.Duration) error {

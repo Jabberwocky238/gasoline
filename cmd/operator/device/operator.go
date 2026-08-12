@@ -40,13 +40,16 @@ type Operator struct {
 	clientListeners map[string]transport.Listener
 	state           *operatorState
 	hops            *hopTable
+	vnetW           *vnetWatcher
 }
 
 // vniResolver is the per-VNI handshake.VNIResolver implementation backed by an
 // operator's vniEntry. It is AUTH-ONLY: operator key pair + authorization
 // check. IP assignment is not here — see localAllocator / package datacom.
 type vniResolver struct {
+	vni        protocol.VNI_Ty
 	vn         *vniEntry
+	node       *consensus.Node // nil in the pre-consensus path
 	staticPriv noise.PrivateKey
 	staticPub  noise.PublicKey
 }
@@ -54,7 +57,15 @@ type vniResolver struct {
 func (r *vniResolver) ServerStatic() (noise.PrivateKey, noise.PublicKey) {
 	return r.staticPriv, r.staticPub
 }
-func (r *vniResolver) Authorized(pubkey noise.PublicKey) bool { return r.vn.authorized(pubkey) }
+
+// Authorized checks the Raft key table when consensus is attached (the
+// authoritative source for --root-loaded vnets), else the local set.
+func (r *vniResolver) Authorized(pubkey noise.PublicKey) bool {
+	if r.node != nil {
+		return r.node.KeyAuthorized(r.vni, pubkey)
+	}
+	return r.vn.authorized(pubkey)
+}
 
 func New(cfg *StaticOperatorConfig) (*Operator, error) {
 	logger := log.New()
@@ -101,11 +112,25 @@ func New(cfg *StaticOperatorConfig) (*Operator, error) {
 	mapper := func(vni protocol.VNI_Ty) (handshake.VNIResolver, error) {
 		state.mu.RLock()
 		vn, ok := state.vnets[vni]
+		node := state.node
 		state.mu.RUnlock()
 		if !ok {
-			return nil, fmt.Errorf("no config for vni %s", vni)
+			// A --root vnet known to Raft but not yet locally registered: create
+			// the local runtime container on demand so its clients are admitted.
+			if node != nil {
+				if _, known := node.VNetVersion(vni); known {
+					state.registerVNI(vni, nil)
+					state.mu.RLock()
+					vn = state.vnets[vni]
+					state.mu.RUnlock()
+					ok = vn != nil
+				}
+			}
+			if !ok {
+				return nil, fmt.Errorf("no config for vni %s", vni)
+			}
 		}
-		return &vniResolver{vn: vn, staticPriv: state.staticPriv, staticPub: state.staticPub}, nil
+		return &vniResolver{vni: vni, vn: vn, node: node, staticPriv: state.staticPriv, staticPub: state.staticPub}, nil
 	}
 
 	if len(cfg.ClientListeners) == 0 {
@@ -260,6 +285,12 @@ func (o *Operator) Start() error {
 	if o.state.node != nil {
 		go o.routineRouteSync()
 	}
+	// Load vnets from --root and keep them synced to Raft (PRD §4.4).
+	if w, err := o.startVNetWatcher(o.cfg.RootDir); err != nil {
+		o.lctx.Log().Warnf("vnet watcher: %v", err)
+	} else {
+		o.vnetW = w
+	}
 	return nil
 }
 
@@ -302,6 +333,7 @@ func (o *Operator) routineRouteSync() {
 
 func (o *Operator) Close() error {
 	o.lctx.Cancel()
+	o.vnetW.close()
 	closeAll(o.clientListeners)
 	if o.state != nil {
 		_ = o.state.Peers.Close()

@@ -449,6 +449,21 @@ func (m *meshState) VNetCount() int {
 	return len(m.VNets)
 }
 
+// KeyAuthorized reports whether pubkey is granted on vni in the replicated key
+// table (PRD §3.2 step 3 — authorization is an FSM lookup). This is the
+// authoritative check once Raft is attached; the local authorizedKeys set is
+// only used in the pre-consensus path.
+func (m *meshState) KeyAuthorized(vni protocol.VNI_Ty, pubkey [32]byte) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	vn, ok := m.VNets[vni]
+	if !ok {
+		return false
+	}
+	_, ok = vn.AuthKeys[pubkey]
+	return ok
+}
+
 // VNetVersion returns the stored config version for a vnet, and whether the
 // vnet exists. fsnotify uses it to decide whether a --root file is newer than
 // what Raft holds (PRD §4.4).

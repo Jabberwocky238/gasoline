@@ -28,7 +28,7 @@ func main() {
 	collect(ParamLogLevel, "log level: trace, debug, info, warn, error (default info)")
 	collect(ParamKey, "operator static private key, base64 (generated if unset)")
 	collect(ParamListen, "client listener '<schema>://<addr>' (repeatable; default quic://:8443)")
-	collect(ParamNetwork, "vnet entry '<vni>:<cidr>[:<pubkey_b64>,...]' (repeatable; default 0:10.0.0.0/24)")
+	collect(ParamRoot, "config dir: one YAML per vnet, fsnotify-watched (PRD §4.4)")
 	collect(ParamRaftBind, "this node's Raft QUIC listen address (enables consensus)")
 	collect(ParamRaftPeers, "Raft cluster members 'id@host:port;id2@host:port2'")
 	collect(ParamRaftBootstrap, "'true' on exactly one node to seed a fresh cluster")
@@ -130,9 +130,10 @@ func printConfig(cfg *operator.StaticOperatorConfig, ipcSocket string) {
 	for _, l := range cfg.ClientListeners {
 		fmt.Printf("  - %s://%s\n", l.Transport, l.Addr)
 	}
-	fmt.Println("network:")
-	for vni, n := range cfg.Network {
-		fmt.Printf("  - vni=%s cidr=%s keys=%d\n", vni, n.CIDR, len(n.AuthorizedKeys))
+	if cfg.RootDir != "" {
+		fmt.Printf("root:      %s (vnets loaded + fsnotify-watched)\n", cfg.RootDir)
+	} else {
+		fmt.Println("root:      (none)")
 	}
 	if cfg.Raft != nil {
 		fmt.Printf("raft:      bind=%s peers=%d bootstrap=%v\n",

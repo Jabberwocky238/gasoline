@@ -23,7 +23,7 @@ func pair(t *testing.T) (client, pe *noise.Session) {
 	}
 	// PE reconstructs from Raft-stored keys: seals PE->client (s2c), opens
 	// client->PE (c2s).
-	pe, err = noise.SessionFromKeys(s2c, c2s)
+	pe, err = noise.SessionFromKeys(s2c, c2s, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -180,6 +180,24 @@ func New(cfg *StaticOperatorConfig) (*Operator, error) {
 
 func (o *Operator) UUID() [16]byte { return o.uuid }
 
+// operatorTag returns this operator's 16-bit counter-partition tag (PRD §7.3):
+// a stable non-zero id derived from the UUID, OR'd into the high bits of every
+// PE->client send counter so two operators sharing a session's key never reuse
+// an AEAD nonce. Tag 0 is reserved (client->PE direction), so a UUID hashing to
+// 0 is bumped to 1. A rare 16-bit collision only degrades two colliding
+// operators to a shared replay window, never a nonce reuse across the mesh
+// beyond that pair — acceptable.
+func (o *Operator) operatorTag() uint16 {
+	t := uint16(o.uuid[0])<<8 | uint16(o.uuid[1])
+	for i := 2; i < 16; i += 2 {
+		t ^= uint16(o.uuid[i])<<8 | uint16(o.uuid[i+1])
+	}
+	if t == 0 {
+		t = 1
+	}
+	return t
+}
+
 // StaticPub returns the operator's Noise static public key. Clients need it
 // (out of band) to run the IK handshake against this operator.
 func (o *Operator) StaticPub() noise.PublicKey { return o.state.staticPub }
@@ -438,6 +456,11 @@ func (o *Operator) routineAcceptClients(tp string, ln transport.Listener) {
 			continue
 		}
 
+		// Stamp the home session with this operator's tag so its PE->client data
+		// frames occupy this operator's counter sub-space (PRD §7.3), disjoint
+		// from any operator the client later hops to. Control-plane frames used
+		// SealAt (explicit counter), unaffected.
+		acc.Session.SetOperatorTag(o.operatorTag())
 		cp := newPeerClient(acc.Conn, sc, acc.Session)
 		vn, err := o.state.addClient(cp)
 		if err != nil {

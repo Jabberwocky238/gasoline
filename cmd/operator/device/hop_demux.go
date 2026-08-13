@@ -163,7 +163,7 @@ func (o *Operator) demuxHoppedQUIC(datagram []byte, sendFrame func([]byte) error
 		return false
 	}
 
-	entry := o.hops.getOrCreateQUIC(tag, keys, o.state.nextSessionIndex, sendFrame)
+	entry := o.hops.getOrCreateQUIC(tag, keys, o.state.nextSessionIndex, o.operatorTag(), sendFrame)
 	// Keep the reply path fresh: a later hop to a new connection updates it.
 	entry.qconn.setSender(sendFrame)
 
@@ -204,7 +204,7 @@ func (o *Operator) demuxHopped(hl transport.HoppableListener, src netip.AddrPort
 		return false // unknown tag → treat as a new handshake
 	}
 
-	entry := o.hops.getOrCreate(hl, tag, keys, o.state.nextSessionIndex)
+	entry := o.hops.getOrCreate(hl, tag, keys, o.state.nextSessionIndex, o.operatorTag())
 	entry.conn.setDst(src)
 
 	// Decrypt with the session's C2SKey (client->PE). A tag collision or forged
@@ -239,17 +239,17 @@ func (o *Operator) demuxHopped(hl transport.HoppableListener, src netip.AddrPort
 // getOrCreate returns the hop entry for tag, building the reconstructed session
 // (seal=S2CKey, open=C2SKey) and its hopped conn on first sight. nextIndex mints
 // the local session index for the hopped client (avoids colliding on index 0).
-func (t *hopTable) getOrCreate(hl transport.HoppableListener, tag datacom.SessionTag, keys consensus.SessionKeys, nextIndex func() uint32) *hoppedEntry {
+func (t *hopTable) getOrCreate(hl transport.HoppableListener, tag datacom.SessionTag, keys consensus.SessionKeys, nextIndex func() uint32, opTag uint16) *hoppedEntry {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if e, ok := t.byTag[tag]; ok {
 		return e
 	}
-	sess, err := noise.SessionFromKeys(keys.S2CKey, keys.C2SKey)
+	sess, err := noise.SessionFromKeys(keys.S2CKey, keys.C2SKey, opTag)
 	if err != nil {
 		// Should not happen (keys are valid 32-byte); return a stub that will
 		// fail Open and cause the caller to decline.
-		sess, _ = noise.SessionFromKeys([32]byte{}, [32]byte{})
+		sess, _ = noise.SessionFromKeys([32]byte{}, [32]byte{}, opTag)
 	}
 	conn := &hoppedConn{ln: hl, sess: sess, tag: tag}
 	sc := &protocol.SessionContext{
@@ -266,15 +266,15 @@ func (t *hopTable) getOrCreate(hl transport.HoppableListener, tag datacom.Sessio
 
 // getOrCreateQUIC is the QUIC analogue of getOrCreate: the reply path is a
 // per-connection sendFrame closure rather than a shared socket.
-func (t *hopTable) getOrCreateQUIC(tag datacom.SessionTag, keys consensus.SessionKeys, nextIndex func() uint32, send func([]byte) error) *hoppedEntry {
+func (t *hopTable) getOrCreateQUIC(tag datacom.SessionTag, keys consensus.SessionKeys, nextIndex func() uint32, opTag uint16, send func([]byte) error) *hoppedEntry {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if e, ok := t.byTag[tag]; ok {
 		return e
 	}
-	sess, err := noise.SessionFromKeys(keys.S2CKey, keys.C2SKey)
+	sess, err := noise.SessionFromKeys(keys.S2CKey, keys.C2SKey, opTag)
 	if err != nil {
-		sess, _ = noise.SessionFromKeys([32]byte{}, [32]byte{})
+		sess, _ = noise.SessionFromKeys([32]byte{}, [32]byte{}, opTag)
 	}
 	qconn := &quicHoppedConn{sess: sess, tag: tag, send: send, last: time.Now()}
 	sc := &protocol.SessionContext{

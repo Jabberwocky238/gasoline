@@ -118,29 +118,29 @@ start_cl(){  # <ns> <priv> <endpoint-ip> <tun>
 }
 
 get_ip(){ sudo ip netns exec $1 ip -4 addr show $2 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1; }
+alive(){ [ -n "$(sudo ip netns pids $1 2>/dev/null)" ]; }
 
-log "4. 起 3 个 client（A→op0, B→op1, C→op2，各建真 TUN）；失败自动重启（等授权全集群复制）"
-# 每个 client 独立重试：若 6s 内没拿到 TUN IP，杀掉重起，最多 4 轮。
-start_client_until_ip(){  # <ns> <priv> <endpoint-ip> <tun>
-  local ns=$1 priv=$2 ip=$3 tun=$4
-  for round in 1 2 3 4; do
-    sudo ip netns exec $ns "$CL" \
-      --endpoint 10.99.0.$ip:18000 --transport udp --vni 200 \
-      --key "$priv" --server-pub "$OP_PUB" --tun $tun --log-level info \
-      >> "$LOG" 2>&1 &
-    for w in 1 2 3 4 5 6; do
-      sleep 1
-      [ -n "$(get_ip $ns $tun)" ] && return 0
-    done
-    # this round failed; kill the client in that ns and retry
-    sudo ip netns pids $ns 2>/dev/null | xargs -r sudo kill 2>/dev/null
-    sleep 1
+log "4. 起 3 个 client（A→op0, B→op1, C→op2，各建真 TUN）"
+# 每个 client 独立起：正常握手秒级。快速轮询(0.2s)拿 IP；只有 client 进程真的退出了
+# (授权尚未复制到该 follower operator) 才重起，最多等 15s。不再固定长 sleep。
+run_client(){  # <ns> <priv> <endpoint-ip> <tun>
+  local ns=$1 priv=$2 ip=$3 tun=$4 deadline=$(( $(date +%s) + 15 ))
+  sudo ip netns exec $ns "$CL" --endpoint 10.99.0.$ip:18000 --transport udp --vni 200 \
+    --key "$priv" --server-pub "$OP_PUB" --tun $tun --log-level info >> "$LOG" 2>&1 &
+  while [ $(date +%s) -lt $deadline ]; do
+    sleep 0.2
+    [ -n "$(get_ip $ns $tun)" ] && return 0
+    if ! alive $ns; then   # client 退出了（握手失败）→ 稍等授权复制后重起
+      sleep 0.5
+      sudo ip netns exec $ns "$CL" --endpoint 10.99.0.$ip:18000 --transport udp --vni 200 \
+        --key "$priv" --server-pub "$OP_PUB" --tun $tun --log-level info >> "$LOG" 2>&1 &
+    fi
   done
   return 1
 }
-start_client_until_ip gaso-ca "$A_PRIV" 1 gatun-a &
-start_client_until_ip gaso-cb "$B_PRIV" 2 gatun-b &
-start_client_until_ip gaso-cc "$C_PRIV" 3 gatun-c &
+run_client gaso-ca "$A_PRIV" 1 gatun-a &
+run_client gaso-cb "$B_PRIV" 2 gatun-b &
+run_client gaso-cc "$C_PRIV" 3 gatun-c &
 wait
 
 A_IP=$(get_ip gaso-ca gatun-a); B_IP=$(get_ip gaso-cb gatun-b); C_IP=$(get_ip gaso-cc gatun-c)
